@@ -69,10 +69,13 @@ ROBOT_OWNER = "operator"
 
 
 def _terminate(proc: subprocess.Popen) -> None:
-    """End a harness run and any process it started (each run has its own process group)."""
+    """End a harness run and any process it started (its whole process tree)."""
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:  # the run already exited
+        if os.name == "nt":  # os.killpg is POSIX-only; taskkill /T takes the launcher cmd and node down together
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=10)
+        else:
+            os.killpg(proc.pid, signal.SIGTERM)
+    except OSError:  # the run already exited
         pass
 
 
@@ -330,7 +333,8 @@ class HarnessChat:
             agent.cwd.mkdir(parents=True, exist_ok=True)
             proc = agent.proc = subprocess.Popen(args, cwd=agent.cwd, env=env, stdin=subprocess.PIPE,
                                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                                                 start_new_session=True)
+                                                 encoding="utf-8", errors="replace",  # dsh speaks UTF-8; the Windows
+                                                 start_new_session=True)  # locale (GBK) would kill the reader
             proc.stdin.write((agent.brief if first else agent.follow_up) + text)
             proc.stdin.close()
             err_reader = threading.Thread(target=lambda: stderr_tail.extend(proc.stderr), daemon=True)

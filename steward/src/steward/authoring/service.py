@@ -13,6 +13,7 @@ import copy
 import io
 import json
 import math
+from dataclasses import dataclass
 from pathlib import Path
 
 import mujoco
@@ -350,8 +351,26 @@ KITCHEN_ASSETS = {
 
 
 IMAGES = Path(__file__).resolve().parent.parent / "assets" / "images"
-PUZZLE_IMAGES = {"cat": ("cat.jpg", "猫"), "greatwall": ("great-wall.jpg", "长城")}
-PUZZLE_GRID = 3
+
+
+@dataclass(frozen=True)
+class Puzzle:
+    """One picture puzzle: its photo, the subject named in the task, pieces per side and the table it lies on."""
+
+    image: str
+    subject: str
+    grid: int
+    table_m: tuple[float, float] = (2.0, 1.0)
+
+
+# A pour spot keeps the box half side + the robot's 0.25 m pour spill from every table edge, so a 4 × 4
+# box needs a table at least 1.04 m deep; the robot reaches 0.59 m in from the edge it docks at, so a
+# table up to 1.18 m deep is reachable everywhere from its two long sides.
+PUZZLES = {
+    "cat": Puzzle("cat.jpg", "猫", 3),
+    "greatwall": Puzzle("great-wall.jpg", "长城", 3),
+    "dog": Puzzle("dog.jpg", "狗", 4, (2.4, 1.15)),
+}
 PUZZLE_PIECE_M = 0.115
 PUZZLE_TASK = ("餐桌上有一盒拼图，盒盖上印着拼好后的完整图案（{subject}）。盒子上写着：共 {count} 片，"
                "拼好后 {size_cm:.1f} 厘米见方，和盒盖上印的图一样大。打开盒子，把盒子里的拼图块倒在桌上，"
@@ -368,7 +387,7 @@ def png_b64(image, size: int) -> str:
     return base64.b64encode(buf.getvalue()).decode()
 
 
-def puzzle_textures(image_file: str, lid_m: float, grid: int = PUZZLE_GRID) -> tuple[str, list[list[str]]]:
+def puzzle_textures(image_file: str, lid_m: float, grid: int) -> tuple[str, list[list[str]]]:
     """The lid print and the ``grid`` × ``grid`` pieces (row 0 at the top) as textures. The lid
     shows the picture as large as the finished puzzle, centred on a plain border across ``lid_m``."""
     from PIL import Image
@@ -392,12 +411,15 @@ def puzzle_spec(name: str, image: str, seed: int) -> tuple[list[tuple[str, str, 
 
     The goal states where every piece lies relative to its right and lower neighbour when the
     picture is complete (offset in the piece's frame, upright, same heading)."""
-    n = PUZZLE_GRID
+    puzzle = PUZZLES[image]
+    n = puzzle.grid
+    table_w, table_d = puzzle.table_m
+    table = f"puzzle-table-{round(table_w * 100)}x{round(table_d * 100)}"
     box_w = n * PUZZLE_PIECE_M + (n + 1) * 0.012 + 0.02
     lid_w = box_w + 0.02
-    full, pieces = puzzle_textures(PUZZLE_IMAGES[image][0], lid_w)
+    full, pieces = puzzle_textures(puzzle.image, lid_w, n)
     assets = [
-        ("puzzle-table", "dining_table", {"width": 2.0, "depth": 1.0}),
+        (table, "dining_table", {"width": table_w, "depth": table_d}),
         (f"{name}-box", "open_box", {"width": box_w, "depth": box_w}),
         (f"{name}-lid", "printed_board", {"width": lid_w, "depth": lid_w, "thickness": 0.008,
                                           "texture": full, "mass": 0.08, "category": "lid"}),
@@ -411,16 +433,18 @@ def puzzle_spec(name: str, image: str, seed: int) -> tuple[list[tuple[str, str, 
     order = rng.permutation(n * n)
     turns = rng.integers(0, 4, n * n)
     pitch = PUZZLE_PIECE_M + 0.012
+    middle = (n - 1) / 2
     entities = [
         {"id": "w:room", "asset": "kitchen-room", "at": {"x": 0.0, "y": 0.0}},
-        {"id": "w:table-1", "asset": "puzzle-table", "at": {"x": 0.5, "y": -0.6}},
-        {"id": "w:box", "asset": f"{name}-box", "on": "w:table-1", "offset": [-0.7, 0.15]},
+        {"id": "w:table-1", "asset": table, "at": {"x": 0.5, "y": -0.6}},
+        {"id": "w:box", "asset": f"{name}-box", "on": "w:table-1", "offset": [0.3 - table_w / 2, 0.15]},
     ]
     for slot, k in enumerate(order):
         r, c = divmod(int(k), n)
         sr, sc = divmod(slot, n)
         entities.append({"id": f"w:piece-{r}{c}", "asset": f"{name}-piece-{r}{c}", "in": "w:box",
-                         "offset": [(sc - 1) * pitch, (1 - sr) * pitch], "yaw": float(turns[slot]) * math.pi / 2})
+                         "offset": [(sc - middle) * pitch, (middle - sr) * pitch],
+                         "yaw": float(turns[slot]) * math.pi / 2})
     entities += [
         {"id": "w:lid", "asset": f"{name}-lid", "on": "w:box", "offset": [0.0, 0.0]},
         {"id": "w:robot-1", "asset": "steward-bot", "at": {"x": -1.6, "y": -1.3, "yaw": 0.0}},
@@ -440,9 +464,9 @@ def puzzle_spec(name: str, image: str, seed: int) -> tuple[list[tuple[str, str, 
 
 
 def build_puzzle_scenarios(service: AuthoringService) -> list[str]:
-    """Publish the picture-puzzle assets and save the ``puzzle-cat`` and ``puzzle-greatwall`` scenarios."""
+    """Publish the picture-puzzle assets and save one ``puzzle-<name>`` scenario per entry of ``PUZZLES``."""
     names = []
-    for seed, (image, (_, subject)) in enumerate(PUZZLE_IMAGES.items()):
+    for seed, (image, puzzle) in enumerate(PUZZLES.items()):
         name = f"puzzle-{image}"
         assets, spec, goal = puzzle_spec(name, image, seed)
         for asset, generator, params in assets:
@@ -452,8 +476,8 @@ def build_puzzle_scenarios(service: AuthoringService) -> list[str]:
             service.publish_asset(asset, created["template"], meta={"generator": generator})
         service.compose_scene(spec)
         service.save_scenario({"name": name, "scene": name, "robots": ["w:robot-1"],
-                               "task": PUZZLE_TASK.format(subject=subject, count=PUZZLE_GRID**2,
-                                                          size_cm=PUZZLE_GRID * PUZZLE_PIECE_M * 100),
+                               "task": PUZZLE_TASK.format(subject=puzzle.subject, count=puzzle.grid**2,
+                                                          size_cm=puzzle.grid * PUZZLE_PIECE_M * 100),
                                "goal": goal, "phase": "phase0"})
         names.append(name)
     return names

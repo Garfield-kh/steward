@@ -25,7 +25,7 @@ from steward.ego.estimator import SELF_ID, EgoEstimator
 from steward.ego.roles import RoleConfig, assign_roles
 from steward.ego.skills import MotionConfig, SkillExecutor
 from steward.ego.view import EgoViewRenderer
-from steward.math3d import wrap_angle, yaw_from_quat
+from steward.math3d import pose_compose, pose_inverse, quat_rotate, wrap_angle, yaw_from_quat
 from steward.net import HttpError, call
 from steward.scene.schema import SceneState
 from steward.viewloop import ViewLoop
@@ -105,6 +105,35 @@ MATCH_REFERENCE_CELLS_MAX = 96  # cells along a reference side for match_face
 MATCH_MIN_COVERAGE = 0.5  # share of a face that must have been seen to match it
 ACTIVITY_MAX = 300
 PLAN_STEP_STATES = frozenset({"pending", "active", "done", "failed", "skipped"})
+VIEW_HINT_COVERAGE = 0.95  # a face seen less than this gets a hint saying why
+
+
+def view_hint(cam: dict, intrinsics: dict, centre: np.ndarray, top: float, range_m: float) -> str:
+    """Why the camera at ``cam`` (looking along its +x) does not see all of a top face at
+    ``centre`` whose top is at height ``top``: behind or beside the view, below it (too close for the
+    camera's downward reach at that height), farther than ``range_m``, or hidden or cut off."""
+    x, y, z = pose_compose(pose_inverse(cam), {"p": [float(v) for v in centre], "q": [1.0, 0.0, 0.0, 0.0]})["p"]
+    half_v = math.radians(intrinsics["fovy"]) / 2
+    half_h = math.atan(math.tan(half_v) * intrinsics["width"] / intrinsics["height"])
+    ahead = math.hypot(float(centre[0]) - cam["p"][0], float(centre[1]) - cam["p"][1])
+    if x <= 0.05:
+        return "it is behind the camera: turn towards it"
+    side = math.atan2(y, x)
+    if abs(side) > half_h:
+        return (f"it lies {math.degrees(abs(side)):.0f}° to the {'left' if side > 0 else 'right'} of the camera's "
+                f"{math.degrees(half_h):.0f}° half view: turn towards it")
+    if math.atan2(z, x) < -half_v:
+        forward = quat_rotate(cam["q"], [1.0, 0.0, 0.0])
+        lowest = math.asin(max(-1.0, min(1.0, -forward[2]))) + half_v
+        nearest = (cam["p"][2] - top) / math.tan(lowest) if lowest < math.pi / 2 else 0.0
+        return (f"too close: {ahead:.2f} m ahead of the camera it lies below the view, which reaches a surface at "
+                f"this height only from {nearest:.2f} m ahead: step back")
+    if math.atan2(z, x) > half_v:
+        return "it lies above the camera's view"
+    distance = math.dist(cam["p"], [float(v) for v in centre])
+    if distance > range_m:
+        return f"{distance:.2f} m from the camera, farther than {range_m:.2f} m: move closer"
+    return "in view but hidden by something nearer or cut off at the image edge: look from another side"
 
 class EgoRuntime:
     def __init__(self, link: RobotLink, robot_model: dict, config: RuntimeConfig | None = None,
@@ -416,7 +445,8 @@ class EgoRuntime:
 
         :param entity: Ego-State object id.
         :param px: grid size, 4 to 64.
-        :returns: ``{entity, px, yawDeg, sizeM, coverage, rows, worldRows, worldTurnDeg, stamp}``.
+        :returns: ``{entity, px, yawDeg, sizeM, coverage, rows, worldRows, worldTurnDeg, stamp}``, and
+            ``hint`` (:func:`view_hint`) when less than :data:`VIEW_HINT_COVERAGE` of the face is seen.
         :raises KeyError: unknown object; :raises ValueError: ``px`` out of range."""
         if not 4 <= px <= 64:
             raise ValueError("px must be between 4 and 64")
@@ -430,11 +460,15 @@ class EgoRuntime:
             cam = self.estimator.camera_pose(frame["header"]["odometry"])
             self._look_at_faces(frame, [entity])
         rows = top_face(frame, cam, centre, size, yaw, top, px)
-        seen = sum(cell is not None for row in rows for cell in row)
+        coverage = sum(cell is not None for row in rows for cell in row) / (px * px)
         world_rows, turn = world_up_face(rows, yaw)
+        hint = {} if coverage >= VIEW_HINT_COVERAGE else {"hint": self._view_hint(cam, centre, top)}
         return {"entity": entity, "px": px, "yawDeg": round(math.degrees(yaw), 2),
-                "sizeM": [round(float(v), 3) for v in size], "coverage": round(seen / (px * px), 3),
+                "sizeM": [round(float(v), 3) for v in size], "coverage": round(coverage, 3), **hint,
                 "rows": rows, "worldRows": world_rows, "worldTurnDeg": turn, "stamp": frame["header"]["stamp"]}
+
+    def _view_hint(self, cam: dict, centre: np.ndarray, top: float) -> str:
+        return view_hint(cam, self.estimator._camera["intrinsics"], centre, top, self.config.appearance_range_m)
 
     def _look_at_faces(self, frame: dict, ids: list[str] | None = None) -> None:
         """Remember the top faces one decoded RGB-D frame shows (the caller holds the lock): of
@@ -499,20 +533,25 @@ class EgoRuntime:
             if missing:
                 raise KeyError(f"unknown object {missing[0]!r}")
             self._look_at_faces(frame, [*entities, reference])
+            cam = est.camera_pose(frame["header"]["odometry"])
+
+            def why(track) -> str:
+                return self._view_hint(cam, track.pos, track.top())
+
             ref_track = est.tracks[reference]
             ref = ref_track.appearance
             if ref is None or ref.stale or ref.coverage < MATCH_MIN_COVERAGE:
                 raise ValueError(f"the face of {reference} is not known well enough "
-                                 f"({0 if ref is None else round(ref.coverage, 2)} seen); look at it from within about a metre")
+                                 f"({0 if ref is None else round(ref.coverage, 2)} seen): {why(ref_track)}")
             ref_rgb, ref_size, ref_yaw = ref.rgb.copy(), ref_track.size.copy(), float(ref_track.yaw)
             faces = {}
             for eid in entities:
                 track = est.tracks[eid]
                 known = track.appearance
                 if known is None or known.stale:
-                    faces[eid] = "its face has not been seen since it was last put down; look at it from within about a metre"
+                    faces[eid] = f"its face has not been seen since it was last put down: {why(track)}"
                 elif known.coverage < MATCH_MIN_COVERAGE:
-                    faces[eid] = f"only {known.coverage:.0%} of its face has been seen; look at it from closer or another side"
+                    faces[eid] = f"only {known.coverage:.0%} of its face has been seen: {why(track)}"
                 else:
                     faces[eid] = (known.rgb.copy(), track.size.copy(), round(est.stamp - known.stamp, 1), known.spread)
         results = []

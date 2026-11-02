@@ -22,7 +22,7 @@ from steward.ego.estimator import EgoEstimator, Track
 from steward.ego.perception import top_face
 from steward.ego.runtime import EgoRuntime, RobotLink
 from steward.ego.server import ego_api
-from steward.math3d import quat_rotate
+from steward.math3d import quat_rotate, wrap_angle
 from steward.mission import _approach_to_observe, _explore
 from steward.net import call
 from steward.scene.schema import SceneState
@@ -35,12 +35,31 @@ def _scenario(kitchen_root, name="puzzle-cat") -> dict:
     return AuthoringService(kitchen_root).load_scenario(name)
 
 
-def test_both_puzzles_are_scenarios_at_phase0_with_an_arrangement_goal(kitchen_root):
-    for name in ("puzzle-cat", "puzzle-greatwall"):
+def test_every_puzzle_is_a_scenario_at_phase0_with_an_arrangement_goal(kitchen_root):
+    for name, pieces in (("puzzle-cat", 9), ("puzzle-greatwall", 9), ("puzzle-dog", 16)):
         scenario = _scenario(kitchen_root, name)
         assert scenario["phase"] == "phase0" and scenario["goal"]["kind"] == "relative-poses"
         ids = {e["id"] for e in scenario["sceneState"]["entities"]}
-        assert {"w:box", "w:lid", "w:table-1"} <= ids and sum(i.startswith("w:piece-") for i in ids) == 9
+        assert {"w:box", "w:lid", "w:table-1"} <= ids and sum(i.startswith("w:piece-") for i in ids) == pieces
+        side = math.isqrt(pieces)
+        assert len(scenario["goal"]["constraints"]) == 2 * side * (side - 1)
+        assert f"共 {pieces} 片" in scenario["task"]
+
+
+def test_the_four_by_four_pieces_lie_inside_their_box_and_the_pour_spot_fits_the_table(kitchen_root):
+    from steward.ego.esim import EsimConfig
+
+    sim = WorldSim(_scenario(kitchen_root, "puzzle-dog")["sceneState"])
+    sim.step_seconds(0.5)
+    box = sim._entity_pose("w:box")["p"]
+    half_box = (4 * PUZZLE_PIECE_M + 5 * 0.012 + 0.02) / 2
+    for r in range(4):
+        for c in range(4):
+            p = sim._entity_pose(f"w:piece-{r}{c}")["p"]
+            assert abs(p[0] - box[0]) < half_box and abs(p[1] - box[1]) < half_box
+    table = next(e for e in _scenario(kitchen_root, "puzzle-dog")["sceneState"]["entities"] if e["id"] == "w:table-1")
+    assert table["asset"]["id"] == "puzzle-table-240x115"
+    assert 1.15 / 2 > half_box + EsimConfig().pour_spill
 
 
 def test_a_printed_board_shows_its_picture_on_top_with_image_up_towards_plus_y(kitchen_root):
@@ -132,6 +151,73 @@ def test_a_lid_lying_on_a_box_is_not_folded_into_it():
     assert set(est.tracks) == {"e:1", "e:2"}
 
 
+def test_what_lies_in_a_held_box_moves_with_it_until_it_is_poured_out():
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    est.odometry = {"x": 0.0, "y": 0.0, "yaw": 0.0, "sigma": {"pos": 0.003, "yaw": 0.003}}
+    est.joints = {"lift": 0.75, "reach": 0.3}
+    grip = est.gripper_position()
+    box = est.tracks["e:2"] = _track("e:2", "box", [grip[0], grip[1], 0.775], [0.54, 0.54, 0.05])
+    box.annotated_affordances = ["graspable", "pourable"]
+    piece = est.tracks["e:7"] = _track("e:7", "puzzle_piece", [grip[0] + 0.19, grip[1] - 0.06, 0.76],
+                                       [0.115, 0.115, 0.006])
+    other = est.tracks["e:8"] = _track("e:8", "puzzle_piece", [grip[0] + 0.7, grip[1], 0.753], [0.115, 0.115, 0.006])
+    assert est.support_of(piece) is box
+    est.mark_held("e:2")
+    est.joints = {"lift": 0.95, "reach": 0.3}
+    est._follow_held()
+    assert piece.carried and piece.pos[2] == pytest.approx(0.96) and est.support_of(piece) is box
+    assert not other.carried and other.pos[2] == pytest.approx(0.753), "only what lies in the box moves"
+    est._clear_held()
+    assert not piece.carried and est.support_of(piece) is box, "put down without pouring, it stays in the box"
+
+    est.mark_held("e:2")
+    est.joints = {"lift": 0.95, "reach": 0.3, "wrist_roll": est.config.poured_roll + 0.1}
+    est._follow_held()
+    assert "e:7" not in est.tracks and "e:8" in est.tracks
+    assert est.dropped[-1]["id"] == "e:7" and est.dropped[-1]["reason"].startswith("poured out of e:2")
+
+
+def test_a_face_the_camera_cannot_see_is_explained_from_the_camera_geometry():
+    from steward.ego.runtime import view_hint
+
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    est.odometry = {"x": 0.0, "y": 0.0, "yaw": 0.0, "sigma": {"pos": 0.003, "yaw": 0.003}}
+    cam = est.camera_pose()
+    intrinsics = est._camera["intrinsics"]
+    lowest = math.radians(30.0 + intrinsics["fovy"] / 2)  # the head camera looks 30° down
+
+    def hint(dx, dy):
+        return view_hint(cam, intrinsics, np.array([cam["p"][0] + dx, cam["p"][1] + dy, 0.753]), 0.756, 1.5)
+
+    near = hint(0.2, 0.0)
+    assert near.startswith("too close") and f"{(cam['p'][2] - 0.756) / math.tan(lowest):.2f} m ahead" in near
+    assert "to the left" in hint(0.5, 1.0) and hint(-0.5, 0.0).startswith("it is behind")
+    assert hint(0.8, 0.0).startswith("in view but hidden")
+    assert "farther than 1.50 m" in hint(1.8, 0.0)
+
+
+def test_a_settled_heading_turns_only_after_several_views_in_a_row_show_the_turn():
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    est.stamp = 1.0
+    piece = est.tracks["e:5"] = _track("e:5", "puzzle_piece", [0.6, 0.0, 0.753], [0.115, 0.115, 0.006], yaw=math.pi)
+    det = {"category": "puzzle_piece", "size": [0.115, 0.115, 0.006]}
+    turned = -math.pi / 2
+
+    def view(yaw):
+        est._fuse(piece, det, piece.pos.copy(), yaw, 0.02)
+
+    for yaw in (turned, math.pi, turned, turned, math.pi):
+        view(yaw)
+        assert abs(wrap_angle(piece.yaw - math.pi)) < 0.05, "a neighbour's view now and then leaves the heading"
+    for _ in range(est.config.yaw_confirm_views):
+        view(turned)
+    assert abs(wrap_angle(piece.yaw - turned)) < 0.05, "a turn seen in every view is followed"
+
+    piece.yaw_var = 0.3**2  # just put down by the robot: its heading follows the first view
+    view(0.0)
+    assert abs(piece.yaw) < 0.1
+
+
 def test_a_detection_of_a_neighbour_does_not_take_the_track_of_the_piece_beside_it():
     from steward.math3d import pose_compose, pose_inverse
 
@@ -170,8 +256,13 @@ def test_top_face_reads_a_face_in_the_object_frame_and_hides_what_is_occluded():
     assert f > 0
 
 
-def test_the_robot_takes_off_the_lid_and_pours_the_pieces_out_onto_the_table(kitchen_root, tmp_path):
-    host = StewardHost(kitchen_root, scenario="puzzle-cat", speed=math.inf, seed=3, run_dir=pathlib.Path(tmp_path)).start()
+@pytest.mark.parametrize(("scenario", "side", "lid_at", "pour_at", "min_out"), [
+    ("puzzle-cat", 3, [0.72, 0.22], [0.2, 0.0], 7),
+    ("puzzle-dog", 4, [0.85, 0.2], [0.0, -0.03], 12),
+])
+def test_the_robot_takes_off_the_lid_and_pours_the_pieces_out_onto_the_table(kitchen_root, tmp_path, scenario, side,
+                                                                              lid_at, pour_at, min_out):
+    host = StewardHost(kitchen_root, scenario=scenario, speed=math.inf, seed=3, run_dir=pathlib.Path(tmp_path)).start()
     assert host.phase == "phase0", "the scenario declares its level"
     runtime = EgoRuntime(RobotLink(host.robot_servers["w:robot-1"].url), steward_bot().to_dict())
     api = ego_api(runtime).start()
@@ -198,11 +289,11 @@ def test_the_robot_takes_off_the_lid_and_pours_the_pieces_out_onto_the_table(kit
             lid = track_of("w:lid", 0.3)
             assert call("POST", f"{api.url}/ego/inspect", {"entity": lid["id"], "px": 16})["coverage"] > 0.8
             call("POST", f"{api.url}/ego/annotate", {"entity": lid["id"], "affordances": ["graspable", "flat"]})
-            out["lid"] = [run("pick", {"target": lid["id"]}), run("place", {"on": table["id"], "offset": [0.72, 0.22]})]
+            out["lid"] = [run("pick", {"target": lid["id"]}), run("place", {"on": table["id"], "offset": lid_at})]
             box = track_of("w:box", 0.3)
             call("POST", f"{api.url}/ego/annotate", {"entity": box["id"], "label": "box",
                                                        "affordances": ["graspable", "container", "receptacle", "pourable"]})
-            out["box"] = [run("pick", {"target": box["id"]}), run("pour", {"on": table["id"], "offset": [0.2, 0.0]}),
+            out["box"] = [run("pick", {"target": box["id"]}), run("pour", {"on": table["id"], "offset": pour_at}),
                           run("place", {"on": table["id"]})]
         except Exception:  # noqa: BLE001 - reported by the assertions below
             out["error"] = traceback.format_exc()
@@ -218,14 +309,15 @@ def test_the_robot_takes_off_the_lid_and_pours_the_pieces_out_onto_the_table(kit
             print(out["error"])
         assert "error" not in out, out.get("error", "")[-300:]
         assert out["lid"] == ["succeeded", "succeeded"] and out["box"] == ["succeeded"] * 3, out
-        pieces = [f"w:piece-{r}{c}" for r in range(3) for c in range(3)]
+        pieces = [f"w:piece-{r}{c}" for r in range(side) for c in range(side)]
         fallen = [w for w in pieces if host.sim._entity_pose(w)["p"][2] < 0.7]
         assert not fallen, f"no piece slides off the table: {fallen}"
         box_xy = np.array(host.sim._entity_pose("w:box")["p"][:2])
-        out_of_box = [w for w in (f"w:piece-{r}{c}" for r in range(3) for c in range(3))
-                      if np.linalg.norm(np.array(host.sim._entity_pose(w)["p"][:2]) - box_xy) > 0.25
+        beyond_box = (side * PUZZLE_PIECE_M + (side + 1) * 0.012 + 0.02) / 2 + 0.04
+        out_of_box = [w for w in pieces
+                      if np.linalg.norm(np.array(host.sim._entity_pose(w)["p"][:2]) - box_xy) > beyond_box
                       and host.sim._entity_pose(w)["p"][2] > 0.7]
-        assert len(out_of_box) >= 7, f"most pieces lie on the table outside the box: {out_of_box}"
+        assert len(out_of_box) >= min_out, f"most pieces lie on the table outside the box: {out_of_box}"
         upright = sum(quat_rotate(host.sim._entity_pose(w)["q"], [0, 0, 1])[2] > 0.9 for w in out_of_box)
         assert upright + sum(quat_rotate(host.sim._entity_pose(w)["q"], [0, 0, 1])[2] < -0.9 for w in out_of_box) \
             == len(out_of_box), "every poured piece lies flat, face up or down"
@@ -324,7 +416,7 @@ def test_a_face_is_found_on_its_reference_with_the_quarter_turns_that_line_it_up
 
 
 def test_the_lid_shows_the_picture_as_large_as_the_finished_puzzle_on_a_plain_border(kitchen_root):
-    from steward.authoring.service import PUZZLE_GRID, PUZZLE_LID_BORDER_RGB
+    from steward.authoring.service import PUZZLE_LID_BORDER_RGB, PUZZLES
 
     scenario = _scenario(kitchen_root)
     lid = next(e for e in scenario["sceneState"]["entities"] if e["id"] == "w:lid")
@@ -334,7 +426,7 @@ def test_the_lid_shows_the_picture_as_large_as_the_finished_puzzle_on_a_plain_bo
     row = print_rgb.shape[0] // 2
     picture_share = (~border[row]).sum() / print_rgb.shape[1]
     lid_m = lid["body"]["links"][0]["geometry"]["collision"][0]["size"][0]
-    assert picture_share == pytest.approx(PUZZLE_GRID * PUZZLE_PIECE_M / lid_m, abs=0.02)
+    assert picture_share == pytest.approx(PUZZLES["cat"].grid * PUZZLE_PIECE_M / lid_m, abs=0.02)
     assert border[0, 0] and border[-1, -1]
     assert "共 9 片" in scenario["task"]
 

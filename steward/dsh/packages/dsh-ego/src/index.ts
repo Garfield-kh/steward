@@ -34,6 +34,8 @@ export interface InspectResult {
   sizeM: number[]
   /** Share of cells seen (not out of view or hidden). */
   coverage: number
+  /** Present when part of the face is unseen: why, from the camera's view (too close below it, beside or behind it, too far, hidden). */
+  hint?: string
   /** Row 0 is the object's +y edge, column 0 its -x edge; each cell is [r, g, b] (0-255) or null. */
   rows: (number[] | null)[][]
   /** `rows` turned `worldTurnDeg` counter-clockwise: seen from above, row 0 faces the map's +y and columns run towards +x. */

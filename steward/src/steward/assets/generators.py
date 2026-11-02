@@ -439,7 +439,7 @@ def steward_bot(camera_pitch_deg: float = 30.0, camera_fovy_deg: float = 60.0) -
     joints = [
         _fixed("head_mount", "base", "head", pose([0.16, 0, 1.50])),
         Joint(id="lift", parent="base", child="carriage", type=exact("prismatic"), origin=exact(pose([0.22, 0, 0])),
-              axis=exact([0.0, 0.0, 1.0]), limits=exact({"lo": 0.30, "hi": 1.30}), q=exact([0.60]), qd=exact([0.0]),
+              axis=exact([0.0, 0.0, 1.0]), limits=exact({"lo": 0.0, "hi": 1.30}), q=exact([0.60]), qd=exact([0.0]),
               dynamics=exact({"damping": 250.0}),
               actuator={"kind": "position", "limits": {"effort": 1600.0, "velocity": 1.2}, "gains": {"kp": 6000.0}}),
         Joint(id="reach", parent="carriage", child="arm", type=exact("prismatic"), origin=exact(pose([0.0, 0, 0])),

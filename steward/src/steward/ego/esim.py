@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from steward.ego.planner import (
+    FLOOR_LYING_M,
     Box2D,
     astar,
     build_grid,
@@ -38,9 +39,10 @@ class EsimConfig:
     receipt_ttl: float = 60.0
     dock_gap: float = 0.07
     predock_backoff: float = 0.35
+    dock_backoff_step: float = 0.05  # how much farther back to try when a dock pose collides
     reach_min: float = 0.08
     reach_max: float = 0.65
-    lift_min: float = 0.32
+    lift_min: float = 0.0  # the gripper reaches down to the floor
     lift_max: float = 1.28
     place_edge_margin: float = 0.10
     place_clearance: float = 0.14
@@ -54,6 +56,7 @@ class EsimConfig:
     drawer_viewing_backoff: float = 0.25
     nest_fit: float = 0.92
     floor_carry_lift: float = 0.05
+    floor_lift_max_m: float = 0.3  # an object off the floor no larger than this is lifted clear of the base to carry
     floor_release_gap: float = 0.015
     carry_retreat_max: float = 1.2
     park_keep_clear: float = 0.9
@@ -79,8 +82,10 @@ class Esim:
         self.config = config or EsimConfig()
         tree = robot_model["body"]
         base = next(link for link in tree["links"] if link["id"] == "base")
-        bx, by, _ = base["geometry"]["collision"][0]["size"]
+        base_geom = base["geometry"]["collision"][0]
+        bx, by, bz = base_geom["size"]
         self.half_x, self.half_y = bx / 2, by / 2
+        self.ground_clearance = base_geom["pose"]["p"][2] - bz / 2
         self.radius = math.hypot(self.half_x, self.half_y)
         lift = next(j for j in tree["joints"] if j["id"] == "lift")
         grip = next(j for j in tree["joints"] if j["id"] == "gripper_mount")
@@ -198,9 +203,9 @@ class Esim:
         candidates = [((sbox.hx, ty), (1.0, 0.0), sbox.hx - tx), ((-sbox.hx, ty), (-1.0, 0.0), sbox.hx + tx),
                       ((tx, sbox.hy), (0.0, 1.0), sbox.hy - ty), ((tx, -sbox.hy), (0.0, -1.0), sbox.hy + ty)]
         cfg = self.config
-        obstacles_all = floor_obstacles(es, exclude)
+        obstacles_all = self._floor_obstacles(es, exclude)
         # A floor-standing load stays an obstacle for the path to it (only its own back-out ignores it).
-        loaded = floor_obstacles(es, exclude - {load.id}) if load is not None else None
+        loaded = self._floor_obstacles(es, exclude - {load.id}) if load is not None else None
         if loaded is not None:
             obstacles_all, load_free = loaded, obstacles_all
         carry = self._carry(es)
@@ -216,10 +221,16 @@ class Esim:
                 continue
             nx, ny = c * normal[0] - s * normal[1], s * normal[0] + c * normal[1]
             ex, ey = sbox.cx + c * edge[0] - s * edge[1], sbox.cy + s * edge[0] + c * edge[1]
-            dock = (ex + nx * standoff, ey + ny * standoff)
             yaw = math.atan2(-ny, -nx)
+            # Where the nearest dock pose collides, stand farther back and reach further.
+            while True:
+                dock = (ex + nx * standoff, ey + ny * standoff)
+                blocked = self._footprint_blocked(obstacles_all, dock, yaw, carry)
+                farther = standoff + cfg.dock_backoff_step
+                if not blocked or farther + depth - self.tool_offset > cfg.reach_max:
+                    break
+                standoff, reach = farther, farther + depth - self.tool_offset
             predock = (dock[0] + nx * cfg.predock_backoff, dock[1] + ny * cfg.predock_backoff)
-            blocked = self._footprint_blocked(obstacles_all, dock, yaw, carry)
             if blocked:
                 reasons.append(f"side {normal}: dock pose collides with {blocked}")
                 continue
@@ -285,8 +296,8 @@ class Esim:
     # ---------------------------------------------------------------- blockers
     def _describe_blockers(self, es: SceneState) -> list[dict]:
         """Entities that made the prediction infeasible. Floor-standing graspable ones (a chair) are
-        movable and come with parking spots out of everyone's way; tableware lying on the floor is
-        not, since the lift cannot reach down to it."""
+        movable and come with parking spots out of everyone's way; other things lying on the floor
+        are reported as blockers only (a flat thing there may be a mat read as tableware)."""
         held = self._held(es)
         out = []
         for eid in sorted(self._blockers):
@@ -294,7 +305,7 @@ class Esim:
             if ent is None or ent.role == "environment" or ent.id == es.self_id:
                 continue
             _, bottom, _ = entity_box(ent)
-            movable = (self._affords(ent, "graspable") and self._affords(ent, "floor-standing") and bottom < 0.05
+            movable = (self._affords(ent, "graspable") and self._affords(ent, "floor-standing") and bottom < FLOOR_LYING_M
                        and (held is None or held.id != ent.id))
             out.append({"id": ent.id, "category": ent.category.value, "movable": movable,
                         "parkAt": self._parking_spots(es, ent) if movable else []})
@@ -432,7 +443,7 @@ class Esim:
         goal = (float(params["x"]), float(params["y"]))
         yaw = float(params.get("yaw", ryaw))
         held = self._held(es)
-        obstacles = floor_obstacles(es, {held.id} if held is not None else set())
+        obstacles = self._floor_obstacles(es, {held.id} if held is not None else set())
         carry = self._carry(es)
         grid = build_grid(obstacles, self._sweep(carry) + self.config.nav_margin, [(rx, ry), goal])
         blocked = self._footprint_blocked(obstacles, goal, yaw, carry)
@@ -450,6 +461,9 @@ class Esim:
         plan = {"path": [list(p) for p in path], "yaw": yaw, "pathLength": path_length(path)}
         return self._receipt(es, "navigate", params, risk, issues, plan)
 
+    def _floor_obstacles(self, es: SceneState, exclude: set[str]) -> list[Box2D]:
+        return floor_obstacles(es, exclude, ground_clearance=self.ground_clearance)
+
     def _predict_pick(self, es: SceneState, params: dict) -> dict:
         target = es.find(params.get("target", ""))
         if target is None:
@@ -459,11 +473,17 @@ class Esim:
         if not self._affords(target, "graspable"):
             raise PredictionError(f"{target.id} ({target.category.value}) is not graspable")
         support = self._support_of(es, target)
-        _, target_bottom, _ = entity_box(target)
-        on_floor = support is None and target_bottom < 0.05
+        target_box, target_bottom, target_top = entity_box(target)
+        on_floor = support is None and target_bottom < FLOOR_LYING_M
         if support is None and not on_floor:
             raise PredictionError(f"no support surface is known under {target.id}; observe it first")
-        tp = target.pose.value["p"]
+        # A small object off the floor is lifted clear of the base and carried like one off a table;
+        # a large one (a chair) stays low in front of the robot.
+        carried_low = on_floor and 2 * max(target_box.hx, target_box.hy) > self.config.floor_lift_max_m
+        tp = list(target.pose.value["p"])
+        if on_floor:
+            # Resting on the floor, its base is at floor level whatever the noisy height estimate says.
+            tp[2] = max((target_top - target_bottom) / 2, self.config.lift_min)
         contents = self._contents(es, target)
         if self._affords(target, "pourable"):
             covering = self._covering(es, target)
@@ -472,7 +492,7 @@ class Esim:
         elif contents:
             raise PredictionError(f"{target.id} holds {', '.join(e.id for e in contents)}; take those out first")
         anchor = target if on_floor else self._anchor(es, support)
-        approach = self._approach(es, anchor, (tp[0], tp[1]), tp[2], {target.id}, load=target if on_floor else None)
+        approach = self._approach(es, anchor, (tp[0], tp[1]), tp[2], {target.id}, load=target if carried_low else None)
         sigma = math.hypot(self._sigma_xy(target), self._sigma_xy(self._self(es)))
         r = self.config.capture_radius
         p_miss = math.exp(-(r * r) / (2 * sigma * sigma)) if sigma > 0 else 0.0
@@ -484,10 +504,15 @@ class Esim:
         if existence_risk > 0.2:
             issues.append(f"target existence probability is only {target.existence:.2f}")
         risk = 1.0 - (1.0 - p_miss) * (1.0 - existence_risk)
-        carry_lift = tp[2] + (self.config.floor_carry_lift if on_floor else 0.10)
+        if carried_low:
+            carry_lift = tp[2] + self.config.floor_carry_lift
+        elif on_floor:
+            carry_lift = self.config.floor_furniture_height + 0.10
+        else:
+            carry_lift = tp[2] + 0.10
         plan = {**approach, "target": target.id, "support": "floor" if on_floor else support.id, "lift": tp[2],
-                "carryLift": min(self.config.lift_max, carry_lift), "captureRadius": self.config.capture_radius,
-                "gentle": self._affords(target, "pourable")}
+                "carryLift": min(self.config.lift_max, carry_lift), "keepReach": carried_low,
+                "captureRadius": self.config.capture_radius, "gentle": self._affords(target, "pourable")}
         return self._receipt(es, "pick", params, risk, issues, plan)
 
     def _predict_place(self, es: SceneState, params: dict) -> dict:
@@ -617,7 +642,7 @@ class Esim:
         lift = lift_now - (held_bottom - cfg.floor_release_gap)
         if not (cfg.lift_min <= lift <= cfg.lift_max):
             raise PredictionError(f"lowering {held.id} to the floor needs lift {lift:.2f} m, outside the lift range")
-        obstacles = floor_obstacles(es, {held.id})
+        obstacles = self._floor_obstacles(es, {held.id})
         held_box, _, _ = entity_box(held)
         here_yaw = held_box.yaw if "yaw" not in params else float(params["yaw"])
         if math.hypot(tx - held_box.cx, ty - held_box.cy) <= 0.05 and abs(_wrap(here_yaw - held_box.yaw)) <= 0.1:
@@ -722,7 +747,7 @@ class Esim:
         yaw = math.atan2(-n[1], -n[0])
         if not (cfg.lift_min <= handle[2] <= cfg.lift_max):
             raise PredictionError(f"handle height {handle[2]:.2f} m is outside the lift range")
-        obstacles = floor_obstacles(es, set())
+        obstacles = self._floor_obstacles(es, set())
         for name, xy in (("dock", dock), ("end", end), ("viewing", clear)):
             blocked = self._footprint_blocked(obstacles, xy, yaw)
             if blocked:

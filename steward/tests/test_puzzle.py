@@ -327,6 +327,64 @@ def test_the_robot_takes_off_the_lid_and_pours_the_pieces_out_onto_the_table(kit
         host.stop()
 
 
+def test_pieces_dropped_behind_and_under_the_table_are_picked_off_the_floor_and_put_back(kitchen_root, tmp_path):
+    host = StewardHost(kitchen_root, scenario="puzzle-dog", speed=math.inf, seed=3, run_dir=pathlib.Path(tmp_path)).start()
+    drops = {"w:piece-13": (-0.064, 0.024), "w:piece-02": (-0.013, -0.093)}  # the far table edge is at y -0.025
+    for wid, (x, y) in drops.items():
+        host.sim.edit_move(wid, {"at": {"x": x, "y": y}, "yaw": 0.3})
+    runtime = EgoRuntime(RobotLink(host.robot_servers["w:robot-1"].url), steward_bot().to_dict())
+    api = ego_api(runtime).start()
+    done, out = threading.Event(), {}
+
+    def run(skill, params):
+        receipt = call("POST", f"{api.url}/ego/predict", {"skill": skill, "params": params})
+        assert receipt["withinRiskLimit"], (skill, receipt["issues"])
+        job = call("POST", f"{api.url}/skill/run", {"receipt": receipt["id"]})
+        return call("POST", f"{api.url}/skill/wait", {"job": job["id"], "timeoutS": 120}, timeout=130)["state"]
+
+    def flow():
+        try:
+            runtime.start()
+            _explore(api.url, 120)
+            assert run("navigate", {"x": 0.0, "y": 0.9, "yaw": -math.pi / 2}) == "succeeded"
+            t0 = runtime.estimator.stamp
+            while runtime.estimator.stamp < t0 + 4.0:
+                time.sleep(0.2)
+            objects = call("GET", f"{api.url}/ego/summary")["objects"]
+            table = next(o for o in objects if o["category"] == "table")
+            def on_floor_near(xy):
+                small = [o for o in call("GET", f"{api.url}/ego/summary")["objects"]
+                         if max(o["sizeM"][:2]) < 0.3 and o["position"][2] < 0.1]
+                return min(small, key=lambda o: math.dist(o["position"][:2], xy))
+
+            for wid, xy in drops.items():
+                # Docked beside it the camera no longer sees the floor there: look from where it is in view.
+                _approach_to_observe(api.url, on_floor_near(xy), 1.3)
+                t1 = runtime.estimator.stamp
+                while runtime.estimator.stamp < t1 + 3.0:
+                    time.sleep(0.2)
+                piece = on_floor_near(xy)
+                call("POST", f"{api.url}/ego/annotate", {"entity": piece["id"], "affordances": ["graspable", "flat"]})
+                out[wid] = [run("pick", {"target": piece["id"]}), run("place", {"on": table["id"]})]
+        except Exception:  # noqa: BLE001 - reported by the assertions below
+            out["error"] = traceback.format_exc()
+        finally:
+            done.set()
+
+    threading.Thread(target=flow, daemon=True).start()
+    try:
+        deadline = time.time() + 240
+        while not done.is_set() and time.time() < deadline:
+            host.pump(0.05)
+        assert "error" not in out, out.get("error", "")[-400:]
+        assert all(out[wid] == ["succeeded", "succeeded"] for wid in drops), out
+        assert all(host.sim._entity_pose(wid)["p"][2] > 0.7 for wid in drops), "both pieces lie on the table again"
+    finally:
+        api.stop()
+        runtime.stop()
+        host.stop()
+
+
 def test_textured_boxes_compile_from_in_memory_assets(kitchen_root):
     build_scene = SceneState.from_dict(_scenario(kitchen_root)["sceneState"])
     from steward.scene.mjcf import build_mjcf

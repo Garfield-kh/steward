@@ -36,7 +36,7 @@ from steward.net import HttpError, call
 
 TABLEWARE = ("bowl", "wine_glass", "mug", "cup")
 ROW_GAP = 0.06
-FLOOR_LEVEL_M = 0.15  # tableware whose base is lower than this lies on the floor, out of the lift's reach
+FLOOR_LEVEL_M = 0.15  # tableware whose base is lower than this lies on the floor
 TABLE_ROW_Y = 0.18
 VIEW_DISTANCE = 1.1
 
@@ -70,8 +70,8 @@ def _width(obj: dict) -> float:
 
 def tableware(summary: dict) -> list[dict]:
     """Tableware tracks ordered from the smallest to the largest footprint. Anything lying on the
-    floor is left out: the lift cannot reach down there, and a flat thing on the floor read as a
-    bowl or plate (a mat, a marker) would otherwise fail the same pick every round."""
+    floor is left out: a flat thing on the floor read as a bowl or plate (a mat, a marker) would
+    otherwise be picked up and arranged as tableware every round."""
     items = [o for cat in TABLEWARE for o in _objects(summary, cat) if _bottom(o) >= FLOOR_LEVEL_M]
     return sorted(items, key=_area)
 

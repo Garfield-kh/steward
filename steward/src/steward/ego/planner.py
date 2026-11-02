@@ -17,6 +17,8 @@ import numpy as np
 from steward.math3d import yaw_from_quat
 from steward.scene.schema import SceneState
 
+FLOOR_LYING_M = 0.05  # an object whose estimated base is lower than this lies on the floor
+
 
 @dataclass
 class Box2D:
@@ -56,13 +58,17 @@ def entity_box(ent) -> tuple[Box2D, float, float]:
 
 
 def floor_obstacles(es: SceneState, exclude: set[str], floor_obstacle_height: float = 0.35,
-                    min_existence: float = 0.3) -> list[Box2D]:
+                    min_existence: float = 0.3, ground_clearance: float = 0.0) -> list[Box2D]:
+    """Footprints the base must keep out of: what reaches below ``floor_obstacle_height``, except a
+    flat thing lying on the floor no thicker than the base's ``ground_clearance``, which it drives
+    over (judged by its thickness: its height estimate is the noisier one)."""
     out = []
     for ent in es.entities:
         if ent.id == es.self_id or ent.id in exclude or ent.existence < min_existence:
             continue
-        box, bottom, _ = entity_box(ent)
-        if bottom < floor_obstacle_height:
+        box, bottom, top = entity_box(ent)
+        flat_on_floor = top - bottom <= ground_clearance and bottom < FLOOR_LYING_M
+        if bottom < floor_obstacle_height and not flat_on_floor:
             out.append(box)
     return out
 

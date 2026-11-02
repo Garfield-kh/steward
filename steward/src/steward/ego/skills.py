@@ -405,7 +405,8 @@ class SkillExecutor:
         if target is None:
             raise SkillFailed(f"target {plan['target']} is no longer in the ego state")
         self._align_lateral(target["p"][:2])
-        self._set_joint("lift", target["p"][2])
+        # Off the floor the planned height (its base at floor level) outranks the noisy live estimate.
+        self._set_joint("lift", plan["lift"] if plan.get("support") == "floor" else target["p"][2])
         self._set_joint("reach", max(0.05, self._reach_to(target["p"][:2])))
         miss = float(np.linalg.norm(self._gripper_xy() - np.array(target["p"][:2])))
         if miss > plan.get("captureRadius", 0.05):
@@ -425,8 +426,8 @@ class SkillExecutor:
             raise SkillFailed(str(exc).strip("'")) from None
         job.log.append(f"grasped {held}")
         self._set_joint("lift", plan["carryLift"])
-        if plan.get("support") != "floor":
-            # Objects taken from the floor are large; the arm stays out so they clear the base.
+        if not plan.get("keepReach"):
+            # A large object carried low (a chair off the floor) keeps the arm out so it clears the base.
             self._set_joint("reach", self.config.retract_reach)
         if "retreat" in plan:
             self._translate_to(plan["retreat"][0], plan["retreat"][1], plan["yaw"])

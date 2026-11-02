@@ -310,7 +310,13 @@ class SkillExecutor:
                 return
             settled = st["stamp"] - t0 > self.config.settle_s
             if settled and not corrected:
-                self._command({name: target + (target - q)})
+                # LOCAL EXPERIMENT (uncommitted): re-issue the absolute target instead of
+                # target + (target - q). In the split-process topology the command takes an
+                # HTTP round trip to reach the servo, so at the 1.5 s stamp the joint may not
+                # have started moving yet; inflating by the full remaining error then pegs the
+                # joint at ~2x the intended travel (observed: reach 0.101->0.310 landed at
+                # 0.519, lift 0.593->0.790 landed at 0.980 — exactly target + (target - rest)).
+                self._command({name: target})
                 corrected = True
             if st["stamp"] - t0 > timeout:
                 raise SkillFailed(f"joint {name} did not reach {target:.3f} (at {q:.3f})")

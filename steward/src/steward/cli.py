@@ -76,7 +76,10 @@ def _chat_config(args):
     world, robot = getattr(args, "world_harness", None), getattr(args, "robot_harness", None)
     if not world and not robot:
         return None
-    return ChatConfig(dsh=STEWARD_DIR / "dsh" / "node_modules" / ".bin" / "dsh", cwd=STEWARD_DIR,
+    _dsh_bin = STEWARD_DIR / "dsh" / "node_modules" / ".bin"
+    # Windows cannot exec the POSIX sh launcher; dsh.CMD is the npm-generated cmd wrapper
+    _dsh = _dsh_bin / ("dsh.CMD" if os.name == "nt" and (_dsh_bin / "dsh.CMD").exists() else "dsh")
+    return ChatConfig(dsh=_dsh, cwd=STEWARD_DIR,
                       env_file=STEWARD_DIR / ".env", world_home=Path(world) if world else None,
                       robot_home=Path(robot) if robot else None, ego_api=getattr(args, "ego_api", None))
 
@@ -130,7 +133,9 @@ class _EgoProcess:
         cmd = [sys.executable, "-m", "steward.cli", "--root", str(args.root), "ego", "--robot-url", robot_url,
                "--api-port", str(args.api_port), "--out-dir", str(out_dir), "--parent-pid", str(os.getpid()),
                "--bind-wait", str(args.bind_wait)]
-        self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, start_new_session=True)
+        self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, encoding="utf-8",
+                                     errors="replace", start_new_session=True)  # NDJSON is UTF-8; a locale
+        # decode error here would silently kill the reader (and backpressure the child) on Windows
         first = self.proc.stdout.readline()
         if not first:
             raise SystemExit(f"the Ego Runtime process exited with status {self.proc.wait()} before starting")

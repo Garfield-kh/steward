@@ -98,6 +98,24 @@ def test_a_service_failure_is_not_cached(tmp_path):
     assert not any(tmp_path.rglob("*.npz"))
 
 
+def test_depth_clusters_sam_missed_become_unnamed_instances_and_found_ones_are_not_repeated():
+    shape = (120, 160)
+    depth = np.full(shape, 2.0, np.float32)
+    depth[30:50, 40:60] = 1.2  # found by SAM
+    depth[30:50, 100:120] = 1.3  # missed by SAM
+    sam = np.zeros(shape, np.uint8)
+    sam[30:50, 40:60] = 1
+    seg = Segmentation(sam, {1: {"bowl": 0.8}})
+    up = np.array([0.0, 0.0, 1.0])
+    filled = Segmenter(SegmenterConfig(vocabulary=VOCAB, min_pixels=20, geometric_fill=True), None).fill(seg, depth, 58.0, up)
+    assert filled.labels == seg.labels, "filled instances carry no names"
+    assert (filled.mask[30:50, 40:60] == 1).all(), "what SAM found keeps its instance"
+    missed = filled.mask[30:50, 100:120]
+    assert missed.min() > 1 and len(np.unique(missed)) == 1
+    off = Segmenter(SegmenterConfig(vocabulary=VOCAB), None).fill(seg, depth, 58.0, up)
+    assert off is seg
+
+
 def test_semantic_scores_lead_and_shape_only_breaks_ties():
     shape = {"bowl": 0.6, "mug": 0.3, "unknown": 0.1}
     fused = fuse_semantics({"mug": 0.8}, shape, weight=0.5, floor=0.03)
@@ -145,6 +163,9 @@ class StubSegmenter:
         for i, value in enumerate(values[np.argsort(-counts)][:8], start=1):
             mask[key == value] = i
         return Segmentation(mask, {i: {"thing": 0.9} for i in range(1, int(mask.max()) + 1)}, seconds=0.01)
+
+    def fill(self, seg, depth, fovy_deg, up_cam):
+        return seg
 
 
 def _pump_until(host, done, timeout=120.0):

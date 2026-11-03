@@ -257,7 +257,9 @@ class HarnessChat:
         """Unacknowledged robot alerts; each new one is also added to the transcript as an error."""
         try:
             active = call("GET", f"{self.config.ego_api}/ego/alerts", timeout=0.5)["active"]
-        except (HttpError, OSError):  # the robot's Ego API is down; nothing to show
+        except (HttpError, OSError, KeyError, TypeError):  # no API, or an answer we do not understand
+            # A robot-side fault is not the operator console's fault: the console polls this
+            # endpoint continuously, and an exception here takes the whole chat down with it.
             return []
         with self._lock:
             for alert in active:

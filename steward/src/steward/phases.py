@@ -22,7 +22,7 @@ PHASES: dict[str, dict] = {
     },
     "phase1-sam": {
         "label": "Phase 1 · SAM 3.1 分割",
-        "description": "WSim 只给 RGB 与深度；ER 在关键帧调用 SAM 3.1 做开放词汇实例分割，类别以分割词为主、形状先验为辅",
+        "description": "WSim 只给 RGB 与深度；ER 在关键帧调用 SAM 3.1 做开放词汇实例分割，类别以分割词为主、形状先验为辅；可选用深度几何聚类补上 SAM 漏掉的区域",
         "perception": "rgbd",
         "masks": False,
     },

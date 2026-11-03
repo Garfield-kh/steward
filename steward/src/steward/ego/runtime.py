@@ -26,7 +26,7 @@ from steward.ego.roles import RoleConfig, assign_roles
 from steward.ego.segmenter import Segmenter, SegmenterError
 from steward.ego.skills import MotionConfig, SkillExecutor
 from steward.ego.view import EgoViewRenderer
-from steward.math3d import pose_compose, pose_inverse, quat_rotate, wrap_angle, yaw_from_quat
+from steward.math3d import matrix_from_quat, pose_compose, pose_inverse, quat_rotate, wrap_angle, yaw_from_quat
 from steward.net import HttpError, call
 from steward.scene.schema import SceneState
 from steward.viewloop import ViewLoop
@@ -295,6 +295,10 @@ class EgoRuntime:
             try:
                 with self._holding("perception"):
                     result = self.segmenter.segment(rgbd["rgb"])
+                with self._lock:
+                    cam = self.estimator.camera_pose(header["odometry"], rgbd["camera"])
+                up_cam = matrix_from_quat(cam["q"]).T @ np.array([0.0, 0.0, 1.0])
+                result = self.segmenter.fill(result, rgbd["depth"], rgbd["fovy"], up_cam)
             except SegmenterError as exc:
                 error = str(exc)
             else:

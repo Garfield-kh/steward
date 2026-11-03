@@ -6,7 +6,9 @@ the regions of support surfaces (tables, counters) cropped, enlarged and segment
 the small-object prompts (tiled into one image they are found far less often), because objects of a few dozen pixels are missed at the
 camera's resolution. Detections of one object under several prompts are merged into one instance
 that carries every label with its score; overlaps are resolved so that the smaller instance (a bowl)
-keeps the pixels it shares with a larger one (the table under it).
+keeps the pixels it shares with a larger one (the table under it). Regions SAM did not find are
+then filled from depth (:mod:`steward.ego.providers.geometric_masks`) as unnamed instances, which
+the shape priors alone classify.
 
 Every result is cached on disk under a key of the image and the settings, so an episode replays
 without the service and the same image is never sent twice (steward.md §13.7.4).
@@ -30,6 +32,7 @@ import numpy as np
 from PIL import Image
 
 from steward import perception_services
+from steward.ego.providers.geometric_masks import GeometricMaskConfig, masks_from_depth
 
 DEFAULT_PATH = Path(__file__).resolve().parents[3] / "config" / "segmentation.toml"
 
@@ -57,10 +60,16 @@ class SegmenterConfig:
     """Semantic likelihood of a category SAM did not name."""
     vocabulary: dict[str, str] = field(default_factory=dict)
     """Prompt text → Ego-State category."""
+    geometric_fill: bool = False
+    """Add depth clusters SAM left unlabelled as unnamed instances (:meth:`Segmenter.fill`)."""
+    fill_free_share: float = 0.7
+    """Share of a depth cluster's pixels SAM must have left unlabelled for it to be added."""
 
     def key(self) -> str:
-        """Digest of every setting that changes a result, part of each cache key."""
-        return hashlib.sha256(json.dumps(asdict(self), sort_keys=True).encode()).hexdigest()[:16]
+        """Digest of every setting that changes a SAM result, part of each cache key; the fill
+        settings are left out because the fill is computed after the cached result."""
+        sam = {k: v for k, v in asdict(self).items() if k not in ("geometric_fill", "fill_free_share")}
+        return hashlib.sha256(json.dumps(sam, sort_keys=True).encode()).hexdigest()[:16]
 
 
 @dataclass
@@ -245,6 +254,31 @@ class Segmenter:
             np.savez_compressed(tmp, mask=mask, labels=np.array(json.dumps(labels)))
             tmp.replace(path)
         return Segmentation(mask, labels, seconds=time.monotonic() - started)
+
+    def fill(self, seg: Segmentation, depth: np.ndarray, fovy_deg: float, up_cam: np.ndarray) -> Segmentation:
+        """``seg`` with every depth cluster of which at least ``fill_free_share`` of the pixels SAM
+        left unlabelled added, on those pixels, as an instance without labels.
+
+        :param depth: (H, W) metres of the segmented image.
+        :param up_cam: the world's up direction in the camera frame (x forward, z up).
+        :returns: ``seg`` itself when the fill is off."""
+        cfg = self.config
+        if not cfg.geometric_fill:
+            return seg
+        geo = masks_from_depth(depth, fovy_deg, GeometricMaskConfig(min_pixels=cfg.min_pixels), up_cam=up_cam)
+        mask, labels = seg.mask.copy(), dict(seg.labels)
+        free = mask == 0
+        next_id = int(mask.max()) + 1
+        for instance in np.unique(geo):
+            if instance == 0 or next_id > 255:
+                continue
+            region = geo == instance
+            own = region & free
+            if int(own.sum()) < cfg.min_pixels or own.sum() < cfg.fill_free_share * region.sum():
+                continue
+            mask[own] = next_id
+            next_id += 1
+        return Segmentation(mask, labels, cached=seg.cached, seconds=seg.seconds)
 
     # ------------------------------------------------------------------ passes
     def _detections(self, rgb: np.ndarray, prompts: list[str]) -> list[tuple[str, float, np.ndarray]]:

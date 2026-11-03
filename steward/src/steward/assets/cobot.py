@@ -1,15 +1,22 @@
-"""Cobot Magic embodiment: the AgileX dual Piper 6-DoF workstation.
+"""Cobot Magic embodiment: the AgileX dual Piper mobile manipulation platform.
 
-Kinematics are transcribed verbatim from the vendored URDF
+The real machine is a Mobile-ALOHA-style platform: a TRACER 2.0 differential-drive chassis
+carrying a height-adjustable torso with two Piper arms (the kit has four — two leader arms for
+teleoperation, which autonomy does not use), two wrist cameras and one overhead depth camera.
+The twin models the autonomous half of that: a planar base, a lifting carriage, and the two
+follower arms.
+
+Arm kinematics are transcribed verbatim from the vendored URDF
 ``third_party/piper_description/urdf/piper_description_v100_camera.urdf``
 (pinned upstream commit in ``third_party/piper_description/PROVENANCE.md``).
 Every joint origin, axis and limit matches the URDF; link collision geometry is
 approximated by capsules between consecutive joint origins at the zero pose.
 
-Assembly-level dimensions (arm separation, mount height, top camera) are
-MEASURE placeholders pending the physical survey of the agilex workstation;
-see ``steward/embodiments/cobot-magic.yaml``. The root is fixed: the workstation is
-welded to the world, and a scene places it via the entity pose.
+Chassis and lift dimensions are MEASURE placeholders pending the physical survey
+of the agilex workstation; see ``steward/embodiments/cobot-magic.yaml``. The
+chassis is a planar root (absolute x, y, yaw); the carriage rides a prismatic
+lift joint above it, and everything the real torso carries — both arm mounts and
+the overhead camera — moves with the carriage.
 """
 
 from __future__ import annotations
@@ -63,6 +70,28 @@ FINGER_CLOSED = 0.0
 # table. The all-zero URDF posture is a folded singularity where IK has no useful gradient, so the
 # twin starts here instead; joints 7/8 start open.
 HOME = [0.0, 1.57, -1.35, 0.0, 0.0, 0.0]
+
+# TRACER 2.0 platform (product sheet: 685 x 570 x 155 mm, 100 kg payload, 1.6 m/s). MEASURE:
+# only the envelope is taken from the datasheet; mass and the sim's actuator gains are tuned to
+# behave like the mobile kitchen robot's base, not measured on the real unit.
+CHASSIS = dict(length=0.685, width=0.570, height=0.155, mass=30.0)
+# Height-adjustable torso: the carriage's height above the chassis top, and its travel. MEASURE.
+# The home height is a *working* height, not a stowed one: with the arms only just above a 0.75 m
+# tabletop a forearm sweeping over the table edge goes through it (measured: the arm could not
+# even fold back to HOME while parked at the table). Arms a quarter metre above the work surface
+# is what the lift is for, and it is the posture the real machine works in.
+LIFT_RANGE = (0.35, 1.05)
+LIFT_HOME = 0.70           # arms at 0.855 m: a hand's width above a 0.75 m table, and the reach
+                           # is measurably better than with the torso fully up (probed, not guessed)
+# The base drives like the mobile kitchen robot: position control on absolute x, y, yaw.
+ROOT_ACTUATOR = {
+    "kind": "position",
+    # Larger than the kitchen robot's: this base carries a 40 kg torso and two arms on a wider
+    # footprint, and a yaw servo sized for the other robot simply stalls (measured: 0.32 rad short
+    # with the effort saturated).
+    "limits": {"effort": [1200.0, 1200.0, 700.0], "velocity": [0.5, 0.5, 1.0]},
+    "gains": {"kp": [10000.0, 10000.0, 3500.0], "damping": [1800.0, 1800.0, 500.0]},
+}
 
 # Per-link capsule spec: link id -> (offset to the next joint origin in this link's frame,
 # capsule radius, mass). None -> a sphere at the origin. Fingers are visual-only.
@@ -171,14 +200,14 @@ def _piper_arm(prefix: str, mount_p: list[float], camera: bool = True,
     return links, joints
 
 
-def cobot_magic(separation: float = 0.62, mount_height: float = 0.79,
+def cobot_magic(separation: float = 0.62, mount_height: float = 0.855,
                 top_camera: list[float] | None = None, camera_fovy: float = 60.0) -> Entity:
-    """Cobot Magic twin: fixed frame, two Piper arms, top + dual wrist RGB-D cameras.
+    """Cobot Magic twin: mobile chassis, lifting torso, two Piper arms, top + dual wrist RGB-D cameras.
 
-    ``separation``/``mount_height``/``top_camera`` are MEASURE placeholders (see module
-    docstring); URDF-derived joint data is exact. Heights are measured from the floor, which is
-    where the frame link sits; the arms are mounted ``mount_height`` up and the overhead camera
-    looks straight down on the table from above the workcell.
+    ``separation``/``mount_height``/``top_camera``/``CHASSIS``/``LIFT_*`` are MEASURE placeholders
+    (see module docstring); URDF-derived joint data is exact. ``mount_height`` is the arm mounting
+    height above the floor with the lift at its home height; the top camera is given in the same
+    floor frame and rides the lift, so raising the torso keeps the camera over the table.
     """
     # Centred over the table it watches, so a whole tabletop fits in the frame at this height. A
     # camera whose view cuts the table is not just coarse: a region cut by the image border is only
@@ -186,26 +215,48 @@ def cobot_magic(separation: float = 0.62, mount_height: float = 0.79,
     # own state for ever -- and raising the camera to fit a bigger table costs the small objects
     # the accuracy they are grasped with (measured: a plate's estimate wanders 2.3 cm at 1.85 m).
     top_camera = list(top_camera) if top_camera is not None else [0.42, 0.05, 1.60]
+    chassis = Link(
+        id="base", name="tracer chassis",
+        geometry={"collision": [primitive("box", [CHASSIS["length"], CHASSIS["width"], CHASSIS["height"]],
+                                          pose([0.0, 0.0, CHASSIS["height"] / 2]), ROBOT_BODY)],
+                  "visual": [primitive("box", [CHASSIS["length"], CHASSIS["width"], CHASSIS["height"]],
+                                       pose([0.0, 0.0, CHASSIS["height"] / 2]), ROBOT_BODY)]},
+        inertial=exact({"mass": CHASSIS["mass"]}),
+        # Wheels roll: a slab dragging on the floor at the robot body's friction cannot be turned
+        # in place, which a differential-drive base does all the time.
+        material=exact({"friction": 0.1}),
+    )
     frame = Link(
-        id="frame", name="cobot magic frame",
-        # A slim back column rather than a full-depth box: the workspace in front of the arms is
-        # table, and a vertical tool can only reach down onto it about 0.2-0.35 m out, so the
-        # frame must stay behind that band.
-        geometry={"collision": [primitive("box", [0.25, separation + 0.55, mount_height],
-                                          pose([-0.095, 0.0, mount_height / 2]), ROBOT_BODY)]},
+        id="frame", name="cobot magic lift carriage",
+        # The carriage is a slim back plate behind the arms, not a full-depth box: the workspace in
+        # front of the arms is table, and a vertical tool can only reach down onto it about
+        # 0.2-0.35 m out, so the torso must stay behind that band.
+        # Kept clear of the arm mounts: plates that start at the mount face collide with the folded
+        # arm (measured: the shoulder could not return to HOME, held 0.04 rad short by a contact).
+        geometry={"collision": [primitive("box", [0.12, separation + 0.55, 0.45],
+                                          pose([-0.13, 0.0, 0.20]), ROBOT_BODY)]},
         inertial=exact({"mass": 40.0}),
         sensors=[{
             "id": "top_camera", "kind": "rgbd",
-            # Straight down: the mount's +x (the optical axis) rotates onto world -z.
-            "mount": pose(top_camera, quat_from_axis_angle([0, 1, 0], math.pi / 2)),
+            # Straight down: the mount's +x (the optical axis) rotates onto world -z. Expressed
+            # relative to the carriage, so the camera rises and falls with the torso.
+            "mount": pose([top_camera[0], top_camera[1], top_camera[2] - mount_height],
+                          quat_from_axis_angle([0, 1, 0], math.pi / 2)),
             "intrinsics": {"width": 640, "height": 480, "fovy": camera_fovy}, "rateHz": 10,
         }],
     )
-    links = [frame]
-    joints: list[Joint] = []
+    links = [chassis, frame]
+    # The lift carries the arms and the overhead camera; home keeps the arms where they were
+    # before the machine had a torso.
+    joints: list[Joint] = [Joint(
+        id="lift", parent="base", child="frame", type=exact("prismatic"),
+        origin=exact(pose([0.0, 0.0, CHASSIS["height"]])), axis=exact([0.0, 0.0, 1.0]),
+        limits=exact({"lo": LIFT_RANGE[0], "hi": LIFT_RANGE[1]}), q=exact([LIFT_HOME]), qd=exact([0.0]),
+        dynamics=exact({"damping": 3000.0}),
+        # A lead screw holds its height; a soft position spring sags 7 cm under the torso's weight.
+        actuator={"kind": "position", "limits": {"effort": 4000.0, "velocity": 0.3}, "gains": {"kp": 120000.0}})]
     for prefix, side in (("L", 1.0), ("R", -1.0)):
-        arm_links, arm_joints = _piper_arm(
-            prefix, [0.0, side * separation / 2.0, mount_height], fovy=camera_fovy)
+        arm_links, arm_joints = _piper_arm(prefix, [0.0, side * separation / 2.0, 0.0], fovy=camera_fovy)
         links.extend(arm_links)
         joints.extend(arm_joints)
     return Entity(
@@ -213,6 +264,6 @@ def cobot_magic(separation: float = 0.62, mount_height: float = 0.79,
         role="robot",
         category=exact("cobot-magic"),
         pose=exact(pose()),
-        body=RigidTree(root=exact("fixed"), links=links, joints=joints),
+        body=RigidTree(root=exact("planar"), links=links, joints=joints, root_actuator=ROOT_ACTUATOR),
         state_vars={"gripper_left": exact("open"), "gripper_right": exact("open")},
     )

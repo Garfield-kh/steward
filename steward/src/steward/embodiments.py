@@ -25,7 +25,7 @@ EMBODIMENTS: dict[str, dict] = {
     },
     "cobot-magic": {
         "label": "AgileX Cobot Magic 双 Piper",
-        "description": "固定机架 + 双 Piper 6-DoF 臂 + 平行爪；顶部巡视 RGB-D + 双腕部 RGB-D 相机",
+        "description": "TRACER 差速底盘 + 升降柱 + 双 Piper 6-DoF 臂 + 平行爪；顶部巡视 RGB-D + 双腕部 RGB-D 相机",
         "profile": "cobot-magic.yaml",
         "ego": "cobot-ego",
         # The twin's Ego API has no skill endpoints yet, so the scenario's scripted mission runs

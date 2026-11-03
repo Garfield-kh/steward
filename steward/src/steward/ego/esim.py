@@ -61,6 +61,14 @@ class EsimConfig:
     carry_retreat_max: float = 1.2
     park_keep_clear: float = 0.9
     park_spacing: float = 0.5
+    # Belief-based risks: a pick is attempted rather than refused when the estimator's picture is
+    # incomplete, and the mission layer's risk limit (0.35) decides whether to look closer first.
+    blind_support_risk: float = 0.15  # no known surface under the target; the gripper checks the grasp
+    phantom_pick_cost: float = 0.5  # share of a target's non-existence that counts as pick risk
+    nesting_risk_each: float = 0.15  # pick risk per thing the estimator reads as inside the target
+    nesting_risk_cap: float = 0.35
+    graspable_max_m: float = 0.35  # a raised thing this small is tableware whatever the classifier says
+    miscategorised_risk: float = 0.15
     wrist_yaw_max: float = 3.1
     wrist_roll_max: float = 2.5
     pour_roll: float = 1.9
@@ -140,6 +148,14 @@ class Esim:
                 if ent is not None:
                     out.append(ent)
         return out
+
+    @staticmethod
+    def _relation_confidence(es: SceneState, inner: str, holder: str) -> float:
+        """How sure the estimator is that ``inner`` rests in or on ``holder`` (1.0 when unstated)."""
+        for rel in es.relations:
+            if rel.type == "supported-by" and rel.a.get("entity") == inner and rel.b.get("entity") == holder:
+                return float(rel.confidence if rel.confidence is not None else 1.0)
+        return 1.0
 
     def _covering(self, es: SceneState, target: Entity) -> list[str]:
         """Objects closing ``target`` from above (a lid on a box), judged by geometry: their base is
@@ -470,15 +486,19 @@ class Esim:
             raise PredictionError(f"unknown target {params.get('target')!r}")
         if self._held(es) is not None:
             raise PredictionError("the gripper is already holding an object")
-        if not self._affords(target, "graspable"):
+        tbox, target_bottom, _ = entity_box(target)
+        tableware_sized = max(tbox.hx, tbox.hy) * 2 < self.config.graspable_max_m and target_bottom > 0.3
+        miscategorised = not self._affords(target, "graspable")
+        if miscategorised and not tableware_sized:
             raise PredictionError(f"{target.id} ({target.category.value}) is not graspable")
         support = self._support_of(es, target)
+        # Upstream's floor rules: a small object off the floor is lifted clear of the base and
+        # carried like one off a table; a large one (a chair) stays low in front of the robot.
+        # The fork's rule stands on top of them: with no known support the pick is weighed, not
+        # refused -- refusing kept the robot circling the table for hours.
         target_box, target_bottom, target_top = entity_box(target)
         on_floor = support is None and target_bottom < FLOOR_LYING_M
-        if support is None and not on_floor:
-            raise PredictionError(f"no support surface is known under {target.id}; observe it first")
-        # A small object off the floor is lifted clear of the base and carried like one off a table;
-        # a large one (a chair) stays low in front of the robot.
+        blind = support is None and not on_floor
         carried_low = on_floor and 2 * max(target_box.hx, target_box.hy) > self.config.floor_lift_max_m
         tp = list(target.pose.value["p"])
         if on_floor:
@@ -489,10 +509,11 @@ class Esim:
             covering = self._covering(es, target)
             if covering:
                 raise PredictionError(f"{', '.join(covering)} lies on top of {target.id}; take it off first")
-        elif contents:
+        elif contents and self._affords(target, "receptacle"):
             raise PredictionError(f"{target.id} holds {', '.join(e.id for e in contents)}; take those out first")
-        anchor = target if on_floor else self._anchor(es, support)
-        approach = self._approach(es, anchor, (tp[0], tp[1]), tp[2], {target.id}, load=target if carried_low else None)
+        anchor = target if (on_floor or blind) else self._anchor(es, support)
+        approach = self._approach(es, anchor, (tp[0], tp[1]), tp[2], {target.id},
+                                  load=target if carried_low else None)
         sigma = math.hypot(self._sigma_xy(target), self._sigma_xy(self._self(es)))
         r = self.config.capture_radius
         p_miss = math.exp(-(r * r) / (2 * sigma * sigma)) if sigma > 0 else 0.0
@@ -500,19 +521,42 @@ class Esim:
         if p_miss > 0.05:
             issues.append(f"target position uncertainty {sigma * 100:.1f} cm gives {p_miss:.0%} miss probability; "
                           "observe the target more closely first")
-        existence_risk = 1.0 - target.existence
-        if existence_risk > 0.2:
+        # A grasp verifies itself: closing on nothing costs one retreat, nothing is damaged, and
+        # the miss is reported. So a doubtful target is only half the risk its doubt suggests.
+        existence_risk = self.config.phantom_pick_cost * (1.0 - target.existence)
+        if 1.0 - target.existence > 0.2:
             issues.append(f"target existence probability is only {target.existence:.2f}")
-        risk = 1.0 - (1.0 - p_miss) * (1.0 - existence_risk)
+        blind_risk = 0.0
+        if blind:
+            blind_risk = self.config.blind_support_risk
+            issues.append(f"no support surface is known under {target.id}; lowering to its position blind")
+        category_risk = 0.0
+        if miscategorised:
+            category_risk = self.config.miscategorised_risk
+            issues.append(f"{target.id} is read as {target.category.value}, which is not graspable, but is "
+                          "tableware-sized and raised; trying the grasp anyway")
+        nest_risk = 0.0
+        if contents:
+            # Something read as inside the target is, with a real segmenter, usually a neighbour
+            # whose box overlaps it (three bowls "inside" one bowl is a row of bowls). Lifting a
+            # bowl that really holds another spills the inner one, so each claimed content adds
+            # risk in proportion to how sure the estimator is -- but it never forbids the pick.
+            confidence = max(self._relation_confidence(es, c.id, target.id) for c in contents)
+            nest_risk = min(self.config.nesting_risk_cap, self.config.nesting_risk_each * len(contents)) * confidence
+            issues.append(f"{target.id} may hold {', '.join(e.id for e in contents)} (confidence {confidence:.2f})")
+        risk = 1.0 - (1.0 - p_miss) * (1.0 - existence_risk) * (1.0 - blind_risk) * (1.0 - nest_risk) \
+            * (1.0 - category_risk)
         if carried_low:
             carry_lift = tp[2] + self.config.floor_carry_lift
         elif on_floor:
             carry_lift = self.config.floor_furniture_height + 0.10
         else:
             carry_lift = tp[2] + 0.10
-        plan = {**approach, "target": target.id, "support": "floor" if on_floor else support.id, "lift": tp[2],
+        plan = {**approach, "target": target.id, "lift": tp[2], "targetP": [float(v) for v in tp],
+                "support": "floor" if on_floor else ("unknown" if blind else support.id),
                 "carryLift": min(self.config.lift_max, carry_lift), "keepReach": carried_low,
-                "captureRadius": self.config.capture_radius, "gentle": self._affords(target, "pourable")}
+                "captureRadius": self.config.capture_radius,
+                "gentle": self._affords(target, "pourable")}
         return self._receipt(es, "pick", params, risk, issues, plan)
 
     def _predict_place(self, es: SceneState, params: dict) -> dict:

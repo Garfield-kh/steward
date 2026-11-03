@@ -16,7 +16,11 @@ PHASES: dict[str, dict] = {
     },
     "phase1": {
         "label": "Phase 1 · RGB-D 感知链路",
-        "description": "WSim 只给 RGB、深度与匿名实例掩码；ER 自行反投影、分类、多视角积累与形状补全",
+        "description": "WSim 只给 RGB、深度与匿名实例掩码；ER 自行反投影、分类、多视角积累与形状补全。"
+                       "掩码默认仿真 oracle。可选 PerceptionConfig.mask_mode / RuntimeConfig.mask_source："
+                       "geometric、sam3、geo_sam3（几何∪SAM3，厨房消融召回最高）；"
+                       "环境变量 STEWARD_MASK_SOURCE、STEWARD_SAM3_URL。"
+                       "NVS / SLARM / NovelAnything 经 ego.providers 作门控深度/新视角辅助，勿无门控直接改写真实帧。",
         "perception": "rgbd",
     },
 }

@@ -9,11 +9,14 @@ dependencies = [
   "pillow>=10.0",
 ]
 
+[project.optional-dependencies]
+providers = ["requests>=2.31"]
+
 [project.scripts]
 steward = "steward.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "requests>=2.31"]
 
 [build-system]
 requires = ["hatchling"]

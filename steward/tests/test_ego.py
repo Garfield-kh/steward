@@ -92,3 +92,32 @@ def test_esim_place_requires_holding(kitchen_scene):
     receipt = Esim(model).predict(est.to_scene(), "place", {"on": table.id})
     assert not receipt["feasible"]
     assert "not holding" in receipt["issues"][0]
+
+
+def test_motion_state_reads_the_live_body_not_the_perception_clock(kitchen_scene):
+    """A real segmenter can be seconds behind. Motion grades itself on the body's own header;
+    the belief only supplies where the objects are."""
+    from steward.ego.runtime import EgoRuntime, RobotLink
+
+    runtime = EgoRuntime(RobotLink("http://127.0.0.1:1"), steward_bot().to_dict())
+    runtime.estimator.stamp = 5.0
+    runtime.estimator.odometry = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+
+    class Live:
+        @staticmethod
+        def sensors() -> dict:
+            return {"stamp": 9.0, "odometry": {"x": 1.0, "y": 2.0, "yaw": 0.5},
+                    "joints": {"lift": 0.4, "reach": 0.2},
+                    "gripper": {"state": "closed", "holding": True}}
+
+    class Dead:
+        @staticmethod
+        def sensors() -> dict:
+            raise OSError("robot port unavailable")
+
+    runtime.link = Live()
+    state = runtime._motion_state()
+    assert state["stamp"] == 9.0 and state["odometry"] == {"x": 1.0, "y": 2.0, "yaw": 0.5}
+    assert state["joints"] == {"lift": 0.4, "reach": 0.2} and state["gripper"]["holding"]
+    runtime.link = Dead()
+    assert runtime._motion_state()["stamp"] == 5.0, "an unreachable body leaves the belief as the answer"

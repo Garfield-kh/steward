@@ -25,7 +25,8 @@ from steward.ego.classify import SHAPES, classify, prototype
 from steward.ego.perception import box_at_yaw, box_of, segments
 from steward.ego.planner import Box2D, front_box, protrusion, room_centre
 from steward.ego.priors import compatible, prior
-from steward.math3d import pose_compose, pose_inverse, quat_from_yaw, wrap_angle, yaw_from_quat
+from steward.math3d import (pose_compose, pose_inverse, quat_from_axis_angle, quat_from_yaw, quat_mul,
+                            quat_rotate, wrap_angle, yaw_from_quat)
 from steward.scene.schema import Entity, Est, Link, Relation, RigidTree, SceneState, primitive
 
 SELF_ID = "e:self"
@@ -175,13 +176,16 @@ class EgoEstimator:
         """The most recent removals: ``{t, id, category, observations, reason, position, size, robot, into?}``."""
         self.version = 0
         self.stamp = 0.0
+        self.held_since = 0.0  # body time the current load was grasped at
         self.odometry = {"x": 0.0, "y": 0.0, "yaw": 0.0, "sigma": {"pos": 0.01, "yaw": 0.01}}
         self.joints: dict[str, float] = {}
         self.gripper = {"state": "open", "holding": False}
+        self.grippers: dict[str, dict] = {}
         self.held_id: str | None = None
+        self.held_gripper: str | None = None
         self._rng = np.random.default_rng(0)
         self._self_template = self._make_self_template()
-        self._head_mount, self._camera = self._camera_model()
+        self._camera_link_id, self._camera = self._camera_model()
 
     # ------------------------------------------------------------- body model
     def _make_self_template(self) -> dict:
@@ -190,46 +194,129 @@ class EgoEstimator:
         data.pop("asset", None)
         return data
 
-    def _camera_model(self) -> tuple[dict, dict]:
+    def _camera_model(self) -> tuple[str, dict]:
+        """The robot's active camera: ``(link id, sensor)``; the link pose comes from the tree walk."""
         tree = self.robot_model["body"]
         for link in tree["links"]:
             for sensor in link.get("sensors", []):
                 if sensor["kind"] in ("rgb", "depth", "rgbd"):
-                    mount_joint = next(j for j in tree["joints"] if j["child"] == link["id"])
-                    return mount_joint["origin"]["value"], sensor
+                    return link["id"], sensor
         raise ValueError("robot model has no camera")
+
+    # ------------------------------------------------------- generic kinematics
+    def _tree(self) -> tuple[dict[str, list[tuple[dict, str]]], str]:
+        """The robot's joint graph: children[parent] = [(joint, child link)] and the root link.
+
+        Any link's pose is one walk from the root; that is what lets a wrist camera move with the
+        arm, instead of the fixed head-mount assumption the mobile robot used."""
+        cached = getattr(self, "_joint_tree", None)
+        if cached is not None:
+            return cached
+        tree = self.robot_model["body"]
+        children: dict[str, list[tuple[dict, str]]] = {}
+        child_ids = set()
+        for joint in tree["joints"]:
+            children.setdefault(joint["parent"], []).append((joint, joint["child"]))
+            child_ids.add(joint["child"])
+        root_id = tree["root"]
+        if isinstance(root_id, dict):
+            root_id = root_id.get("value")
+        if root_id not in children and root_id not in child_ids:
+            roots = [link["id"] for link in tree["links"] if link["id"] not in child_ids]
+            root_id = roots[0]
+        self._joint_tree = (children, root_id)
+        return self._joint_tree
+
+    def link_pose(self, link_id: str, joints: dict | None = None) -> dict:
+        """Pose of any link in the world frame, from joint encoders.
+
+        ``joints`` overrides the estimator's own last-seen encoders: the Ego-State view asks for
+        the pose the arm is in *now*, which is a read, not a perception update."""
+        children, root_id = self._tree()
+        path: list[tuple[dict, str]] = []
+        found = self._path_to(children, root_id, link_id, path, set())
+        if not found:
+            raise KeyError(f"robot model has no link {link_id!r} reachable from {root_id!r}")
+        q = self.joints if joints is None else joints
+        pose = self.base_pose()
+        for joint, _ in path:
+            pose = _apply_joint(pose, joint, q.get(joint["id"], 0.0))
+        return pose
+
+    def _path_to(self, children, here: str, target: str, path: list, seen: set[str]) -> bool:
+        if here == target:
+            return True
+        if here in seen:
+            return False
+        seen.add(here)
+        for joint, child in children.get(here, []):
+            path.append((joint, child))
+            if self._path_to(children, child, target, path, seen):
+                return True
+            path.pop()
+        return False
+
+    def camera_poses(self) -> dict[str, dict]:
+        """World pose of every camera the robot carries, keyed by sensor id."""
+        out = {}
+        tree = self.robot_model["body"]
+        for link in tree["links"]:
+            for sensor in link.get("sensors", []):
+                if sensor["kind"] in ("rgb", "depth", "rgbd"):
+                    out[sensor["id"]] = pose_compose(self.link_pose(link["id"]), sensor["mount"])
+        return out
 
     def base_pose(self) -> dict:
         o = self.odometry
         return {"p": [o["x"], o["y"], 0.0], "q": quat_from_yaw(o["yaw"])}
 
-    def camera_pose(self, odometry: dict | None = None) -> dict:
-        """World pose of the head camera mount (looks along +x), at the current odometry or a given one."""
-        o = odometry or self.odometry
-        base = {"p": [o["x"], o["y"], 0.0], "q": quat_from_yaw(o["yaw"])}
-        return pose_compose(pose_compose(base, self._head_mount), self._camera["mount"])
+    def camera_pose(self, sensor_id: str | None = None, odometry: dict | None = None) -> dict:
+        """World pose of a camera: the one a frame came from, or the head camera at an odometry.
 
-    def gripper_position(self) -> np.ndarray:
-        """Gripper position from the robot's own kinematics (base, lift, reach)."""
+        The body's own kinematics place every sensor, which is what a body whose cameras ride on
+        its arms (the twin) needs; a body with a fixed head can also ask where that head would be
+        at another odometry."""
+        if sensor_id is not None:
+            return self.camera_poses()[sensor_id]
+        pose = pose_compose(self.link_pose(self._camera_link_id), self._camera["mount"])
+        if odometry is None:
+            return pose
+        # The same camera on a robot standing at another odometry: its pose in the base frame
+        # (from the current joint state), carried to that base pose.
+        base = {"p": [odometry["x"], odometry["y"], 0.0], "q": quat_from_yaw(odometry["yaw"])}
+        in_base = pose_compose(pose_inverse(self.base_pose()), pose)
+        return pose_compose(base, in_base)
+
+    def _camera_link(self) -> str:
+        return self._camera_link_id
+
+    def gripper_position(self, gripper_link: str | None = None, joints: dict | None = None) -> np.ndarray:
+        """Pinch point of a gripper, from the robot's own kinematics."""
         tree = self.robot_model["body"]
-        lift = next(j for j in tree["joints"] if j["id"] == "lift")
-        grip = next(j for j in tree["joints"] if j["id"] == "gripper_mount")
-        local_x = lift["origin"]["value"]["p"][0] + self.joints.get("reach", 0.0) + grip["origin"]["value"]["p"][0]
-        local = {"p": [local_x, 0.0, self.joints.get("lift", 0.0)], "q": [1, 0, 0, 0]}
-        return np.asarray(pose_compose(self.base_pose(), local)["p"])
+        if gripper_link is None:
+            gripper_link = next(link["id"] for link in tree["links"]
+                                if any((a if isinstance(a, str) else a.get("value")) == "grasp-point"
+                                       for a in link.get("affordances", [])))
+        pose = self.link_pose(gripper_link, joints)
+        link = next(link for link in tree["links"] if link["id"] == gripper_link)
+        for affordance in link.get("affordances", []):
+            value = affordance.get("value") if isinstance(affordance, dict) else affordance
+            if isinstance(value, dict) and "tcp-offset" in value:
+                return np.asarray(pose_compose(pose, value["tcp-offset"])["p"])
+        return np.asarray(pose["p"])
 
     # ----------------------------------------------------------------- update
     def update(self, frame: dict) -> None:
         self.stamp = float(frame["stamp"])
         self.odometry = frame["odometry"]
         self.joints = frame["joints"]
-        self.gripper = frame["gripper"]
+        self._read_grippers(frame)
         if not self.gripper.get("holding"):
             self._clear_held()
         # A held object moves with this frame's body pose; update it before association so a
         # turning robot does not see its own load as a new object.
         self._follow_held()
-        cam = self.camera_pose()
+        cam = self.camera_pose(self._frame_camera(frame))
         measurements = []
         for det in frame.get("detections", []):
             world = pose_compose(cam, det["pose"])
@@ -259,6 +346,16 @@ class EgoEstimator:
         self.version += 1
 
     # ------------------------------------------------------------- RGB-D path
+    @staticmethod
+    def _frame_camera(frame: dict, header: dict | None = None) -> str | None:
+        """The sensor a frame came from; a robot with several cameras reports it per frame."""
+        for source in (frame, header):
+            if isinstance(source, dict):
+                camera = source.get("camera")
+                if isinstance(camera, dict) and camera.get("id"):
+                    return str(camera["id"])
+        return None
+
     def update_rgbd(self, frame: dict) -> None:
         """Fuse one decoded RGB-D frame: segment it, measure every region, associate regions with
         tracks by position, size and category, and rebuild each matched track's box from the
@@ -267,11 +364,11 @@ class EgoEstimator:
         self.stamp = float(header["stamp"])
         self.odometry = header["odometry"]
         self.joints = header["joints"]
-        self.gripper = header["gripper"]
+        self._read_grippers(header)
         if not self.gripper.get("holding"):
             self._clear_held()
         self._follow_held()
-        cam = self.camera_pose()
+        cam = self.camera_pose(self._frame_camera(frame, header))
         cam_p = np.asarray(cam["p"])
         measurements = []
         for seg in segments(frame, cam, rng=self._rng):
@@ -297,8 +394,11 @@ class EgoEstimator:
                 # inside its box and below its top; something standing on it starts at or above the top,
                 # and an open drawer reaches out of it.
                 m_bottom, m_top = m["centre"][2] - m["size"][2] / 2, m["centre"][2] + m["size"][2] / 2
-                part_of_large = track.footprint > 0.3 and _footprint_inside(track, m, 0.05) \
+                part_of_large = track.footprint > 0.3 and m["footprint"] >= 0.3 \
+                    and _footprint_inside(track, m, 0.05) \
                     and m_top <= track.top() + 0.1 and m_bottom < track.top() - 0.02
+                # (a tableware-sized region is never a part of furniture: a bowl on a table whose
+                # top drifted up would join the table and lift its top further, round after round)
                 if d > gate and not part_of_large:
                     continue
                 if track.held and m["footprint"] > HELD_LARGER * track.footprint + 0.05:
@@ -342,10 +442,14 @@ class EgoEstimator:
                 track = self._new_cloud_track(m, cam_p)
                 matched.add(track.id)
         self._decay_unseen_rgbd(cam, matched, frame)
+        self._merge_duplicates()
         self._merge_parts(cam_p)
+        self._dedupe_furniture(cam_p)
+        self._merge_rim_fragments()
         self._merge_same_surface(cam_p)
         self._merge_walls(cam_p)
         self._drop_impossible(cam_p)
+        self._drop_orphan_parts()
         self._follow_held()
         self.version += 1
 
@@ -368,6 +472,32 @@ class EgoEstimator:
             if holds_robot or wall_tall or hollow:
                 self._drop(track, "holds the robot's base" if holds_robot else
                            "as tall as a wall" if wall_tall else "hollow: its surfaces lie behind its centre")
+
+    def _drop_orphan_parts(self) -> None:
+        """A drawer is a part of a piece of furniture; one standing on its own is a misread edge.
+
+        A tabletop's apron or the shadow line under its front panel segments as a "drawer", and
+        as a support surface it is poison for planning: every approach to something resting on it
+        is docked against the phantom's own small box, which puts the robot's body inside the
+        real furniture, so all four sides come back as collisions and the piece can never be
+        picked. It must also sit within the furniture's own height: a drawer above a tabletop is
+        the apron seen from above. The parent is normally established; when it is not, the part
+        is re-read later."""
+        furniture = [t for t in self.tracks.values()
+                     if t.category != "drawer" and t.footprint >= 0.4
+                     and "support-surface" in prior(t.category)["affordances"]]
+        for track in list(self.tracks.values()):
+            if track.category != "drawer" or track.held:
+                continue
+            # A real drawer sits inside its furniture piece: it does not rise above its top (a
+            # tabletop apron read as a drawer is a long, shallow box along the near edge, and it
+            # comes out ABOVE the top it belongs to). Seen from a steeper camera that box is wide
+            # enough to count as a support surface, and then every approach to anything on the
+            # table is planned against it and reported as colliding.
+            inside = any(_inside(f, track.pos, 0.12) and f.bottom() - 0.06 <= track.pos[2] <= f.top() + 0.06
+                         and track.top() <= f.top() + 0.05 for f in furniture)
+            if not inside:
+                self._drop(track, "orphan drawer: not inside any furniture")
 
     def _decay_unseen_rgbd(self, cam: dict, matched: set[str], frame: dict) -> None:
         """Weigh the evidence against tracks that should be in view but were not segmented.
@@ -484,6 +614,68 @@ class EgoEstimator:
                              "robot": [round(self.odometry["x"], 3), round(self.odometry["y"], 3)],
                              **({"into": into.id} if into is not None else {})})
 
+    def _dedupe_furniture(self, cam_p: np.ndarray) -> None:
+        """Fold furniture-scale duplicates at one spot into the copy that can be trusted.
+
+        A real segmenter answers "table" with a different region every view — a floating top
+        slab from one, the table with the glass glued to it from another — and such copies never
+        associate (parts of one object are expected to arrive inside its box, not around it), so
+        two or three tables pile up on the same footprint and the planner picks any of them. The
+        copy to keep is the one that reaches the floor, else the one with the lowest top: things
+        glued onto a copy only ever lift its top. The dropped copy's points are not merged — its
+        geometry is the untrustworthy one, and folding it in widens the kept box until the
+        category flips (a table 1.7 m wide reads as a counter and gets a counter's height)."""
+        big = [t for t in self.tracks.values() if not t.held and t.footprint >= 0.5
+               and t.category not in ("wall", "drawer")]
+        for i, a in enumerate(big):
+            for b in big[i + 1:]:
+                if a.id not in self.tracks or b.id not in self.tracks:
+                    continue
+                if float(np.linalg.norm(a.pos[:2] - b.pos[:2])) > 0.4 * max(a.footprint, b.footprint):
+                    continue
+                if abs(a.top() - b.top()) > 0.25:
+                    continue  # stacked different things, not two readings of one
+                a_floor, b_floor = a.bottom() < 0.12, b.bottom() < 0.12
+                if a_floor != b_floor:
+                    keep, drop = (a, b) if a_floor else (b, a)
+                else:
+                    keep, drop = (a, b) if a.top() <= b.top() else (b, a)
+                keep.observations += drop.observations
+                keep.existence = max(keep.existence, drop.existence)
+                self._drop(drop, "merged: furniture duplicate", into=keep)
+
+    def _merge_rim_fragments(self) -> None:
+        """Fold a sparse tableware track into the fuller neighbour that covers it.
+
+        A prompt on a wide bowl's rim returns the rim arc as reliably as another view returns the
+        whole bowl, so the arc becomes a track with existence as high as the bowl's — and a grasp
+        aimed at its centre misses by the bowl's radius. What marks the arc is its footprint: a
+        ring fills a fraction of its own box that a whole vessel fills most of."""
+        tracks = [t for t in self.tracks.values()
+                  if not t.held and t.footprint < 0.45 and t.bottom() > 0.2 and t.voxels is not None]
+        fills = {t.id: _footprint_fill(_points(t.voxels), t.pos, t.size, t.yaw) for t in tracks}
+        for thin in tracks:
+            if thin.id not in self.tracks or fills.get(thin.id, 1.0) >= 0.45:
+                continue
+            host = None
+            for other in tracks:
+                if other.id == thin.id or other.id not in self.tracks or other.footprint < thin.footprint * 1.2:
+                    continue
+                if fills.get(other.id, 0.0) < 0.55:
+                    continue
+                if abs(other.pos[2] - thin.pos[2]) > 0.12:
+                    continue
+                if float(np.linalg.norm(other.pos[:2] - thin.pos[:2])) > 0.5 * other.footprint:
+                    continue
+                if not _inside(other, thin.pos, 0.02):
+                    continue
+                host = other
+                break
+            if host is not None:
+                host.observations += thin.observations
+                host.existence = max(host.existence, thin.existence)
+                self._drop(thin, "merged: rim fragment into the whole vessel", into=host)
+
     def _merge_same_surface(self, cam_p: np.ndarray) -> None:
         """Merge tracks whose accumulated points lie on the same surfaces (duplicates from views
         that were not associated). Nested bowls are different surfaces and stay apart."""
@@ -500,7 +692,10 @@ class EgoEstimator:
                 shared = {tuple(v) for v in a.voxels} & {tuple(v) for v in b.voxels}
                 if len(shared) < 0.5 * min(len(a.voxels), len(b.voxels)):
                     continue
-                keep, drop = (a, b) if a.observations >= b.observations else (b, a)
+                if a.held or b.held:
+                    keep, drop = (a, b) if a.held else (b, a)
+                else:
+                    keep, drop = (a, b) if a.observations >= b.observations else (b, a)
                 keep.voxels = self._union(keep.voxels, drop.voxels)
                 for cat, n in drop.category_counts.items():
                     keep.category_counts[cat] = keep.category_counts.get(cat, 0.0) + n
@@ -529,7 +724,10 @@ class EgoEstimator:
                     continue
                 if abs(float(d @ along)) - (a.size[0] + b.size[0]) / 2 > 0.4:
                     continue
-                keep, drop = (a, b) if a.observations >= b.observations else (b, a)
+                if a.held or b.held:
+                    keep, drop = (a, b) if a.held else (b, a)
+                else:
+                    keep, drop = (a, b) if a.observations >= b.observations else (b, a)
                 keep.voxels = self._union(keep.voxels, drop.voxels)
                 for cat, n in drop.category_counts.items():
                     keep.category_counts[cat] = keep.category_counts.get(cat, 0.0) + n
@@ -671,6 +869,25 @@ class EgoEstimator:
         object, which every view shows almost whole, takes the median of its recent single-view
         boxes instead: a union of views swells when a merged duplicate or a stray view sits a few
         centimetres off, enough to turn a mug into a bowl."""
+        shape = SHAPES.get(track.category)
+        total = sum(track.category_counts.values()) or 1.0
+        if shape and shape.get("floor") and "scale" not in shape and track.voxels is not None \
+                and track.category_counts.get(track.category, 0.0) / total > 0.6:
+            # Floor-standing furniture is never much taller than its prototype. Points above that
+            # are tableware a view glued onto it; left in, they lift the top until everything
+            # standing on the surface lies inside the box and is swallowed as a part of it.
+            pts = _points(track.voxels)
+            cap = shape["dims"][2] * 1.15
+            if "support-surface" in prior(track.category)["affordances"] and len(pts) >= 50:
+                # A surface's own top is the densest level of the cloud (a whole plane of points);
+                # what stands on it is sparse. Cap just above the highest dense level.
+                counts, edges = np.histogram(pts[:, 2], bins=np.arange(0.0, 2.0, 0.02))
+                dense = np.nonzero(counts >= 0.3 * counts.max())[0]
+                if len(dense):
+                    cap = min(cap, float(edges[dense[-1] + 1]) + 0.03)
+            low = pts[:, 2] <= cap
+            if not low.all() and int(low.sum()) >= 10:
+                track.voxels = _voxelize(pts[low])
         centre, size, yaw = box_of(_points(track.voxels), trim=0.01)
         if max(size[0], size[1]) < SMALL_M and len(track.recent) >= 3:
             centre = np.median([c for c, _ in track.recent], axis=0)
@@ -712,7 +929,10 @@ class EgoEstimator:
             if size[2] < 0.85 * height:
                 grow = height - size[2]
                 bottom = centre[2] - size[2] / 2
-                if bottom < 0.15:
+                if SHAPES.get(track.category, {}).get("floor") and bottom >= 0.15:
+                    shift[2] = -grow / 2.0  # floor-standing, seen from above: the top is the seen
+                    # surface and the unseen part is below it — growing up would float the box
+                elif bottom < 0.15:
                     shift[2] = height / 2.0 - centre[2]  # floor-standing: the base is on the floor
                 else:
                     shift[2] = grow / 2.0  # resting on something: the unseen part is above
@@ -725,6 +945,12 @@ class EgoEstimator:
             top = centre[2] + size[2] / 2
             size[2], centre[2] = top, top / 2
         bottom = centre[2] - size[2] / 2
+        if size[2] < 0.15 and min(size[0], size[1]) >= 0.5 and bottom > 0.3:
+            # A wide, thin, level slab in mid-air is the top of furniture whose body no view has
+            # joined to it (a real segmenter hands over a tabletop alone); it stands on the floor.
+            top = centre[2] + size[2] / 2
+            size[2], centre[2] = top, top / 2
+            bottom = 0.0
         if size[0] < 0.3 and bottom > 0.15:
             # Something small off the floor rests on something: extend the box down to the nearest
             # surface (or receptacle floor) just below its visible part.
@@ -764,6 +990,15 @@ class EgoEstimator:
             if float(np.linalg.norm(track.pos - pos)) <= self._gate(track, sigma):
                 out.append(track)
         return out
+
+    def _forget(self, track_id: str) -> None:
+        """Delete a track, and never silently amputate what the gripper is holding: when the load
+        is the track that would go, the pair is not merged after all."""
+        if track_id == self.held_id:
+            return
+        track = self.tracks.get(track_id)
+        if track is not None:
+            self._drop(track, "forgotten")
 
     def _merge_duplicates(self) -> None:
         """Merge compatible tracks whose centres lie inside each other's uncertainty-expanded
@@ -875,17 +1110,47 @@ class EgoEstimator:
         self.tracks = {held.id: held} if held is not None else {}
         self.version += 1
 
+    def reboot(self) -> None:
+        """Forget everything, as a power cycle would: the world's clock went backwards, so no track,
+        load or encoder reading from before is about this episode. The body model stays; the id
+        counter goes on so a console label never means two different objects."""
+        self.tracks = {}
+        self.stamp = 0.0
+        self.held_since = 0.0
+        self.odometry = {"x": 0.0, "y": 0.0, "yaw": 0.0, "sigma": {"pos": 0.01, "yaw": 0.01}}
+        self.joints = {}
+        self.gripper = {"state": "open", "holding": False}
+        self.grippers = {}
+        self.held_id = None
+        self.held_gripper = None
+        self.version += 1
+
     # ---------------------------------------------------------------- holding
-    def mark_held(self, track_id: str) -> str:
-        """The gripper closed on ``track_id``: carry that track with it from now on, together with
-        the tracks lying in it (see :meth:`support_of`). If the track was merged into another while
-        the robot approached, the track nearest the gripper (within ``HELD_FALLBACK_M``) is the one
-        it holds.
+    def mark_held(self, track_id: str, since: float | None = None, gripper: str | None = None,
+                  at: list[float] | None = None) -> str:
+        """Record the grasp, and carry its load with the arm, together with what lies in it.
+
+        ``since`` is the body's clock at the moment the gripper closed: a frame rendered before
+        that moment still reports an open gripper, and must not be read as the load having been
+        dropped. With a real segmenter frames are seconds apart, so without this every grasp would
+        be forgotten by the next frame that arrives.
+
+        ``gripper`` is the link that took the load. A dual-arm body needs it: the load follows the
+        arm that is actually holding it, and the other arm's state says nothing about it. ``at`` is
+        the pinch point the gripper closed at -- without it the offset is measured against the
+        encoders from *before* the approach, and the load hangs half a metre from the hand.
+
+        A previous mark still standing when a new grasp is recorded cannot still be true (the
+        gripper opened to take this load), and no frame may ever arrive to clear it when skills run
+        without looks, so it is dropped here. If the tracked object was merged away during the
+        approach, the track nearest the gripper takes the load instead.
 
         :returns: the id of the held track.
         :raises KeyError: no track is near the gripper."""
+        if track_id != self.held_id:
+            self._unmark_held(self.tracks.get(self.held_id))
         if track_id not in self.tracks:
-            grip = self.gripper_position()
+            grip = self.gripper_position(gripper)
             near = min(self.tracks.values(), key=lambda t: float(np.linalg.norm(t.pos - grip)), default=None)
             if near is None or float(np.linalg.norm(near.pos - grip)) > HELD_FALLBACK_M:
                 raise KeyError(f"{track_id} is no longer in the ego state and nothing else is in the gripper")
@@ -895,12 +1160,46 @@ class EgoEstimator:
             if other is not track and not other.held and self.support_of(other) is track:
                 other.carried_offset = other.pos - track.pos
                 other.voxels = None
+        self.held_since = max(self.stamp, float(since) if since is not None else self.stamp)
+        self.held_gripper = gripper
+        closed_at = self.gripper_position(gripper) if at is None else np.asarray(at, dtype=float)
         track.held = True
-        track.held_offset = track.pos - self.gripper_position()
+        track.held_offset = track.pos - closed_at
         track.held_yaw = wrap_angle(track.yaw - self.odometry["yaw"] - self.joints.get("wrist_yaw", 0.0))
         track.recent.clear()  # it will be put down elsewhere
         self.held_id = track_id
         return track_id
+
+    def release_held(self, at: list[float] | None = None) -> None:
+        """Record the release, from the skill that just opened the gripper.
+
+        ``at`` is where the load was let go -- the place target. The robot knows what it did; the
+        belief should say so at once instead of waiting for a look that may be seconds away (or,
+        at the end of a round, never come). Without ``at`` the last known position stands and the
+        track is simply unsettled: the next look places it."""
+        track = self.tracks.get(self.held_id) if self.held_id else None
+        if track is not None and at is not None:
+            track.pos = np.asarray(at, dtype=float)
+        self._unmark_held(track)
+
+    def _unmark_held(self, track) -> None:
+        self.held_id = None
+        self.held_gripper = None
+        for other in self.tracks.values():
+            if other.carried:
+                other.carried_offset = None  # it lies in the container where that was put down
+                other.settled = False
+                other.var = np.maximum(other.var, 0.02**2)
+        if track is None:
+            return
+        if track.appearance is not None:
+            track.appearance.stale = True  # it may have been put down turned over
+        track.held = False
+        track.held_offset = None
+        track.voxels = None
+        track.settled = False  # it settles where it was put down; the next view places it
+        track.var = np.maximum(track.var, 0.02**2)
+        track.yaw_var = max(track.yaw_var, YAW_MOVED**2)
 
     def remember_face(self, track_id: str, rgb: np.ndarray, stamp: float) -> Appearance | None:
         """Keep one view of a track's top face, sampled on its appearance grid (see
@@ -931,34 +1230,78 @@ class EgoEstimator:
         return max(1, round(float(track.size[0]) / cell)), max(1, round(float(track.size[1]) / cell))
 
     def _clear_held(self) -> None:
-        if self.held_id and self.held_id in self.tracks:
-            track = self.tracks[self.held_id]
-            if track.appearance is not None:
-                track.appearance.stale = True  # it may have been put down turned over
-            track.held = False
-            track.held_offset = None
-            track.voxels = None
-            track.settled = False  # it drops a little when released; the next view places it
-            track.var = np.maximum(track.var, 0.02**2)
-            track.yaw_var = max(track.yaw_var, YAW_MOVED**2)
-        for track in self.tracks.values():
-            if track.carried:
-                track.carried_offset = None  # it lies in the container where that was put down
-                track.settled = False
-                track.var = np.maximum(track.var, 0.02**2)
+        if self.stamp < self.held_since - 1e-6:
+            return  # this frame was rendered while the gripper was still open
+        track = self.tracks.get(self.held_id) if self.held_id else None
+        # It is where the hand let go of it, not where it was picked up: the arm carried it
+        # across the table, and a look taken after the release must recognise it there rather
+        # than find a second bowl at the old place.
+        if track is not None and track.held_offset is not None:
+            track.pos = self.gripper_position(self.held_gripper) + track.held_offset
+        self._unmark_held(track)
         self.held_id = None
+        self.held_gripper = None
+        if track is None:
+            return
+        track.held = False
+        track.held_offset = None
+        track.voxels = None
+        track.settled = False  # it settles where it was put down; the next view places it
+        track.var = np.maximum(track.var, 0.02**2)
+
+    def _read_grippers(self, frame: dict) -> None:
+        """The gripper state this frame reports, for a single gripper or for one per arm.
+
+        A one-armed robot sends ``gripper``. A dual-arm body sends ``grippers`` per link and no
+        summary, because "closed" would have to say which arm — so while a load is held this reads
+        the arm that holds it, and otherwise reports whether any of them is holding."""
+        self.grippers = dict(frame.get("grippers") or {})
+        if self.held_gripper in self.grippers:
+            self.gripper = self.grippers[self.held_gripper]
+        elif frame.get("gripper"):
+            self.gripper = frame["gripper"]
+        elif self.grippers:
+            self.gripper = {"state": "closed" if any(g.get("state") == "closed" for g in self.grippers.values()) else "open",
+                            "holding": any(g.get("holding") for g in self.grippers.values()),
+                            "holdingHandle": any(g.get("holdingHandle") for g in self.grippers.values())}
+        else:
+            self.gripper = {"state": "open", "holding": False, "holdingHandle": False}
+
+    def _clear_held(self) -> None:
+        if self.stamp < self.held_since - 1e-6:
+            return  # this frame was rendered while the gripper was still open
+        track = self.tracks.get(self.held_id) if self.held_id else None
+        # It is where the hand let go of it, not where it was picked up: the arm carried it
+        # across the table, and a look taken after the release must recognise it there rather
+        # than find a second bowl at the old place.
+        if track is not None and track.held_offset is not None:
+            track.pos = self.gripper_position(self.held_gripper) + track.held_offset
+        self._unmark_held(track)
 
     def _follow_held(self) -> None:
         if self.held_id and self.held_id in self.tracks:
             track = self.tracks[self.held_id]
-            track.pos = self.gripper_position() + track.held_offset
-            track.yaw = wrap_angle(self.odometry["yaw"] + self.joints.get("wrist_yaw", 0.0) + track.held_yaw)
-            poured = abs(self.joints.get("wrist_roll", 0.0)) > self.config.poured_roll
-            for content in [t for t in self.tracks.values() if t.carried]:
-                if poured:
-                    self._drop(content, f"poured out of {track.id}: perceived afresh where it lands")
-                else:
-                    content.pos = track.pos + content.carried_offset
+    def _follow_held(self) -> None:
+        if not (self.held_id and self.held_id in self.tracks):
+            return
+        track = self.tracks[self.held_id]
+        track.pos = self.gripper_position(self.held_gripper) + track.held_offset
+        track.yaw = wrap_angle(self.odometry["yaw"] + self.joints.get("wrist_yaw", 0.0) + track.held_yaw)
+        poured = abs(self.joints.get("wrist_roll", 0.0)) > self.config.poured_roll
+        for content in [t for t in self.tracks.values() if t.carried]:
+            if poured:
+                self._drop(content, f"poured out of {track.id}: perceived afresh where it lands")
+            else:
+                content.pos = track.pos + content.carried_offset
+
+    def held_position(self, joints: dict | None = None):
+        """Where the load is, for the given joint state: in the gripper that took it."""
+        if not self.held_id or self.held_id not in self.tracks:
+            return None
+        track = self.tracks[self.held_id]
+        if track.held_offset is None:
+            return np.asarray(track.pos, dtype=float)
+        return self.gripper_position(self.held_gripper, joints) + track.held_offset
 
     # ------------------------------------------------------------------ output
     def support_of(self, track: Track) -> Track | None:
@@ -1006,6 +1349,43 @@ class EgoEstimator:
         """The track's footprint with +x pointing out of its front (towards the room centre)."""
         return front_box(_box2d(track), room_centre([_box2d(t) for t in self.tracks.values()]))
 
+    def relocate(self, track_id: str, pos: np.ndarray) -> bool:
+        """Re-place a track from a fresh close look taken for an imminent action.
+
+        An accumulated position can be biased by the partial views it was fused from; a text-
+        prompted segmentation taken beside the object is not. The track keeps its identity,
+        category and extent — only where it stands is restated, and confidently: this one view
+        is the best evidence the robot has ever had of this position."""
+        track = self.tracks.get(track_id)
+        if track is None:
+            return False
+        track.pos = np.asarray(pos, float)
+        track.var = np.array([0.015**2, 0.015**2, track.var[2]])
+        self.version += 1
+        return True
+
+    def release_at(self, track_id: str, spot: list[float]) -> bool:
+        """Record where a placed object was actually let go.
+
+        While the gripper holds something the track follows the gripper, and the last frame the
+        ego saw it holding can precede the release by a whole perception period — long enough
+        for the arm to extend and the base to back away. Without this the object stays believed
+        where it was still held, often half a metre from where it now stands, and the next pick
+        of it aims at the pose the robot had back then."""
+        track = self.tracks.get(track_id)
+        if track is None:
+            return False
+        track.pos = np.array([float(spot[0]), float(spot[1]), float(track.pos[2])])
+        track.var = np.maximum(track.var, 0.02**2)
+        track.voxels = None
+        track.settled = False  # it drops the last few millimetres when the grip opens
+        track.held = False
+        track.held_offset = None
+        if self.held_id == track_id:
+            self.held_id = None
+        self.version += 1
+        return True
+
     def shift(self, track_id: str, delta: np.ndarray) -> list[str]:
         """Move a track the robot itself moved (a drawer it pulled) together with what it holds."""
         track = self.tracks.get(track_id)
@@ -1020,11 +1400,23 @@ class EgoEstimator:
         self.version += 1
         return carried
 
-    def to_scene(self) -> SceneState:
-        entities = [self._self_entity()]
+    def to_scene(self, self_frame: dict | None = None) -> SceneState:
+        """The Ego State as a scene.
+
+        ``self_frame`` is the robot's *current* sensor frame, when the caller has one. Proprioception
+        is continuous — the robot knows its joint angles without looking — so a console can show the
+        arm where it is now while the object beliefs stay as old as the last look. Object tracks are
+        never refreshed by it.
+        """
+        entities = [self._self_entity(self_frame)]
+        # A held object is not where the last look saw it: it is in the hand. That is a kinematic
+        # fact, so it is read here rather than mutating the track from a rendering thread.
+        held_at = self.held_position(None if self_frame is None else self_frame.get("joints"))
         relations: list[Relation] = []
-        for track in self.tracks.values():
-            entities.append(self._track_entity(track))
+        # A snapshot of the track objects: the Ego-State is also read from a view thread while the
+        # perception thread adds and drops tracks, and a dict that changes size mid-iteration raises.
+        for track in list(self.tracks.values()):
+            entities.append(self._track_entity(track, at=held_at if track.id == self.held_id else None))
             if track.held:
                 relations.append(Relation(type="attached", a={"entity": track.id}, b={"entity": SELF_ID, "link": "gripper"},
                                           mode="rigid", derived=False, confidence=1.0))
@@ -1036,20 +1428,23 @@ class EgoEstimator:
         return SceneState(mode="ego", entities=entities, relations=relations, version=self.version, stamp=self.stamp,
                           self_id=SELF_ID)
 
-    def _self_entity(self) -> Entity:
+    def _self_entity(self, frame: dict | None = None) -> Entity:
         ent = Entity.from_dict(self._self_template)
+        joints = self.joints if frame is None else (frame.get("joints") or self.joints)
+        gripper = self.gripper if frame is None else (frame.get("gripper") or self.gripper)
+        stamp = self.stamp if frame is None else float(frame.get("stamp", self.stamp))
         o = self.odometry
         pos_var = o["sigma"]["pos"] ** 2
         yaw_var = o["sigma"]["yaw"] ** 2
         ent.pose = Est(value=self.base_pose(), unc=_gaussian6([pos_var, pos_var, 1e-8, 1e-8, 1e-8, yaw_var]),
-                       t=self.stamp, src="observed")
+                       t=stamp, src="observed")
         tree: RigidTree = ent.body
         for joint in tree.joints:
-            if joint.id in self.joints:
-                joint.q = Est(value=[self.joints[joint.id]], unc={"kind": "gaussian", "cov": [1e-6]}, t=self.stamp,
+            if joint.id in joints:
+                joint.q = Est(value=[joints[joint.id]], unc={"kind": "gaussian", "cov": [1e-6]}, t=stamp,
                               src="observed")
-        ent.state_vars["gripper"] = Est(value=self.gripper["state"], t=self.stamp, src="observed")
-        ent.state_vars["holding"] = Est(value=self.gripper.get("holding", False), t=self.stamp, src="observed")
+        ent.state_vars["gripper"] = Est(value=gripper["state"], t=stamp, src="observed")
+        ent.state_vars["holding"] = Est(value=gripper.get("holding", False), t=stamp, src="observed")
         return ent
 
     def annotate(self, track_id: str, label: str | None = None, affordances: list[str] | None = None) -> None:
@@ -1064,7 +1459,7 @@ class EgoEstimator:
             track.annotated_affordances = list(affordances)
         self.version += 1
 
-    def _track_entity(self, track: Track) -> Entity:
+    def _track_entity(self, track: Track, at=None) -> Entity:
         p = prior(track.category)
         total = sum(track.category_counts.values())
         cat_unc = {"kind": "categorical", "p": {track.label: 1.0} if track.label else
@@ -1084,7 +1479,8 @@ class EgoEstimator:
             id=track.id,
             role=p["role"],
             category=Est(value=track.category, unc=cat_unc, t=track.last_seen, src=src),
-            pose=Est(value={"p": track.pos.tolist(), "q": quat_from_yaw(track.yaw)},
+            pose=Est(value={"p": (track.pos if at is None else np.asarray(at, dtype=float)).tolist(),
+                            "q": quat_from_yaw(track.yaw)},
                      unc=_gaussian6([*track.var.tolist(), 1e-4, 1e-4, track.yaw_var]), t=track.last_seen, src=src),
             body=RigidTree(root=Est(value=root_value, unc={"kind": "categorical", "p": p["root"]}, src="prior"),
                            links=[link]),
@@ -1100,6 +1496,24 @@ _COLORS = {"red": (0.85, 0.15, 0.15), "green": (0.15, 0.70, 0.25), "blue": (0.15
 
 ACHROMATIC_SATURATION = 0.18
 _CHROMATIC = {k: v for k, v in _COLORS.items() if k not in ("black", "white", "gray")}
+
+
+def _apply_joint(pose: dict, joint: dict, q: float) -> dict:
+    """Move ``pose`` across one joint by ``q`` (a joint angle in radians, or a slide in metres)."""
+    origin = joint["origin"]["value"]
+    kind = joint["type"]["value"] if isinstance(joint["type"], dict) else joint["type"]
+    at = pose_compose(pose, {"p": origin["p"], "q": origin["q"]})
+    if kind == "fixed":
+        return at
+    axis = joint["axis"]["value"] if isinstance(joint["axis"], dict) else joint["axis"]
+    axis = [float(v) for v in axis]
+    if kind == "prismatic":
+        offset = quat_rotate(at["q"], [axis[0] * q, axis[1] * q, axis[2] * q])
+        return {"p": [at["p"][i] + offset[i] for i in range(3)], "q": list(at["q"])}
+    if kind == "revolute":
+        spin = quat_from_axis_angle(axis, q)
+        return {"p": list(at["p"]), "q": quat_mul(at["q"], spin)}
+    raise ValueError(f"unsupported joint type {kind!r} for forward kinematics")
 
 
 def color_name(rgb: np.ndarray, invalid_frac: float = 0.0) -> str:
@@ -1212,13 +1626,19 @@ def _concave(points: np.ndarray, centre: np.ndarray, footprint: float, cam_p: np
         return False
     to_centre = centre[:2] - cam_p[:2]
     middle = float(np.linalg.norm(to_centre))
-    if middle < 1e-3:
-        return False
+    if middle < 0.5 * footprint + 0.1:
+        return False  # the camera is over the box: there is no near face to see from here
     rel = points[:, :2] - cam_p[:2]
     bearing = np.degrees(np.abs(np.arctan2(rel[:, 1], rel[:, 0]) - math.atan2(to_centre[1], to_centre[0])))
     bearing = np.minimum(bearing, 360.0 - bearing)
     along = np.linalg.norm(rel[bearing <= SEE_THROUGH_DEG], axis=1)
-    return len(along) >= 5 and float(np.median(along)) > middle + SEE_THROUGH_M
+    if len(along) < 5:
+        return False
+    # A solid seen from several sides keeps the faces of the sides it was seen from, and the far
+    # face lies beyond the centre as a matter of course. Only an *empty* near side — nothing at
+    # all between the camera and the centre — says the box encloses open room.
+    near_face = float(np.min(along)) < middle - SEE_THROUGH_M
+    return not near_face and float(np.median(along)) > middle + SEE_THROUGH_M
 
 
 def _continuous_heading(yaw: float, size: np.ndarray, previous: float) -> tuple[float, np.ndarray]:

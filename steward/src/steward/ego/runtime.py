@@ -7,15 +7,20 @@ telemetry). It never holds World State identifiers or ground truth.
 
 from __future__ import annotations
 
+import base64
 import collections
+import io
 import itertools
 import math
+import os
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
+from PIL import Image
 
 from steward.ego.classify import classify
 from steward.ego.perception import (box_of, decode_rgbd, match_face, resample_face, segments, top_face, top_face_array,
@@ -23,9 +28,9 @@ from steward.ego.perception import (box_of, decode_rgbd, match_face, resample_fa
 from steward.ego.esim import Esim, EsimConfig
 from steward.ego.estimator import SELF_ID, EgoEstimator
 from steward.ego.roles import RoleConfig, assign_roles
-from steward.ego.skills import MotionConfig, SkillExecutor
+from steward.ego.skills import MotionConfig, SkillExecutor, SkillFailed
 from steward.ego.view import EgoViewRenderer
-from steward.math3d import pose_compose, pose_inverse, quat_rotate, wrap_angle, yaw_from_quat
+from steward.math3d import matrix_from_quat, pose_compose, pose_inverse, quat_rotate, wrap_angle, yaw_from_quat
 from steward.net import HttpError, call
 from steward.scene.schema import SceneState
 from steward.viewloop import ViewLoop
@@ -52,9 +57,53 @@ class RuntimeConfig:
     mask_source: str = "geo_sam3"
     sam3_url: str | None = None
     sam3_threshold: float = 0.28
+    # A grasp verifies itself and a miss costs one retreat, so a pick may be tried at a risk that
+    # would be reckless for a move through the room or a release over a surface.
+    max_pick_risk: float = 0.6
+    # A fresh look taken for an imminent pick may restate the target's position when the new
+    # reading agrees with the belief this closely; farther readings are different objects.
+    relocate_max_jump_m: float = 0.35
+    relocate_min_points: int = 30
+    relocate_fallback_m: float = 0.6  # beyond the agree-gate: accept the nearest confident reading
+    relocate_fallback_score: float = 0.55
+    relocate_max_dz_m: float = 0.12  # an instance this far off in height is a different thing
+    fresh_look_every_s: float = 10.0  # a retried pick of the same target reuses the last look
+    redock_max_m: float = 0.12  # a correction this small is folded into the plan; larger re-plans
     esim: EsimConfig = field(default_factory=EsimConfig)
     motion: MotionConfig = field(default_factory=MotionConfig)
     roles: RoleConfig = field(default_factory=RoleConfig)
+
+
+def body_ok(category: str) -> bool:
+    """A text prompt needs a real name; unknown things have nothing to ask for."""
+    return bool(category) and category != "unknown"
+
+
+# A category is one word of the robot's vocabulary; what a person would call the thing may be
+# another. The class name alone misses a mug asked for as a cup, so a second name is tried.
+PICK_PROMPTS: dict[str, tuple[str, ...]] = {
+    "cup": ("cup", "mug"),
+    "mug": ("mug", "cup"),
+    "wine_glass": ("wine glass", "glass"),
+    "bowl": ("bowl", "dish"),
+}
+
+
+def _fresh_look_prompts(category: str, color: str | None) -> tuple[str, ...]:
+    """Text prompts to try for one track, best first.
+
+    SAM3's text head needs more than a category to find tableware from above: at 0.95 m "red
+    bowl" scores 0.89 and "bowl" nothing at all on the same frame, and the same holds for "black
+    mug" against "mug". The colour is the robot's own reading of the object, so putting it in
+    front of the name is not being told the answer — it is using the description it already has.
+    """
+    name = category.replace("_", " ")
+    out = []
+    if color and color not in ("clear", "unknown"):
+        out.append(f"{color} {name}")
+    out.append(name)
+    out.extend(p for p in PICK_PROMPTS.get(category, ()) if p != name)
+    return tuple(dict.fromkeys(out))[:3]  # three prompts at most: each one is a segmenter round trip
 
 
 class RobotLink:
@@ -67,9 +116,15 @@ class RobotLink:
     def sensors(self) -> dict:
         return call("GET", f"{self.url}/sensors")
 
-    def rgbd(self) -> bytes:
-        """One RGB-D frame (``npz``) when the world provides raw imaging instead of detections."""
-        return call("GET", f"{self.url}/sensors/rgbd")
+    def proprioception(self) -> dict:
+        """Joint encoders and gripper states only, without drawing a perception sample."""
+        return call("GET", f"{self.url}/sensors/proprioception")
+
+    def rgbd(self, camera: str | None = None) -> bytes:
+        """One RGB-D frame (``npz``) when the world provides raw imaging instead of detections;
+        ``camera`` picks one of the robot's cameras (the first by default)."""
+        query = f"?camera={camera}" if camera else ""
+        return call("GET", f"{self.url}/sensors/rgbd{query}")
 
     def command(self, cmd: dict) -> None:
         call("POST", f"{self.url}/command", cmd)
@@ -162,6 +217,7 @@ class EgoRuntime:
         self.perception_mode: str | None = None
         self.alerts: list[dict] = []
         self.plan: dict | None = None
+        self._looked_at: dict[str, float] = {}  # target id -> body stamp of its last fresh look
         self._roles: dict[str, str] = {}  # the latest role assignment, kept unless clearly outweighed
         self.activity: collections.deque[dict] = collections.deque(maxlen=ACTIVITY_MAX)
         self._activity_ids = itertools.count(1)
@@ -170,7 +226,8 @@ class EgoRuntime:
         self._alert_ids = itertools.count(1)
         self.executor = SkillExecutor(self.link.command, self._motion_state, self._mark_held, self.config.motion,
                                       shift=self._shift_track, on_error=lambda msg: self.alert(msg, "skill"),
-                                      on_finish=self._skill_finished, clock=self.link)
+                                      on_finish=self._skill_finished, on_release=self._released,
+                                      on_begin=self._skill_begin, clock=self.link)
         self._view_scene: tuple[dict, int, float] | None = None  # (ES dict, version, stamp) for the view
         self.face_error: str | None = None  # why the latest camera image for faces could not be fetched
         self._face_thread: threading.Thread | None = None
@@ -344,15 +401,42 @@ class EgoRuntime:
             return self.estimator.to_scene()
 
     def _motion_state(self) -> dict:
+        """What the body is doing now, for the motion loop.
+
+        Odometry, joints and the gripper come from the robot's live sensor header, not from the
+        belief: with a real segmenter the next RGB-D frame can be seconds or tens of seconds
+        away, and a motion loop that grades its progress on the perception clock either stalls
+        or reads a frame rendered before it started and calls the turn failed. Objects stay the
+        estimate they are — the body only needs to know where it is."""
         with self._lock:
             est = self.estimator
             entities = {t.id: {"p": t.pos.tolist()} for t in est.tracks.values()}
-            return {"stamp": est.stamp, "odometry": dict(est.odometry), "joints": dict(est.joints),
-                    "gripper": dict(est.gripper), "entities": entities, "toolOffset": self.esim.tool_offset}
+            state = {"stamp": est.stamp, "odometry": dict(est.odometry), "joints": dict(est.joints),
+                     "gripper": dict(est.gripper), "entities": entities, "toolOffset": self.esim.tool_offset}
+        try:
+            live = self.link.sensors()
+        except Exception:  # noqa: BLE001 - the belief is still a usable answer when the body cannot be reached
+            return state
+        for key in ("stamp", "odometry", "joints", "gripper"):
+            if live.get(key) is not None:
+                state[key] = live[key]
+        if live.get("stamp") is not None and live["stamp"] < state["stamp"] - 1e-6:
+            state["stamp"] = est.stamp  # an episode reset race: prefer the belief's own clock
+        return state
 
     def _mark_held(self, track_id: str) -> str:
+        at = self.estimator.stamp
+        try:
+            at = float(self.link.sensors().get("stamp", at))  # the body's clock, now
+        except Exception:  # noqa: BLE001 - the belief's own clock is a usable second best
+            pass
         with self._lock:
-            return self.estimator.mark_held(track_id)
+            return self.estimator.mark_held(track_id, at)
+
+    def _released(self, track_id: str, spot: list[float]) -> None:
+        """A place knows where it let go; the belief is told, not left to infer it later."""
+        with self._lock:
+            self.estimator.release_at(track_id, spot)
 
     def _shift_track(self, track_id: str, delta: list[float]) -> None:
         with self._lock:
@@ -477,7 +561,7 @@ class EgoRuntime:
             centre, size, yaw, top = track.pos.copy(), track.size.copy(), float(track.yaw), track.top()
         frame = decode_rgbd(self.link.rgbd())
         with self._lock:
-            cam = self.estimator.camera_pose(frame["header"]["odometry"])
+            cam = self.estimator.camera_pose(odometry=frame["header"]["odometry"])
             self._look_at_faces(frame, [entity])
         rows = top_face(frame, cam, centre, size, yaw, top, px)
         coverage = sum(cell is not None for row in rows for cell in row) / (px * px)
@@ -497,7 +581,7 @@ class EgoRuntime:
         looked at (a distant view would overwrite a sharp one), and a view showing less than
         ``appearance_min_coverage`` of a face is not kept."""
         cfg, est = self.config, self.estimator
-        cam = est.camera_pose(frame["header"]["odometry"])
+        cam = est.camera_pose(odometry=frame["header"]["odometry"])
         cam_p = np.asarray(cam["p"], float)
         stamp = float(frame["header"]["stamp"])
         for track in list(est.tracks.values()) if ids is None else [est.tracks[i] for i in ids if i in est.tracks]:
@@ -553,7 +637,7 @@ class EgoRuntime:
             if missing:
                 raise KeyError(f"unknown object {missing[0]!r}")
             self._look_at_faces(frame, [*entities, reference])
-            cam = est.camera_pose(frame["header"]["odometry"])
+            cam = est.camera_pose(odometry=frame["header"]["odometry"])
 
             def why(track) -> str:
                 return self._view_hint(cam, track.pos, track.top())
@@ -628,8 +712,9 @@ class EgoRuntime:
     def predict(self, skill: str, params: dict) -> dict:
         es = self.ego_state()
         receipt = self.esim.predict(es, skill, params)
-        receipt["withinRiskLimit"] = receipt["feasible"] and receipt["risk"] <= self.config.max_risk
-        receipt["maxRisk"] = self.config.max_risk
+        limit = self.config.max_pick_risk if receipt.get("skill") == "pick" else self.config.max_risk
+        receipt["withinRiskLimit"] = receipt["feasible"] and receipt["risk"] <= limit
+        receipt["maxRisk"] = limit
         with self._lock:
             self.receipts[receipt["id"]] = receipt
         return receipt
@@ -703,6 +788,40 @@ class EgoRuntime:
         with self._lock:
             self.activity.append({"id": next(self._activity_ids), "t": round(self.estimator.stamp, 1),
                                   "kind": kind, "text": text[:ALERT_TEXT_MAX]})
+
+    def _skill_begin(self, skill: str, receipt: dict) -> None:
+        """Run inside the job thread, right before the skill moves.
+
+        A pick takes one fresh look at its target from where the robot stands; that is worth a
+        few seconds, but not on the request path of ``run``. The look moves the belief, and the
+        receipt's dock pose was derived from the old position: a small correction is folded into
+        the plan here, a large one invalidates it — the mission re-plans from the corrected
+        belief instead of the robot driving to a pose that belongs to an object that is no
+        longer there."""
+        plan = (receipt.get("plan") or {}) if skill == "pick" else {}
+        target, before = plan.get("target"), plan.get("targetP")
+        if not target or before is None:
+            return
+        if not self._fresh_look_once(target):
+            return  # no new observation, so the plan is still as good as the belief
+        track = self.estimator.tracks.get(target)
+        if track is None:
+            return
+        moved = float(np.linalg.norm(track.pos[:2] - np.asarray(before[:2])))
+        if moved <= 0.02:
+            return
+        if moved > self.config.redock_max_m:
+            raise SkillFailed(f"target {target} moved {moved * 100:.0f} cm since planning; re-plan")
+        heading = (math.cos(plan["yaw"]), math.sin(plan["yaw"]))
+        backoff = math.hypot(plan["dock"][0] - plan["predock"][0], plan["dock"][1] - plan["predock"][1])
+        reach = float(plan.get("reach", 0.35)) + self.esim.tool_offset
+        dock = [float(track.pos[0]) - heading[0] * reach, float(track.pos[1]) - heading[1] * reach]
+        predock = [dock[0] - heading[0] * backoff, dock[1] - heading[1] * backoff]
+        plan.update({"targetP": [float(v) for v in track.pos], "dock": dock, "predock": predock})
+        if plan.get("path"):
+            plan["path"][-1] = predock
+        print(f"ego: pick plan for {target} re-docked after a {moved * 100:.0f} cm correction",
+              file=sys.stderr, flush=True)
 
     def _skill_finished(self, job) -> None:
         result = {"succeeded": "完成", "failed": "失败", "stopped": "被停止"}.get(job.state, job.state)
@@ -786,6 +905,132 @@ class EgoRuntime:
         if self.control_owner is not None and owner != self.control_owner:
             raise PermissionError(f"the robot is controlled by {self.control_owner}; wait until it releases control")
 
+    def _fresh_look_once(self, target_id: str) -> bool:
+        """At most one fresh look per target per few seconds of body time.
+
+        :returns: whether a look was taken (and so whether the belief may have moved).
+        """
+        now = self.estimator.stamp
+        if now - self._looked_at.get(target_id, -1e9) < self.config.fresh_look_every_s:
+            return False
+        self._looked_at[target_id] = now
+        return self._fresh_look(target_id)
+
+    def _fresh_look(self, target_id: str) -> bool:
+        """Re-place the pick's target from a class-prompted segmentation taken right now.
+
+        An accumulated position can be biased by the partial views it was fused from — a rim arc
+        read as confidently as the bowl itself. The action deserves the best single look there is,
+        and this is it: the robot stands beside the object and the camera points at it. The class
+        name is the robot's own prior (another name for the same thing is tried too, because a mug
+        is a cup to half the world); the believed position only decides which returned instance is
+        the one meant. The track keeps its identity; only where it stands is restated."""
+        url = os.environ.get("STEWARD_SEGMENTER_URL")
+        track = self.estimator.tracks.get(target_id)
+        if url is None or track is None or not body_ok(track.category):
+            print(f"ego: fresh look for {target_id} skipped (url={'set' if url else 'unset'}, "
+                  f"track={'known' if track else 'unknown'})", file=sys.stderr, flush=True)
+            return False
+        try:
+            frame = decode_rgbd(self.link.rgbd())
+            cam = self.estimator.camera_pose()
+            buf = io.BytesIO()
+            Image.fromarray(frame["rgb"]).save(buf, format="PNG")
+            image = base64.b64encode(buf.getvalue()).decode("ascii")
+            h, w = frame["depth"].shape
+            f = (h / 2.0) / math.tan(math.radians(frame["fovy"]) / 2.0)
+            cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
+            rot = matrix_from_quat(cam["q"])
+            origin = np.asarray(cam["p"], float)
+
+            def found_in(body: dict) -> list[tuple[np.ndarray, float]]:
+                """World centre and score of every instance the depth can place."""
+                out = []
+                if not body.get("mask_png_base64"):
+                    return out
+                labels = np.array(Image.open(io.BytesIO(base64.b64decode(body["mask_png_base64"]))))
+                for info in body.get("instances", []):
+                    ys, xs = np.nonzero(labels == int(info["id"]))
+                    dd = frame["depth"][ys, xs].astype(np.float32)  # decode_rgbd gives metres
+                    ok = (dd > 0.05) & (dd < 6.0)
+                    if os.environ.get("STEWARD_FRESH_LOOK_DEBUG"):
+                        print(f"ego dbg: instance {info['id']} score {info['score']:.2f} "
+                              f"px {len(ys)} depth-valid {int(ok.sum())} "
+                              f"depth range {float(dd.min()) if len(dd) else -1:.2f}..{float(dd.max()) if len(dd) else -1:.2f}",
+                              file=sys.stderr, flush=True)
+                    if int(ok.sum()) < self.config.relocate_min_points:
+                        continue
+                    cam_pts = np.stack([dd[ok], -(xs[ok] - cx) * dd[ok] / f,
+                                        -(ys[ok] - cy) * dd[ok] / f], axis=1)
+                    out.append((np.median(cam_pts @ rot.T + origin, axis=0), float(info["score"])))
+                return out
+
+            prompts = _fresh_look_prompts(track.category, track.color)
+            found: list[tuple[np.ndarray, float]] = []
+            asked = []
+            for prompt in prompts:
+                body = call("POST", f"{url.rstrip('/')}/segment_text",
+                            {"image_base64": image, "text_prompt": prompt, "min_score": 0.4},
+                            timeout=30.0)
+                asked.append(f"{prompt}:{len(body.get('instances', []))}")
+                found += found_in(body)
+            best, best_d = None, self.config.relocate_max_jump_m
+            distances = []
+            for centre, score in found:
+                dist = float(np.linalg.norm(centre - track.pos[:3]))
+                distances.append(f"{dist * 100:.0f}cm z{centre[2]:.2f}(score {score:.2f})")
+                if abs(float(centre[2]) - float(track.pos[2])) > self.config.relocate_max_dz_m:
+                    continue  # an instance at another height is another thing (a table edge, the floor)
+                if dist < best_d:
+                    best, best_d = centre, dist
+            fallback = self.config.relocate_fallback_m
+            if best is None and found:
+                # The belief itself can be the wrong thing here (a rim fragment decimetres from
+                # the bowl it belongs to). A confidently segmented nearest instance farther away
+                # is still the best reading of where this object stands.
+                best, best_d = None, fallback
+                for centre, score in found:
+                    dist = float(np.linalg.norm(centre - track.pos[:3]))
+                    if abs(float(centre[2]) - float(track.pos[2])) > self.config.relocate_max_dz_m:
+                        continue
+                    if dist <= fallback and score >= self.config.relocate_fallback_score and dist < best_d:
+                        best, best_d = centre, dist
+            if best is None:
+                # Text prompts die at dock range, where the robot often stands after a first
+                # failed attempt. There the point sweep is at its best instead: the object fills
+                # the frame, so prompt the pixels around where the belief says it projects.
+                rel = track.pos[:3] - origin
+                cam_rel = rel @ rot
+                if cam_rel[0] > 0.15:
+                    u = int(round(cx - cam_rel[1] * f / cam_rel[0]))
+                    v = int(round(cy - cam_rel[2] * f / cam_rel[0]))
+                    if 0 <= u < w and 0 <= v < h:
+                        points = [[u + du, v + dv] for du in (-10, 0, 10) for dv in (-10, 0, 10)]
+                        near = call("POST", f"{url.rstrip('/')}/segment_instances",
+                                    {"image_base64": image, "points": points, "min_score": 0.4},
+                                    timeout=40.0)
+                        best, best_d = None, fallback
+                        for centre, _score in found_in(near):
+                            dist = float(np.linalg.norm(centre - track.pos[:3]))
+                            if dist < best_d:
+                                best, best_d = centre, dist
+            if best is None:
+                print(f"ego: fresh look for {target_id} ({track.category}/{track.color}): "
+                      f"{len(found)} text instances from [{', '.join(asked)}], "
+                      f"none within {fallback:.2f} m of the belief "
+                      f"({', '.join(distances) or 'none returned'})", file=sys.stderr, flush=True)
+                return False
+
+            with self._lock:
+                moved = self.estimator.relocate(target_id, best)
+            if moved:
+                print(f"ego: fresh look placed {target_id} at ({best[0]:.3f}, {best[1]:.3f}, {best[2]:.3f})",
+                      file=sys.stderr, flush=True)
+            return bool(moved)
+        except Exception as exc:
+            print(f"ego: fresh look for {target_id} failed: {exc}", file=sys.stderr, flush=True)
+            return False
+
     def run(self, receipt_id: str, owner: str | None = None) -> dict:
         """Execute a predicted plan. The runtime re-checks the receipt here, where the motion happens."""
         self._check_control(owner)
@@ -797,8 +1042,9 @@ class EgoRuntime:
             raise PermissionError(f"receipt {receipt_id} is not feasible: {'; '.join(receipt['issues'])}")
         if now > receipt["expiresAt"]:
             raise PermissionError(f"receipt {receipt_id} expired at t={receipt['expiresAt']:.1f}s; predict again")
-        if receipt["risk"] > self.config.max_risk:
-            raise PermissionError(f"receipt risk {receipt['risk']:.2f} exceeds the limit {self.config.max_risk:.2f}")
+        limit = receipt.get("maxRisk", self.config.max_risk)
+        if receipt["risk"] > limit:
+            raise PermissionError(f"receipt risk {receipt['risk']:.2f} exceeds the limit {limit:.2f}")
         receipt["used"] = True
         job = self.executor.start(receipt["skill"], receipt).to_dict()
         params = receipt.get("params") or {}

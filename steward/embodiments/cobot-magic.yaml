@@ -1,0 +1,92 @@
+# Cobot Magic embodiment profile (agilex branch)
+#
+# steward's robot embodiment = AgileX Cobot Magic dual Piper workstation.
+# The same profile drives the WSim twin and the real machine (HAL swaps the
+# backend, never the verbs). Fields marked MEASURE are placeholders pending
+# physical survey of the agilex workstation; they are safe defaults until
+# then. Kinematic ground truth is the vendored URDF, not this file:
+# third_party/piper_description/urdf/ (see PROVENANCE.md).
+
+id: cobot-magic
+display: AgileX Cobot Magic (dual Piper 6-DoF + 3x Orbbec Astra)
+
+mechanical:
+  base: fixed            # MEASURE: /dev/ttyUSB0 may be a mobile chassis; if so -> planar + chassis section
+  arms:
+    - id: left
+      model: piper
+      dof: 6             # revolute joint1..joint6, limits in URDF (effort 100)
+      mount:             # MEASURE: transform base -> arm root on the Cobot Magic frame
+        p: [0.0, 0.31, 0.0]   # placeholder: half the arm separation
+        q: [1, 0, 0, 0]
+    - id: right
+      model: piper
+      dof: 6
+      mount:             # MEASURE
+        p: [0.0, -0.31, 0.0]
+        q: [1, 0, 0, 0]
+  grippers:
+    - arm: left
+      type: parallel-2f
+      control: position  # intermediate aperture valid (joint7/joint8, 0..0.05 m per finger)
+      aperture_m: [0.0, 0.10]
+    - arm: right
+      type: parallel-2f
+      control: position
+      aperture_m: [0.0, 0.10]
+  grasp:
+    sim: ideal-attach    # Phase-0 style capture; swap for physical closure before sim2real acceptance
+    real: physical-closure
+
+sensors:
+  cameras:
+    - id: top            # MEASURE: mount pose on frame/ceiling bracket
+      kind: rgbd
+      mount_link: base
+      mount: {p: [0.0, 0.0, 1.2], q: [1, 0, 0, 0]}   # MEASURE
+      intrinsics: {width: 640, height: 480, fovy: 60}  # MEASURE: from Astra calibration
+      role: survey
+    - id: wrist_left
+      kind: rgbd
+      mount_link: left_gripper     # hand_camera_joint in URDF
+      mount: {p: [0.04, 0, 0], q: [1, 0, 0, 0]}     # MEASURE: exact from with_camera xacro
+      intrinsics: {width: 640, height: 480, fovy: 60}
+      role: work
+    - id: wrist_right
+      kind: rgbd
+      mount_link: right_gripper
+      mount: {p: [0.04, 0, 0], q: [1, 0, 0, 0]}     # MEASURE
+      intrinsics: {width: 640, height: 480, fovy: 60}
+      role: work
+  visibility_contract:
+    sees_own_gripper: wrist cameras (work view); top camera (survey view)
+    near_field_blind: wrist cam dominated by own gripper -> FK-projection self-filter
+    invisible_materials: transparent glass (Astra structured light + SAM3 both fail; task subset avoids)
+
+self_model:
+  kinematics: {source: third_party/piper_description/urdf, format: urdf, sim: mjcf-converted}
+  ik: {solver: mink, note: "6-DoF; PyRoki rejects 6-DoF (YAM precedent)"}   # ASPIRE yam_real is the porting reference
+  collision: primitive approximation per link (upgrade to meshes when vendored)
+  camera_fk: any-link FK chain (wrist cameras move with the arm)
+  actuator: position control, joint velocity limits MEASURE from Piper spec
+
+control_face:            # what EH sees; implementation per backend
+  verbs: [approach, pick, place, push, open_drawer, close, press]
+  primitives: [move_to_pose(arm), move_to_joints(arm), move_synchronized, set_gripper(aperture)]
+  rates_hz: {sim: 20, real: 30}      # MEASURE real: piper control loop
+
+execution_stack:         # all services run locally on the agilex workstation RTX 4090
+  sam3: {url: "http://127.0.0.1:8117", note: realseg_service recipe}
+  graspnet: {url: "http://127.0.0.1:8115", note: contact grasps, not centroid}
+  planning: mink + joint interpolation  # cuRobo optional later
+
+sim2real:
+  real_backend: piper_sdk   # pip package, SocketCAN can0 @1Mbps; no ROS dependency
+  safety: [hardware e-stop REQUIRED before any motion, "--allow-motion" software interlock, joint velocity caps]
+  calibration: [3x Astra intrinsics, hand-eye extrinsics, arm mount transforms]  # MEASURE, replaces placeholders above
+  observer_gt: apriltag + top camera
+  wh_role: operator console; human perturbations
+
+tasks:
+  sim: cobot-table scenario; LIBERO-style tabletop set (pick-place, drawer, stacking) on this twin
+  real: the same task set, Phase-5 acceptance "same EH bundle, no code change"

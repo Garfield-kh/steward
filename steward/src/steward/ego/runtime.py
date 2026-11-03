@@ -42,13 +42,14 @@ class RuntimeConfig:
     appearance_poll_s: float = 1.0  # wall time between camera images fetched for faces with detections
     appearance_min_coverage: float = 0.25  # a view showing less of a face is not kept
     max_risk: float = 0.35
-    # Anonymous mask frontend after RGB-D decode (ignores sim oracle when not "keep"):
-    #   "keep"      — leave sensor / world mask unchanged (default; CI-safe)
+    # Anonymous mask frontend after RGB-D decode:
+    #   "sam3"      — try LinxLab SAM3 PCS on real RGB; on failure keep sensor oracle (default)
+    #   "geo_sam3"  — geometric ∪ SAM3; on failure keep sensor oracle
     #   "geometric" — depth clustering only
-    #   "sam3"      — LinxLab SAM3 PCS on real RGB
-    #   "geo_sam3"  — geometric ∪ SAM3 (best Phase-1 recall in kitchen ablations)
+    #   "keep"      — leave sensor / world mask unchanged
     # Override with env STEWARD_MASK_SOURCE; SAM3 URL via STEWARD_SAM3_URL.
-    mask_source: str = "keep"
+    # World still ships oracle masks; Ego upgrades when SAM3 works.
+    mask_source: str = "sam3"
     sam3_url: str | None = None
     sam3_threshold: float = 0.28
     esim: EsimConfig = field(default_factory=EsimConfig)
@@ -209,15 +210,14 @@ class EgoRuntime:
         if mode == "rgbd":
             rgbd = decode_rgbd(self.link.rgbd())
             from steward.ego.providers.fused_rgbd import env_mask_source, prepare_rgbd_frame
-            mask_source = self.config.mask_source
-            if mask_source == "keep":
-                mask_source = env_mask_source("keep")
+            mask_source = env_mask_source(self.config.mask_source)
             if mask_source in ("geometric", "sam3", "geo_sam3"):
                 rgbd = prepare_rgbd_frame(
                     rgbd,
                     mask_source=mask_source,  # type: ignore[arg-type]
                     sam3_url=self.config.sam3_url,
                     sam3_threshold=self.config.sam3_threshold,
+                    fallback_on_error=True,
                 )
             with self._lock:
                 if rgbd["header"]["stamp"] < self.estimator.stamp - 1e-6:

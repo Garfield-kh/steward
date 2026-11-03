@@ -64,24 +64,47 @@ def test_prepare_geo_sam3_with_stub_client(monkeypatch):
     assert len(segs) >= 1
 
 
-def test_sam3_fallback_to_geometric(monkeypatch):
+def test_sam3_fallback_to_oracle(monkeypatch):
     h, w = 40, 40
     depth = np.full((h, w), 1.5, np.float32)
     depth[10:20, 10:20] = 1.0
+    oracle = np.zeros((h, w), np.uint8)
+    oracle[12:18, 12:18] = 7
     frame = {
         "rgb": np.zeros((h, w, 3), np.uint8),
         "depth": depth,
         "fovy": 58.0,
-        "mask": np.zeros((h, w), np.uint8),
+        "mask": oracle.copy(),
     }
 
     def boom(*_a, **_k):
         raise RuntimeError("sam3 down")
 
     monkeypatch.setattr("steward.ego.providers.fused_rgbd._sam3_mask", boom)
-    out = prepare_rgbd_frame(frame, mask_source="geo_sam3", fallback_on_error=True,
-                             geometric=GeometricMaskConfig(min_pixels=10))
-    assert out["mask"].max() > 0
+    out = prepare_rgbd_frame(frame, mask_source="sam3", fallback_on_error=True)
+    assert np.array_equal(out["mask"], oracle)
+
+    out2 = prepare_rgbd_frame(frame, mask_source="geo_sam3", fallback_on_error=True,
+                              geometric=GeometricMaskConfig(min_pixels=10))
+    assert np.array_equal(out2["mask"], oracle)
 
     with pytest.raises(RuntimeError):
         prepare_rgbd_frame(frame, mask_source="sam3", fallback_on_error=False)
+
+
+def test_sam3_empty_mask_falls_back_to_oracle(monkeypatch):
+    h, w = 32, 32
+    oracle = np.zeros((h, w), np.uint8)
+    oracle[2:8, 2:8] = 4
+    frame = {
+        "rgb": np.zeros((h, w, 3), np.uint8),
+        "depth": np.full((h, w), 1.2, np.float32),
+        "fovy": 58.0,
+        "mask": oracle.copy(),
+    }
+    monkeypatch.setattr(
+        "steward.ego.providers.fused_rgbd._sam3_mask",
+        lambda *_a, **_k: np.zeros((h, w), np.uint8),
+    )
+    out = prepare_rgbd_frame(frame, mask_source="sam3", fallback_on_error=True)
+    assert np.array_equal(out["mask"], oracle)

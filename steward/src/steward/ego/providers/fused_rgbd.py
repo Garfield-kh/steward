@@ -23,7 +23,7 @@ MASK_SOURCES = frozenset({"oracle", "geometric", "sam3", "geo_sam3", "keep"})
 
 @dataclass
 class FuseConfig:
-    mask_source: MaskSource = "geometric"
+    mask_source: MaskSource = "sam3"
     geometric: GeometricMaskConfig | None = None
     # If set, multiply override depth by this scale (oracle calibration / plane fit).
     depth_scale: float = 1.0
@@ -33,9 +33,15 @@ class FuseConfig:
     fallback_on_error: bool = True
 
 
-def env_mask_source(default: str = "keep") -> str:
-    """``STEWARD_MASK_SOURCE``: keep | geometric | sam3 | geo_sam3."""
-    v = (os.environ.get("STEWARD_MASK_SOURCE") or default).strip().lower()
+def env_mask_source(default: str = "sam3") -> str:
+    """``STEWARD_MASK_SOURCE`` overrides the default: keep | geometric | sam3 | geo_sam3.
+
+    Unset → ``default``. Invalid values are ignored.
+    """
+    raw = os.environ.get("STEWARD_MASK_SOURCE")
+    if raw is None or not str(raw).strip():
+        return default
+    v = str(raw).strip().lower()
     return v if v in MASK_SOURCES else default
 
 
@@ -82,11 +88,12 @@ def prepare_rgbd_frame(
     ``mask_source``:
       - ``oracle`` / ``keep``: leave ``frame['mask']`` unchanged
       - ``geometric``: rebuild mask from the (possibly overridden) depth
-      - ``sam3``: SAM3 PCS on RGB (falls back to keep/geometric on error if enabled)
-      - ``geo_sam3``: geometric ∪ SAM3 (best Phase-1 recall in kitchen ablations)
+      - ``sam3``: SAM3 PCS on RGB; on failure / empty result keep sensor oracle mask
+      - ``geo_sam3``: geometric ∪ SAM3; on failure keep sensor oracle mask
     """
     out = dict(frame)
     h, w = frame["depth"].shape
+    oracle_mask = np.asarray(frame.get("mask", np.zeros((h, w), np.uint8)), dtype=np.uint8)
     if rgb_override is not None:
         out["rgb"] = resize_rgb(rgb_override, (h, w)) if rgb_override.shape[:2] != (h, w) else rgb_override
     if depth_override is not None:
@@ -98,20 +105,21 @@ def prepare_rgbd_frame(
     if src == "geometric":
         out["mask"] = masks_from_depth(out["depth"], float(out["fovy"]), geometric, up_cam=up_cam)
     elif src in ("sam3", "geo_sam3"):
-        geo = None
-        if src == "geo_sam3":
-            geo = masks_from_depth(out["depth"], float(out["fovy"]), geometric, up_cam=up_cam)
         try:
             sam = _sam3_mask(out["rgb"], url=sam3_url, threshold=sam3_threshold, min_pixels=min_pix)
+            if int(np.asarray(sam).max()) <= 0:
+                raise RuntimeError("SAM3 returned an empty instance mask")
             if src == "geo_sam3":
                 from steward.ego.providers.sam3_client import merge_masks
+                geo = masks_from_depth(out["depth"], float(out["fovy"]), geometric, up_cam=up_cam)
                 out["mask"] = merge_masks(geo, sam)
             else:
-                out["mask"] = sam
+                out["mask"] = np.asarray(sam, dtype=np.uint8)
         except Exception:
             if not fallback_on_error:
                 raise
-            out["mask"] = geo if geo is not None else out.get("mask", np.zeros((h, w), np.uint8))
+            # Prefer the world/sensor oracle mask already on the frame.
+            out["mask"] = oracle_mask
     return out
 
 

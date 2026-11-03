@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 
 from steward.assets.generators import steward_bot
 from steward.ego.runtime import EgoRuntime, RobotLink
@@ -21,6 +22,13 @@ def _truth(host: StewardHost) -> dict[str, str | None]:
     return out
 
 
+def _settled(host: StewardHost, timeout: float = 15.0) -> None:
+    """Wait until the world has stepped once: support relations exist only after a settle."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline and None in _truth(host).values():
+        time.sleep(0.05)
+
+
 def test_shuttle_moves_objects_around_the_cycle(kitchen_root, tmp_path):
     host = StewardHost(kitchen_root, scenario="phase0-shuttle", speed=6.0, seed=2, run_dir=tmp_path).start()
     runtime = EgoRuntime(RobotLink(host.robot_servers["w:robot-1"].url), steward_bot().to_dict())
@@ -33,6 +41,7 @@ def test_shuttle_moves_objects_around_the_cycle(kitchen_root, tmp_path):
         result["value"] = shuttle(api.url, 3, on_step=lambda i, m: snapshots.append({"move": m, "truth": _truth(host)}))
 
     try:
+        _settled(host)
         assert _truth(host) == {"w:cup-1": "table", "w:bowl-1": "cabinet"}
         thread = threading.Thread(target=run)
         thread.start()

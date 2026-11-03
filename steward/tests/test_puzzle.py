@@ -183,7 +183,7 @@ def test_a_face_the_camera_cannot_see_is_explained_from_the_camera_geometry():
     est = EgoEstimator(robot_model=steward_bot().to_dict())
     est.odometry = {"x": 0.0, "y": 0.0, "yaw": 0.0, "sigma": {"pos": 0.003, "yaw": 0.003}}
     cam = est.camera_pose()
-    intrinsics = est._camera["intrinsics"]
+    intrinsics = est.camera_intrinsics()
     lowest = math.radians(30.0 + intrinsics["fovy"] / 2)  # the head camera looks 30° down
 
     def hint(dx, dy):

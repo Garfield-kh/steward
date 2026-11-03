@@ -82,7 +82,7 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
     }),
     defineTool({
       name: 'ego_observe',
-      description: 'Report what your camera detects right now (categories and distances). Your world model also '
+      description: 'Report what your two cameras detect right now (categories, distances and which camera). Your world model also '
         + 'updates continuously; use ego_state for the accumulated picture.',
       parameters: {},
       output: { schema: JSON_OUTPUT, render: (_a, v) => text(v) },
@@ -117,7 +117,7 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
         + '"close" (needs target: a drawer; the robot pulls or pushes its handle and ends standing back so the inside '
         + 'is in view). Objects lying on the floor, such as chairs or a dropped flat piece, are picked from '
         + 'beside them; look at one first from where it is in view (ego_inspect\'s hint says how far back), since '
-        + 'docked beside it the camera no longer sees it. Small ones are lifted clear and carried like objects taken '
+        + 'docked beside it the cameras no longer see it. Small ones are lifted clear and carried like objects taken '
         + 'off a table; large ones are carried a few centimetres above the floor in front of the robot, and put down '
         + 'with at; '
         + 'while carrying them the robot needs more room to turn. Objects inside a drawer are only seen while it is '
@@ -149,15 +149,16 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
     }),
     defineTool({
       name: 'ego_inspect',
-      description: 'Look closely at the top face of an object with one fresh camera frame: its colours on a px x px '
+      description: 'Look closely at the top face of an object with one fresh frame of each camera, read from the camera that sees most of it: its colours on a px x px '
         + 'grid. rows is in the object\'s own frame (row 0 is its +y edge, column 0 its -x edge, as seen from above '
         + 'with its heading yawDeg). worldRows is the same face as seen from above with the map\'s +y up and +x to the '
         + 'right: rows turned worldTurnDeg counter-clockwise (yawDeg rounded to a quarter turn), so faces of objects '
         + 'lying at different headings compare directly in worldRows. Putting an object down with place yaw = its '
         + 'current yawDeg + k x 90 degrees (given in radians) turns its face k quarter turns counter-clockwise as seen '
         + 'from above. Each cell is [r, g, b] or null where the face is out of view or hidden. Stand within about '
-        + 'a metre with the object in front of you. The head camera sees a surface only from some way ahead of it, so '
-        + 'the strip of a table next to the edge you stand at lies below its view. When part of the face is unseen, hint says '
+        + 'a metre with the object in front of you. You have two cameras on your head: head_camera looks ahead and sees a '
+        + 'surface only from some way ahead of it; wide_camera, a short-focal-length camera tilted further down, also sees '
+        + 'the strip of a table next to the edge you stand at and the gripper at work, in less detail. When part of the face is unseen, hint says '
         + 'why (too close below the view, beside or behind it, too far, hidden) and how to move. Use it to compare '
         + 'printed or patterned faces, read which side of a flat object is up, or tell similar objects apart. A '
         + 'printed flat object lying with its plain back up shows an almost uniform face: turn it over (place with '

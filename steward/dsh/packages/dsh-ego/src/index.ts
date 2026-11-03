@@ -24,17 +24,19 @@ export interface JsonObject {
 /** Skills the Ego Runtime can predict and run. */
 export type EgoSkill = 'navigate' | 'pick' | 'place' | 'pour' | 'open' | 'close'
 
-/** The top face of an Ego-State object as the head camera sees it now. */
+/** The top face of an Ego-State object as the robot camera that sees most of it shows it now. */
 export interface InspectResult {
   entity: string
   /** Grid size: `rows` holds `px` rows of `px` cells. */
   px: number
+  /** Sensor id of the camera the face was read from (`head_camera` or `wide_camera`). */
+  camera: string
   /** Heading of the object's frame in the map, degrees. */
   yawDeg: number
   sizeM: number[]
   /** Share of cells seen (not out of view or hidden). */
   coverage: number
-  /** Present when part of the face is unseen: why, from the camera's view (too close below it, beside or behind it, too far, hidden). */
+  /** Present when part of the face is unseen: why, from each camera's view (too close below it, beside or behind it, too far, hidden). */
   hint?: string
   /** Row 0 is the object's +y edge, column 0 its -x edge; each cell is [r, g, b] (0-255) or null. */
   rows: (number[] | null)[][]
@@ -187,9 +189,9 @@ export abstract class EgoService extends Service {
   abstract query(query: EgoQuery, signal?: AbortSignal): Promise<JsonObject[]>
 
   /**
-   * What the robot camera detects right now.
+   * What the robot cameras detect right now.
    * @param signal - caller cancellation.
-   * @returns visible categories and ranges, plus a saved camera image path when available.
+   * @returns visible categories, ranges and the camera of each, plus saved camera image paths when available.
    */
   abstract observe(signal?: AbortSignal): Promise<JsonObject>
 
@@ -218,7 +220,7 @@ export abstract class EgoService extends Service {
   abstract receipt(id: string, signal?: AbortSignal): Promise<PredictionReceipt>
 
   /**
-   * Look closely at an object's top face (one fresh camera frame).
+   * Look closely at an object's top face (one fresh frame of each camera).
    * @param entity - Ego-State object id.
    * @param px - grid size, 4 to 64.
    * @param signal - caller cancellation.

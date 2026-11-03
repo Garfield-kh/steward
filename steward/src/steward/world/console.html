@@ -203,8 +203,12 @@
   </section>
   <div class="grid3">
     <section class="card">
-      <h2 id="robotCamLabel">机器人头部相机</h2>
-      <div class="cam"><img id="camRobot" alt="机器人头部相机"></div>
+      <h2><span id="robotCamLabel">机器人相机</span>
+        <select id="robotCam" title="机器人头部的两台相机：头部相机看前方，广角相机（短焦）向下倾斜，看得到身前的台面与夹爪">
+          <option value="head_camera">头部相机</option>
+          <option value="wide_camera">广角相机</option>
+        </select></h2>
+      <div class="cam"><img id="camRobot" alt="机器人相机"></div>
     </section>
     <section class="card">
       <h2>俯视地图（蓝：真实状态　橙：自我态）</h2>
@@ -821,13 +825,20 @@ renderTarget();
 
 const cameraMeter = rateMeter();
 let cameraShown = null;
+$('robotCam').value = localStorage.getItem('steward.robotCam') || 'head_camera';
+$('robotCam').onchange = () => localStorage.setItem('steward.robotCam', $('robotCam').value);
 async function refreshRobotCamera() {
   if (!robotId) return;
-  const res = await fetch(`/wca/render?camera=${encodeURIComponent('robot:' + robotId)}&width=480&height=360&format=jpeg`,
+  const sensor = $('robotCam').value;
+  const res = await fetch(`/wca/render?camera=${encodeURIComponent('robot:' + robotId)}&sensor=${sensor}&width=480&height=360&format=jpeg`,
     { cache: 'no-store' });
+  if (res.status === 404) {
+    $('robotCamLabel').textContent = `${robotId} 没有这台相机（场景按旧的机器人模型构建）`;
+    return;
+  }
   if (!res.ok) return;
   cameraShown = await showBlob($('camRobot'), res, cameraShown);
-  $('robotCamLabel').textContent = `${robotId} 头部相机 · ${cameraMeter().toFixed(1)} fps`;
+  $('robotCamLabel').textContent = `${robotId} · ${cameraMeter().toFixed(1)} fps`;
 }
 
 async function loadScenarios() {

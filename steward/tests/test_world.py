@@ -109,6 +109,24 @@ def test_a_woken_control_loop_holds_the_clock_until_it_waits_again(kitchen_scene
         sim.stop()
 
 
+def test_a_woken_loop_that_renews_its_hold_keeps_the_clock_past_the_lease(kitchen_scene, monkeypatch):
+    from steward.world import sim as sim_module
+
+    monkeypatch.setattr(sim_module, "HOLD_LEASE_S", 0.3)
+    sim = WorldSim(kitchen_scene, speed=math.inf)
+    sim.start()
+    try:
+        woke = sim.wait_until(0.5, hold="perception")
+        for _ in range(6):  # a remote segmentation request of 0.6 s
+            time.sleep(0.1)
+            sim.renew("perception")
+        assert sim.time == woke, "renewed, the hold outlives its lease"
+        time.sleep(0.5)
+        assert sim.time > woke, "not renewed, the lease runs out and the world runs on"
+    finally:
+        sim.stop()
+
+
 def test_with_freeze_idle_the_world_steps_only_while_a_caller_waits_for_time_to_pass(kitchen_scene):
     sim = WorldSim(kitchen_scene, speed=math.inf, freeze_idle=True)
     sim.start()

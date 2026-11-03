@@ -42,21 +42,30 @@ class Segment:
     border: bool  # the region touches the image border (truncated view)
     range: float  # median distance from the camera
     bottom_seen: bool = True  # the lowest points are the object's base, not an image edge or an occluder
+    semantics: dict[str, float] | None = None  # category → segmenter score, when the robot segmented the image
 
 
 def decode_rgbd(blob: bytes) -> dict:
-    """Unpack the robot port's ``/sensors/rgbd`` payload."""
+    """Unpack the robot port's ``/sensors/rgbd`` payload; ``camera`` is the sensor id it was taken
+    with, ``mask`` is None when the world sends no instance masks and the robot segments the image
+    itself."""
     z = np.load(io.BytesIO(blob))
-    return {"rgb": z["rgb"], "depth": z["depth"].astype(np.float32) / 1000.0, "mask": z["mask"],
+    return {"camera": str(z["camera"]) if "camera" in z.files else None, "rgb": z["rgb"], "depth": z["depth"].astype(np.float32) / 1000.0,
+            "mask": z["mask"] if "mask" in z.files else None,
             "fovy": float(z["fovy"]), "header": json.loads(str(z["header"]))}
 
 
 def segments(frame: dict, cam_pose: dict, config: PerceptionConfig | None = None,
              rng: np.random.Generator | None = None) -> list[Segment]:
-    """Back-project every masked region of an RGB-D frame into map-frame points."""
+    """Back-project every masked region of an RGB-D frame into map-frame points. With
+    ``frame["labels"]`` (instance id → category scores, from the robot's segmenter) each segment
+    carries its scores as :attr:`Segment.semantics`."""
     cfg = config or PerceptionConfig()
     rng = rng or np.random.default_rng(0)
     depth, mask, rgb = frame["depth"], frame["mask"], frame["rgb"]
+    if mask is None:
+        raise ValueError("the frame carries no instance masks: segment it first (steward.ego.segmenter)")
+    labels = frame.get("labels")
     h, w = depth.shape
     f = (h / 2.0) / math.tan(math.radians(frame["fovy"]) / 2.0)
     cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
@@ -88,6 +97,7 @@ def segments(frame: dict, cam_pose: dict, config: PerceptionConfig | None = None
             border=bool(xs.min() == 0 or ys.min() == 0 or xs.max() == w - 1 or ys.max() == h - 1),
             range=float(np.median(dv)),
             bottom_seen=_bottom_seen(mask, depth, instance, ys, xs, cfg),
+            semantics=None if labels is None else dict(labels.get(int(instance), {})) or None,
         ))
     return out
 

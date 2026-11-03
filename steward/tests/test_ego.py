@@ -44,7 +44,12 @@ def test_ego_state_is_partial_and_leak_free(kitchen_scene):
     es = est.to_scene().to_dict()
     assert validate_ego(es) == []
     categories = {e["category"]["value"] for e in es["entities"]}
-    assert not categories & {"cup", "counter"}, "the counter and its cup are outside the initial field of view"
+    assert "cup" not in categories, "the cup on the counter is outside the initial field of view"
+    by_camera = {}
+    for det in sim.sensors("w:robot-1")["detections"]:
+        by_camera.setdefault(det["camera"], set()).add(det["category"])
+    assert "counter" in by_camera["wide_camera"] and "counter" not in by_camera["head_camera"], \
+        "the wide camera sees the counter beside the robot, which the head camera misses"
 
 
 def test_esim_refuses_uncertain_pick_and_accepts_after_observation(kitchen_scene):

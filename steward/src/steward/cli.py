@@ -7,6 +7,7 @@
     steward demo                     scripted "cup to table" mission, checked against World State
     steward shuttle                  carry objects around table → cabinet → sideboard, step by step
     steward chores                   sort tableware, stack it on the sideboard, swap drawer contents; repeat
+    steward services                 list the remote perception services and check that each is reachable
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from steward.phases import LATEST_PHASE, PHASES
 
 STEWARD_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_ROOT = STEWARD_DIR / "var" / "steward"
+SEGMENTATION_CONFIG = STEWARD_DIR / "config" / "segmentation.toml"
 
 
 def _robot_model() -> dict:
@@ -95,11 +97,20 @@ def cmd_world(args) -> int:
     return 0
 
 
-def _start_ego(robot_url: str, api_port: int, out_dir: Path, bind_wait_s: float = 0.0):
+def _segmenter(config: str, root: str):
+    """The robot-side segmenter from ``config`` (``''``: none), caching results under ``<root>/ego/segmentation``."""
+    if not config:
+        return None
+    from steward.ego.segmenter import Segmenter
+
+    return Segmenter.from_files(Path(config), cache_dir=Path(root) / "ego" / "segmentation")
+
+
+def _start_ego(robot_url: str, api_port: int, out_dir: Path, bind_wait_s: float = 0.0, segmenter=None):
     from steward.ego.runtime import EgoRuntime, RobotLink
     from steward.ego.server import ego_api
 
-    runtime = EgoRuntime(RobotLink(robot_url), _robot_model(), out_dir=out_dir)
+    runtime = EgoRuntime(RobotLink(robot_url), _robot_model(), out_dir=out_dir, segmenter=segmenter)
     runtime.start()
     api = ego_api(runtime, port=api_port, bind_wait_s=bind_wait_s).start()
     return runtime, api
@@ -107,7 +118,8 @@ def _start_ego(robot_url: str, api_port: int, out_dir: Path, bind_wait_s: float 
 
 def cmd_ego(args) -> int:
     out_dir = Path(args.out_dir) if args.out_dir else Path(args.root) / "ego" / "observations"
-    runtime, api = _start_ego(args.robot_url, args.api_port, out_dir, args.bind_wait)
+    runtime, api = _start_ego(args.robot_url, args.api_port, out_dir, args.bind_wait,
+                              _segmenter(args.segmentation_config, args.root))
     print(json.dumps({"egoApi": api.url, "robot": args.robot_url}), flush=True)
     if args.parent_pid:
         _exit_with_parent(args.parent_pid)
@@ -132,7 +144,7 @@ class _EgoProcess:
     def __init__(self, args, robot_url: str, out_dir: Path):
         cmd = [sys.executable, "-m", "steward.cli", "--root", str(args.root), "ego", "--robot-url", robot_url,
                "--api-port", str(args.api_port), "--out-dir", str(out_dir), "--parent-pid", str(os.getpid()),
-               "--bind-wait", str(args.bind_wait)]
+               "--bind-wait", str(args.bind_wait), "--segmentation-config", args.segmentation_config]
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, encoding="utf-8",
                                      errors="replace", start_new_session=True)  # NDJSON is UTF-8; a locale
         # decode error here would silently kill the reader (and backpressure the child) on Windows
@@ -201,7 +213,8 @@ def cmd_demo(args) -> int:
         build_default_kitchen(AuthoringService(args.root))
     run_dir = Path(args.root) / "runs" / ("demo-" + time.strftime("%Y%m%d-%H%M%S"))
     host = _host(args, run_dir)
-    runtime, api = _start_ego(host.robot_servers["w:robot-1"].url, 0, run_dir / "ego")
+    runtime, api = _start_ego(host.robot_servers["w:robot-1"].url, 0, run_dir / "ego",
+                              segmenter=_segmenter(args.segmentation_config, args.root))
     t0 = time.monotonic()
     outcome: dict = {}
 
@@ -275,7 +288,8 @@ def cmd_shuttle(args) -> int:
             build_default_kitchen(AuthoringService(args.root))
         run_dir = Path(args.root) / "runs" / ("shuttle-" + time.strftime("%Y%m%d-%H%M%S"))
         host = _host(args, run_dir)
-        runtime, api = _start_ego(host.robot_servers["w:robot-1"].url, 0, run_dir / "ego")
+        runtime, api = _start_ego(host.robot_servers["w:robot-1"].url, 0, run_dir / "ego",
+                                  segmenter=_segmenter(args.segmentation_config, args.root))
         api_url = api.url
         def world_scene():
             return host.sim.world_state()
@@ -361,7 +375,8 @@ def cmd_chores(args) -> int:
             build_default_kitchen(AuthoringService(args.root))
         run_dir = Path(args.root) / "runs" / ("chores-" + time.strftime("%Y%m%d-%H%M%S"))
         host = _host(args, run_dir)
-        runtime, api = _start_ego(host.robot_servers["w:robot-1"].url, 0, run_dir / "ego")
+        runtime, api = _start_ego(host.robot_servers["w:robot-1"].url, 0, run_dir / "ego",
+                                  segmenter=_segmenter(args.segmentation_config, args.root))
         api_url = api.url
 
         def truth() -> tuple[dict, dict]:
@@ -431,6 +446,23 @@ def cmd_chores(args) -> int:
     return 0 if ok else 1
 
 
+def cmd_services(args) -> int:
+    from steward import perception_services as ps
+
+    services = ps.load(Path(args.config))
+    healthy = True
+    for svc in services.values():
+        if args.no_check:
+            print(json.dumps({"service": svc.name, "title": svc.title, "urls": list(svc.urls), "docs": svc.docs},
+                             ensure_ascii=False))
+            continue
+        health = ps.check(svc)
+        healthy &= health.ok
+        print(json.dumps({"service": svc.name, "title": svc.title, "ok": health.ok, "url": health.url,
+                          "detail": health.detail}, ensure_ascii=False), flush=True)
+    return 0 if healthy else 1
+
+
 def _speed(text: str) -> float:
     return math.inf if text == "max" else float(text)
 
@@ -470,6 +502,9 @@ def main(argv: list[str] | None = None) -> int:
                            help="Ego API of the robot, for robot tasks from the console chat")
         if name == "up":
             p.add_argument("--api-port", type=int, default=7420)
+        if name != "world":
+            p.add_argument("--segmentation-config", default=str(SEGMENTATION_CONFIG),
+                           help="robot-side segmenter settings, used at phase levels without world masks; '' disables it")
         if name == "chores":
             p.add_argument("--rounds", type=int, default=1, help="number of rounds; 0 repeats until Ctrl-C")
             p.add_argument("--api", help="Ego API of a running `steward up`; omit to run in-process")
@@ -486,7 +521,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--parent-pid", type=int, help="exit when this process is gone (set by `steward up`)")
     p.add_argument("--bind-wait", type=float, default=10.0,
                    help="seconds to wait for a fixed port still held by a service that just stopped")
+    p.add_argument("--segmentation-config", default=str(SEGMENTATION_CONFIG),
+                   help="robot-side segmenter settings, used at phase levels without world masks; '' disables it")
     p.set_defaults(fn=cmd_ego)
+    p = sub.add_parser("services")
+    p.add_argument("--config", default=str(STEWARD_DIR / "config" / "perception-services.toml"),
+                   help="perception services file")
+    p.add_argument("--no-check", action="store_true", help="only list the services, without contacting them")
+    p.set_defaults(fn=cmd_services)
     args = parser.parse_args(argv)
     return args.fn(args)
 

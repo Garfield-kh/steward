@@ -18,6 +18,13 @@ PHASES: dict[str, dict] = {
         "label": "Phase 1 · RGB-D 感知链路",
         "description": "WSim 只给 RGB、深度与匿名实例掩码；ER 自行反投影、分类、多视角积累与形状补全",
         "perception": "rgbd",
+        "masks": True,
+    },
+    "phase1-sam": {
+        "label": "Phase 1 · SAM 3.1 分割",
+        "description": "WSim 只给 RGB 与深度；ER 在关键帧调用 SAM 3.1 做开放词汇实例分割，类别以分割词为主、形状先验为辅",
+        "perception": "rgbd",
+        "masks": False,
     },
 }
 DEFAULT_PHASE = "phase0"

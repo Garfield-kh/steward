@@ -11,18 +11,23 @@ uv sync
 open http://127.0.0.1:7400/console   # 浏览器控制台：斜视主视图、相机、地图、指标、控制
 .venv/bin/steward shuttle --api http://127.0.0.1:7420 --steps 0   # 在餐桌、柜子、餐边柜之间循环搬运
 ./scripts/check.sh              # Python 测试、DSH 插件编译与测试、组合配置快照比对
+.venv/bin/steward build-kitchen # 机器人模型改动后（如头部加装的广角相机）重建默认场景
 ```
+
+机器人头部有两台 RGB-D 相机：`head_camera` 看前方，`wide_camera` 是短焦广角相机，看身前台面与夹爪；两台都进入感知，见 [steward.md 13.8](../steward.md#138-机器人本体的双相机)。
 
 ## 与 DeepSeek Harness 一起运行
 
 ```sh
 echo 'DEEPSEEK_API_KEY=sk-...' > .env     # 已被 Git 忽略，运行脚本自动加载
 .venv/bin/steward up                      # WCA :7400，机器人端口 :7410，Ego API :7420
+.venv/bin/steward up --phase phase1-sam   # 机器人用 SAM 3.1 自行分割 RGB-D（设置在 config/segmentation.toml）
 ./scripts/setup-dsh-profiles.sh           # 构建插件，创建 ego、world、world-task profile
 ./scripts/run-ego.sh "把杯子放到桌上"       # 机器人智能体
 ./scripts/run-world.sh "按描述构建一间厨房……"  # World Harness 一次性任务
 ./scripts/run-world.sh --port 3091        # World Harness 浏览器界面
 ./scripts/install-desktop-app.sh          # 在桌面安装 Steward.app：选场景后启动世界、Ego Harness 并打开控制台
+.venv/bin/steward services                # 检查远程感知服务（SAM 3.1、NovelAnything、NVS、SLARM）是否可达
 ```
 
 `ego` profile 是机器人的 Ego Harness，只能经 Ego API 感知与行动，shell、文件、网页等通用工具已禁用；`world` 与 `world-task` profile 是 World Harness，经世界控制接口构建资产、组合场景、控制 Episode。机器人与世界使用不同的 `DSH_HOME`。
@@ -38,6 +43,8 @@ echo 'DEEPSEEK_API_KEY=sk-...' > .env     # 已被 Git 忽略，运行脚本自�
 | `src/steward/observer` | ES 与 World State 的对比评估 |
 | `dsh/` | DeepSeek Harness 插件与 bundle（锁定 `@deepseek-ai/dsh@0.2.1-rc.3`） |
 | `scripts/` | profile 创建、检查、多种子回归 |
+| `config/perception-services.toml` | 远程感知服务清单（地址、健康检查、接口），见 steward.md 13.7.6 |
+| `config/segmentation.toml` | `phase1-sam` 的机器人侧分割设置：词表、阈值、裁剪与语义融合，见 steward.md 13.7.7 |
 | `compat/snapshots` | 组合配置快照 |
 
 运行数据写入 `var/`，不纳入版本管理。

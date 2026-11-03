@@ -94,7 +94,8 @@ class StewardHost:
         if self.sim is not None:
             self.sim.stop()
         self.sim = WorldSim(scenario["sceneState"], speed=self.speed, seed=self.seed, freeze_idle=self.freeze_idle,
-                            perception=PerceptionConfig(mode=phase_modules(self.phase)["perception"]))
+                            perception=PerceptionConfig(mode=phase_modules(self.phase)["perception"],
+                                                        masks=phase_modules(self.phase).get("masks", True)))
         self.scenario = scenario
         self.observer.reset()
         for rid in scenario["robots"]:
@@ -112,6 +113,7 @@ class StewardHost:
         self.phase = level
         if self.sim is not None:
             self.sim.perception.mode = modules["perception"]
+            self.sim.perception.masks = modules.get("masks", True)
             self.sim.events.append({"t": self.sim.time, "type": "phase/switch", "level": level})
         return self.phase_state()
 
@@ -234,7 +236,10 @@ class StewardHost:
             sim = self._require_sim()
             camera = q.get("camera", "overview")
             if camera.startswith("robot:"):
-                camera = sim.robot_camera_name(camera.removeprefix("robot:"))
+                try:
+                    camera = sim.robot_camera_name(camera.removeprefix("robot:"), q.get("sensor"))
+                except KeyError as exc:
+                    raise HttpError(404, f"no such robot camera: {exc}") from None
             elif camera == "free":
                 try:
                     lookat = [float(v) for v in q["lookat"].split(",")]
@@ -438,10 +443,18 @@ class StewardHost:
 
     # ------------------------------------------------------------ robot port
     def _robot_routes(self, rid: str) -> dict:
+        def camera_id(q) -> str | None:
+            """The ``camera`` query (a sensor id of this robot; absent: its primary camera)."""
+            camera = q.get("camera")
+            if camera is not None and camera not in {c["id"] for c in self._require_sim().robot_cameras(rid)}:
+                raise HttpError(404, f"robot {rid} has no camera {camera!r}")
+            return camera
+
         def camera(q, b):
             sim = self._require_sim()
             fmt = image_format(q)
-            image = sim.render(sim.robot_camera_name(rid), int(q.get("width", 320)), int(q.get("height", 240)), fmt=fmt)
+            image = sim.render(sim.robot_camera_name(rid, camera_id(q)), int(q.get("width", 320)),
+                               int(q.get("height", 240)), fmt=fmt)
             return Binary(image, IMAGE_FORMATS[fmt])
 
         def clock_wait(q, b):
@@ -465,10 +478,11 @@ class StewardHost:
 
         return {
             ("GET", "/sensors"): lambda q, b: self._require_sim().sensors(rid),
-            ("GET", "/sensors/rgbd"): lambda q, b: Binary(self._require_sim().rgbd(rid), "application/octet-stream"),
+            ("GET", "/sensors/rgbd"): lambda q, b: Binary(self._require_sim().rgbd(rid, camera_id(q)), "application/octet-stream"),
             ("GET", "/camera/rgb"): camera,
             ("POST", "/command"): lambda q, b: self._require_sim().command(rid, b or {}),
             ("POST", "/telemetry"): telemetry,
             ("POST", "/clock/wait"): clock_wait,
             ("POST", "/clock/release"): lambda q, b: self._require_sim().release(f"{rid}/{b['hold']}") or {},
+            ("POST", "/clock/renew"): lambda q, b: self._require_sim().renew(f"{rid}/{b['hold']}") or {},
         }

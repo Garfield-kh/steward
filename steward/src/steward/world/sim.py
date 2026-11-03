@@ -20,6 +20,7 @@ import math
 import queue
 import threading
 import time
+import zlib
 from dataclasses import dataclass, field
 
 import mujoco
@@ -65,6 +66,8 @@ class PerceptionConfig:
     # "ideal": the robot receives detections (category and box with noise); "rgbd": the robot
     # receives RGB, depth and anonymous instance masks and must detect and estimate by itself.
     mode: str = "ideal"
+    masks: bool = True  # with "rgbd": whether frames carry the anonymous instance masks; without
+    # them the robot segments the images itself
     max_range: float = 8.0
     depth_sigma_base: float = 0.0012
     depth_sigma_quadratic: float = 0.0019
@@ -108,6 +111,7 @@ class _RenderRequest:
     height: int
     fmt: str = "png"
     robot: str | None = None
+    sensor: str | None = None  # with ``robot``: which of its cameras
     done: threading.Event = field(default_factory=threading.Event)
     png: bytes = b""
     error: Exception | None = None
@@ -168,7 +172,6 @@ class WorldSim:
         self.model = self.build.compile()
         self.data = mujoco.MjData(self.model)
         self.build.apply_initial(self.model, self.data)
-        self.rng = np.random.default_rng(self._seed)
         self.robots = {e.id: _RobotState(e.id) for e in self.template.entities if e.role == "robot"}
         for renderer in getattr(self, "_renderers", {}).values():
             close_renderer(renderer)
@@ -483,6 +486,13 @@ class WorldSim:
                 self._holds[hold].seen = time.monotonic()
             self._clock.wait(0.05 if left is None else min(0.05, left))
 
+    def renew(self, hold: str) -> None:
+        """Keep ``hold`` live while its woken owner works longer than ``HOLD_LEASE_S`` wall seconds
+        (a remote segmentation request); unknown holds are ignored."""
+        with self._clock:
+            if hold in self._holds:
+                self._holds[hold].seen = time.monotonic()
+
     def release(self, hold: str) -> None:
         """End ``hold``: the world no longer waits for its owner."""
         with self._clock:
@@ -784,9 +794,20 @@ class WorldSim:
             return entity_obb(self.model, self.data, self.build.names[entity_id], links)
 
     # ---------------------------------------------------------------- sensors
-    def camera_pose(self, robot_id: str, sensor_id: str = "head_camera") -> tuple[dict, dict]:
-        """World pose of a robot camera mount frame (looks along +x) and its sensor description."""
+    def robot_cameras(self, robot_id: str) -> list[dict]:
+        """The camera sensors of a robot in model order; the first is its primary camera."""
+        return [sensor for link in self.template.entity(robot_id).rigid.links for sensor in link.sensors
+                if sensor.get("kind") in ("rgb", "depth", "rgbd")]
+
+    def camera_pose(self, robot_id: str, sensor_id: str | None = None) -> tuple[dict, dict]:
+        """World pose of a robot camera mount frame (looks along +x) and its sensor description;
+        ``sensor_id`` None is the primary camera. Raises ``KeyError`` for an unknown camera."""
         ent = self.template.entity(robot_id)
+        if sensor_id is None:
+            cameras = self.robot_cameras(robot_id)
+            if not cameras:
+                raise KeyError(f"robot {robot_id} has no camera")
+            sensor_id = cameras[0]["id"]
         for link in ent.rigid.links:
             for sensor in link.sensors:
                 if sensor["id"] == sensor_id:
@@ -796,20 +817,23 @@ class WorldSim:
         raise KeyError(f"robot {robot_id} has no sensor {sensor_id}")
 
     def sensors(self, robot_id: str) -> dict:
-        """One sensor frame for a robot: odometry, joint encoders, gripper and ideal detections."""
+        """One sensor frame for a robot: odometry, joint encoders, gripper, its cameras and, without
+        raw imaging, the ideal detections of every camera (each carries the ``camera`` it came from
+        and a pose relative to it; an object two cameras see is reported by the first)."""
         with self.lock:
             rs = self._robot(robot_id)
             names = self.build.names[robot_id]
             x, y, yaw = (self._joint_q(j) for j in names.root_joints)
             p = self.perception
+            rng = self._sensor_rng(robot_id, "body")
             odom = {
-                "x": x + self.rng.normal(0, p.odom_pos_sigma),
-                "y": y + self.rng.normal(0, p.odom_pos_sigma),
-                "yaw": yaw + self.rng.normal(0, p.odom_yaw_sigma),
+                "x": x + rng.normal(0, p.odom_pos_sigma),
+                "y": y + rng.normal(0, p.odom_pos_sigma),
+                "yaw": yaw + rng.normal(0, p.odom_yaw_sigma),
                 "sigma": {"pos": p.odom_pos_sigma, "yaw": p.odom_yaw_sigma},
             }
             joints = {jid: self._joint_q(jname) for jid, jname in names.joints.items()}
-            cam_pose, sensor = self.camera_pose(robot_id)
+            cameras = self.robot_cameras(robot_id)
             frame = {
                 "stamp": self.time,
                 "odometry": odom,
@@ -817,13 +841,24 @@ class WorldSim:
                 "gripper": {"state": "closed" if rs.closed else "open",
                             "holding": rs.attached is not None or rs.handle is not None,
                             "holdingHandle": rs.handle is not None},
-                "camera": {"id": sensor["id"], "intrinsics": sensor["intrinsics"]},
+                "cameras": [{"id": c["id"], "intrinsics": c["intrinsics"]} for c in cameras],
             }
             if self.perception.mode == "rgbd":
                 frame["imaging"] = "rgbd"
+                frame["masks"] = self.perception.masks
             else:
-                frame["detections"] = self._detections(robot_id, cam_pose, sensor)
+                seen: set = set()
+                frame["detections"] = [det for c in cameras
+                                       for det in self._detections(robot_id, *self.camera_pose(robot_id, c["id"]), seen,
+                                                                   self._sensor_rng(robot_id, f"detect/{c['id']}"))]
             return frame
+
+    def _sensor_rng(self, robot_id: str, channel: str) -> np.random.Generator:
+        """Noise for one reading of ``channel`` (body, a camera's detections or image): a function of
+        the seed, the world step, the robot and the channel only. Readings at the same step repeat
+        exactly, and a reading taken at a wall-clock-dependent moment (an appearance image) leaves
+        every other reading, and so a recorded run, unchanged."""
+        return np.random.default_rng([self._seed, self._step_now(), zlib.crc32(f"{robot_id}/{channel}".encode())])
 
     def perception_parts(self, ent) -> list[tuple[str, list[str] | None, str]]:
         """What a detector reports for one entity: ``(part id, links, category)``. Building walls and
@@ -836,16 +871,20 @@ class WorldSim:
         rest = [link.id for link in ent.rigid.links if link.id not in drawers]
         return [(ent.id, rest, ent.category.value)] + [(f"{ent.id}/{d}", [d], "drawer") for d in drawers]
 
-    def rgbd(self, robot_id: str, timeout: float = 10.0) -> bytes:
-        """One RGB-D frame of a robot's head camera as compressed ``npz`` bytes: ``rgb`` (H, W, 3)
+    def rgbd(self, robot_id: str, sensor_id: str | None = None, timeout: float = 10.0) -> bytes:
+        """One RGB-D frame of a robot camera (``sensor_id`` None: the primary one) as compressed
+        ``npz`` bytes: ``camera`` (its sensor id), ``rgb`` (H, W, 3)
         uint8, ``depth`` (H, W) uint16 millimetres (0 = no reading), ``mask`` (H, W) uint8 anonymous
         instance ids (0 = background; ids are shuffled every frame and carry no World State
-        identity), ``fovy`` and ``header`` (JSON: stamp, odometry, joints, gripper).
+        identity; absent when ``PerceptionConfig.masks`` is off), ``fovy`` and ``header`` (JSON:
+        stamp, odometry, joints, gripper).
 
         Rendering runs on the main thread like :meth:`render`."""
+        if sensor_id is not None and sensor_id not in {c["id"] for c in self.robot_cameras(robot_id)}:
+            raise KeyError(f"robot {robot_id} has no camera {sensor_id!r}")
         if threading.current_thread() is threading.main_thread():
-            return self._rgbd_now(robot_id)
-        request = _RenderRequest(None, 0, 0, robot=robot_id)
+            return self._rgbd_now(robot_id, sensor_id)
+        request = _RenderRequest(None, 0, 0, robot=robot_id, sensor=sensor_id)
         self._render_requests.put(request)
         if not request.done.wait(timeout):
             raise TimeoutError("rendering needs the main thread to call WorldSim.pump()")
@@ -853,18 +892,18 @@ class WorldSim:
             raise request.error
         return request.png
 
-    def _rgbd_now(self, robot_id: str) -> bytes:
+    def _rgbd_now(self, robot_id: str, sensor_id: str | None = None) -> bytes:
         with self.lock:
             header = self.sensors(robot_id)
             header.pop("imaging", None)
             header.pop("detections", None)
-            _, sensor = self.camera_pose(robot_id)
+            _, sensor = self.camera_pose(robot_id, sensor_id)
             width, height = sensor["intrinsics"]["width"], sensor["intrinsics"]["height"]
             key = (width, height)
             if key not in self._renderers:
                 self._renderers[key] = mujoco.Renderer(self.model, height, width)
             renderer = self._renderers[key]
-            renderer.update_scene(self.data, camera=self.robot_camera_name(robot_id))
+            renderer.update_scene(self.data, camera=self.robot_camera_name(robot_id, sensor["id"]))
             rgb = renderer.render().copy()
             renderer.enable_depth_rendering()
             depth = renderer.render().copy()
@@ -876,11 +915,12 @@ class WorldSim:
         geom = np.where(seg[..., 1] == int(mujoco.mjtObj.mjOBJ_GEOM), seg[..., 0], -1)
         parts = np.where(geom >= 0, part_of[np.clip(geom, 0, None)], -1)
         clear = np.where(geom >= 0, transparent[np.clip(geom, 0, None)], False)
-        mask = self._anonymous_masks(parts)
-        depth_mm = self._noisy_depth(depth, clear)
+        rng = self._sensor_rng(robot_id, f"rgbd/{sensor['id']}")
+        masks = {"mask": self._anonymous_masks(parts, rng)} if self.perception.masks else {}
+        depth_mm = self._noisy_depth(depth, clear, rng)
         buf = io.BytesIO()
-        np.savez_compressed(buf, rgb=rgb, depth=depth_mm, mask=mask, fovy=np.float32(sensor["intrinsics"]["fovy"]),
-                            header=np.array(json.dumps(header)))
+        np.savez_compressed(buf, camera=np.array(sensor["id"]), rgb=rgb, depth=depth_mm, fovy=np.float32(sensor["intrinsics"]["fovy"]),
+                            header=np.array(json.dumps(header)), **masks)
         return buf.getvalue()
 
     def _geom_parts(self, robot_id: str) -> tuple[np.ndarray, np.ndarray]:
@@ -899,16 +939,16 @@ class WorldSim:
         transparent = self.model.geom_rgba[:, 3] < 0.5
         return part_of, transparent
 
-    def _anonymous_masks(self, parts: np.ndarray) -> np.ndarray:
+    def _anonymous_masks(self, parts: np.ndarray, rng: np.random.Generator) -> np.ndarray:
         """Instance masks as a class-agnostic segmenter would give them: shuffled ids, ragged
         boundaries, tiny fragments dropped."""
         p = self.perception
         mask = np.zeros(parts.shape, dtype=np.uint8)
         present = [int(v) for v in np.unique(parts) if v >= 0]
-        ids = self.rng.permutation(np.arange(1, 256))[: len(present)]
+        ids = rng.permutation(np.arange(1, 256))[: len(present)]
         for part, new_id in zip(present, ids, strict=False):
             sel = parts == part
-            if self.rng.random() < p.mask_erode_prob:
+            if rng.random() < p.mask_erode_prob:
                 inner = sel.copy()
                 inner[1:, :] &= sel[:-1, :]
                 inner[:-1, :] &= sel[1:, :]
@@ -919,14 +959,14 @@ class WorldSim:
                 mask[sel] = new_id
         return mask
 
-    def _noisy_depth(self, depth: np.ndarray, clear: np.ndarray) -> np.ndarray:
+    def _noisy_depth(self, depth: np.ndarray, clear: np.ndarray, rng: np.random.Generator) -> np.ndarray:
         """Depth in millimetres with range-dependent noise; transparent surfaces often give no reading."""
         p = self.perception
         valid = (depth > 0.05) & (depth < p.max_range)
         sigma = p.depth_sigma_base + p.depth_sigma_quadratic * np.clip(depth - 0.4, 0.0, None) ** 2
         sigma = np.where(clear, sigma * p.transparent_depth_noise, sigma)
-        noisy = depth + self.rng.normal(0.0, 1.0, depth.shape) * sigma
-        valid &= ~(clear & (self.rng.random(depth.shape) < p.transparent_depth_drop))
+        noisy = depth + rng.normal(0.0, 1.0, depth.shape) * sigma
+        valid &= ~(clear & (rng.random(depth.shape) < p.transparent_depth_drop))
         return np.where(valid, np.round(noisy * 1000.0), 0).astype(np.uint16)
 
     def _detection_targets(self, robot_id: str):
@@ -947,7 +987,8 @@ class WorldSim:
         rgba = self.model.geom_rgba[big]
         return color_name(rgba), float(rgba[3])
 
-    def _detections(self, robot_id: str, cam_pose: dict, sensor: dict) -> list[dict]:
+    def _detections(self, robot_id: str, cam_pose: dict, sensor: dict, seen: set, rng: np.random.Generator) -> list[dict]:
+        """Detections of one camera, skipping the parts in ``seen`` and adding those it reports."""
         p = self.perception
         fovy = math.radians(sensor["intrinsics"]["fovy"])
         aspect = sensor["intrinsics"]["width"] / sensor["intrinsics"]["height"]
@@ -958,6 +999,9 @@ class WorldSim:
         robot_base = self._root_body(robot_id)
         dets = []
         for ent, links, category in self._detection_targets(robot_id):
+            part = (ent.id, tuple(links or ()))
+            if part in seen:
+                continue
             obb = entity_obb(self.model, self.data, self.build.names[ent.id], links)
             target_bodies = set(entity_body_ids(self.model, self.build.names[ent.id], links))
             if not self._visible(obb, cam_inv, cam_p, half_h, half_v, robot_base, target_bodies):
@@ -965,18 +1009,19 @@ class WorldSim:
             rel = pose_compose(cam_inv, obb.pose())
             rng_m = float(np.linalg.norm(rel["p"]))
             sigma = p.pos_sigma_base + p.pos_sigma_per_m * rng_m
-            noisy_p = [rel["p"][i] + self.rng.normal(0, sigma) for i in range(3)]
-            noisy_q = quat_normalize(quat_mul(rel["q"], quat_from_yaw(self.rng.normal(0, p.yaw_sigma))))
-            size = [max(0.005, s * (1 + self.rng.normal(0, p.size_sigma_rel))) for s in obb.size]
+            noisy_p = [rel["p"][i] + rng.normal(0, sigma) for i in range(3)]
+            noisy_q = quat_normalize(quat_mul(rel["q"], quat_from_yaw(rng.normal(0, p.yaw_sigma))))
+            size = [max(0.005, s * (1 + rng.normal(0, p.size_sigma_rel))) for s in obb.size]
             color, alpha = self._appearance(ent, links)
-            if alpha < 0.5 and self.rng.random() > p.transparent_detect_prob:
+            if alpha < 0.5 and rng.random() > p.transparent_detect_prob:
                 continue
             label = category
-            if category in p.confusion and self.rng.random() < p.confusion_prob:
-                label = str(self.rng.choice(p.confusion[category]))
+            if category in p.confusion and rng.random() < p.confusion_prob:
+                label = str(rng.choice(p.confusion[category]))
+            seen.add(part)
             dets.append({"category": label, "confidence": round(float(0.9 - 0.05 * rng_m / p.max_range), 3),
                          "pose": {"p": noisy_p, "q": noisy_q}, "size": size, "range": rng_m,
-                         "color": "clear" if alpha < 0.5 else color})
+                         "color": "clear" if alpha < 0.5 else color, "camera": sensor["id"]})
         return dets
 
     def _visible(self, obb, cam_inv: dict, cam_p: np.ndarray, half_h: float, half_v: float,
@@ -1042,7 +1087,7 @@ class WorldSim:
         while True:
             try:
                 if request.robot is not None:
-                    request.png = self._rgbd_now(request.robot)
+                    request.png = self._rgbd_now(request.robot, request.sensor)
                 else:
                     request.png = self._render_now(request.camera, request.width, request.height, request.fmt)
             except Exception as exc:  # noqa: BLE001 - re-raised on the requesting thread
@@ -1094,8 +1139,9 @@ class WorldSim:
                     hidden += [gid for gid in range(self.model.ngeom) if int(self.model.geom_bodyid[gid]) == bid]
         return hidden
 
-    def robot_camera_name(self, robot_id: str, sensor_id: str = "head_camera") -> str:
-        return self.build.names[robot_id].cameras[sensor_id]
+    def robot_camera_name(self, robot_id: str, sensor_id: str | None = None) -> str:
+        """MuJoCo camera name of a robot camera (``sensor_id`` None: the primary one)."""
+        return self.build.names[robot_id].cameras[sensor_id or self.robot_cameras(robot_id)[0]["id"]]
 
     def status(self) -> dict:
         with self.lock:

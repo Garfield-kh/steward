@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from steward.ego.classify import SHAPES, classify, prototype
+from steward.ego.classify import SHAPES, classify, fuse_semantics, prototype
 from steward.ego.perception import box_at_yaw, box_of, segments
 from steward.ego.planner import Box2D, front_box, protrusion, room_centre
 from steward.ego.priors import compatible, prior
@@ -85,6 +85,9 @@ class Track:
     recent: collections.deque = field(default_factory=lambda: collections.deque(maxlen=RECENT_VIEWS))
     # (centre, size) of its latest single-view measurements, for the robust box of small objects
     appearance: Appearance | None = None
+    semantic_counts: dict[str, float] = field(default_factory=dict)
+    # summed segmenter scores per category over the views that named it (robot-side segmentation)
+    semantic_views: int = 0  # views whose region the segmenter named
 
     @property
     def category(self) -> str:
@@ -161,6 +164,10 @@ class EstimatorConfig:
     wall_like_top: float = 1.25
     """Robot knowledge of the home: nothing but walls reaches this high, so a region topping it is
     part of a wall whatever its own classification says, and a non-wall track this tall is not real."""
+    semantic_shape_weight: float = 0.5
+    """With robot-side segmentation: exponent of the shape-prior probability (:func:`fuse_semantics`)."""
+    semantic_label_floor: float = 0.03
+    """With robot-side segmentation: semantic likelihood of a category the segmenter did not name."""
 
 
 @dataclass
@@ -181,7 +188,8 @@ class EgoEstimator:
         self.held_id: str | None = None
         self._rng = np.random.default_rng(0)
         self._self_template = self._make_self_template()
-        self._head_mount, self._camera = self._camera_model()
+        self.cameras = self._camera_models()
+        self.primary_camera = next(iter(self.cameras))
 
     # ------------------------------------------------------------- body model
     def _make_self_template(self) -> dict:
@@ -190,24 +198,35 @@ class EgoEstimator:
         data.pop("asset", None)
         return data
 
-    def _camera_model(self) -> tuple[dict, dict]:
+    def _camera_models(self) -> dict[str, tuple[dict, dict]]:
+        """Sensor id → (pose of its link on the base, sensor description) of every camera, in model
+        order; the first is the primary camera."""
         tree = self.robot_model["body"]
+        cameras = {}
         for link in tree["links"]:
             for sensor in link.get("sensors", []):
                 if sensor["kind"] in ("rgb", "depth", "rgbd"):
                     mount_joint = next(j for j in tree["joints"] if j["child"] == link["id"])
-                    return mount_joint["origin"]["value"], sensor
-        raise ValueError("robot model has no camera")
+                    cameras[sensor["id"]] = (mount_joint["origin"]["value"], sensor)
+        if not cameras:
+            raise ValueError("robot model has no camera")
+        return cameras
 
     def base_pose(self) -> dict:
         o = self.odometry
         return {"p": [o["x"], o["y"], 0.0], "q": quat_from_yaw(o["yaw"])}
 
-    def camera_pose(self, odometry: dict | None = None) -> dict:
-        """World pose of the head camera mount (looks along +x), at the current odometry or a given one."""
+    def camera_pose(self, odometry: dict | None = None, camera: str | None = None) -> dict:
+        """World pose of a camera mount (looks along +x; ``camera`` None: the primary one), at the
+        current odometry or a given one. Raises ``KeyError`` for a camera the robot model lacks."""
         o = odometry or self.odometry
+        mount, sensor = self.cameras[camera or self.primary_camera]
         base = {"p": [o["x"], o["y"], 0.0], "q": quat_from_yaw(o["yaw"])}
-        return pose_compose(pose_compose(base, self._head_mount), self._camera["mount"])
+        return pose_compose(pose_compose(base, mount), sensor["mount"])
+
+    def camera_intrinsics(self, camera: str | None = None) -> dict:
+        """``width``, ``height`` and ``fovy`` (degrees) of a camera (None: the primary one)."""
+        return self.cameras[camera or self.primary_camera][1]["intrinsics"]
 
     def gripper_position(self) -> np.ndarray:
         """Gripper position from the robot's own kinematics (base, lift, reach)."""
@@ -229,10 +248,13 @@ class EgoEstimator:
         # A held object moves with this frame's body pose; update it before association so a
         # turning robot does not see its own load as a new object.
         self._follow_held()
-        cam = self.camera_pose()
+        cameras = [c["id"] for c in frame.get("cameras", []) if c["id"] in self.cameras] or [self.primary_camera]
+        cams = {c: self.camera_pose(camera=c) for c in cameras}
         measurements = []
         for det in frame.get("detections", []):
-            world = pose_compose(cam, det["pose"])
+            if det.get("camera", self.primary_camera) not in cams:
+                continue
+            world = pose_compose(cams[det.get("camera", self.primary_camera)], det["pose"])
             rng = float(det.get("range", np.linalg.norm(det["pose"]["p"])))
             sigma = self.config.pos_sigma_base + self.config.pos_sigma_per_m * rng
             measurements.append((det, np.asarray(world["p"]), yaw_from_quat(world["q"]), sigma))
@@ -253,10 +275,32 @@ class EgoEstimator:
                 self._fuse(self.tracks[assigned[k]], det, pos, yaw, sigma)
             else:
                 matched.add(self._new_track(det, pos, yaw, sigma).id)
-        self._decay_unseen(cam, matched)
+        self._decay_unseen(cams, matched)
         self._merge_duplicates()
         self._follow_held()
         self.version += 1
+
+    def update_body(self, header: dict) -> None:
+        """Follow the robot's own state (stamp, odometry, joints, gripper) from a sensor header
+        without imaging: between two segmented frames, what the gripper holds moves with it."""
+        self.stamp = float(header["stamp"])
+        self.odometry = header["odometry"]
+        self.joints = header["joints"]
+        self.gripper = header["gripper"]
+        if not self.gripper.get("holding"):
+            self._clear_held()
+        self._follow_held()
+        self.version += 1
+
+    def category_probs(self, size: np.ndarray, bottom: float, color: np.ndarray, invalid_frac: float,
+                       bottom_seen: bool, semantics: dict[str, float] | None) -> dict[str, float]:
+        """Category probabilities of a measured box: the shape priors alone, or fused with the
+        segmenter's category scores when it named the region."""
+        if not semantics:
+            return classify(size, bottom, color, invalid_frac, bottom_seen=bottom_seen)
+        shape = classify(size, bottom, color, invalid_frac, bottom_seen=bottom_seen, min_prob=0.0)
+        cfg = self.config
+        return fuse_semantics(semantics, shape, cfg.semantic_shape_weight, cfg.semantic_label_floor)
 
     # ------------------------------------------------------------- RGB-D path
     def update_rgbd(self, frame: dict) -> None:
@@ -271,12 +315,13 @@ class EgoEstimator:
         if not self.gripper.get("holding"):
             self._clear_held()
         self._follow_held()
-        cam = self.camera_pose()
+        cam = self.camera_pose(camera=frame.get("camera"))
         cam_p = np.asarray(cam["p"])
         measurements = []
         for seg in segments(frame, cam, rng=self._rng):
             centre, size, yaw = box_of(seg.points)
-            probs = classify(size, centre[2] - size[2] / 2, seg.color, seg.invalid_frac, bottom_seen=seg.bottom_seen)
+            probs = self.category_probs(size, centre[2] - size[2] / 2, seg.color, seg.invalid_frac,
+                                        seg.bottom_seen, seg.semantics)
             footprint = float(max(size[0], size[1]))
             measurements.append({"seg": seg, "centre": centre, "size": size, "yaw": yaw, "probs": probs,
                                  "footprint": footprint, "concave": _concave(seg.points, centre, footprint, cam_p)})
@@ -504,6 +549,7 @@ class EgoEstimator:
                 keep.voxels = self._union(keep.voxels, drop.voxels)
                 for cat, n in drop.category_counts.items():
                     keep.category_counts[cat] = keep.category_counts.get(cat, 0.0) + n
+                _absorb_semantics(keep, drop)
                 for col, n in drop.color_counts.items():
                     keep.color_counts[col] = keep.color_counts.get(col, 0.0) + n
                 keep.observations += drop.observations
@@ -533,6 +579,7 @@ class EgoEstimator:
                 keep.voxels = self._union(keep.voxels, drop.voxels)
                 for cat, n in drop.category_counts.items():
                     keep.category_counts[cat] = keep.category_counts.get(cat, 0.0) + n
+                _absorb_semantics(keep, drop)
                 keep.observations += drop.observations
                 keep.existence = max(keep.existence, drop.existence)
                 self._drop(drop, "merged: one wall", into=keep)
@@ -572,6 +619,7 @@ class EgoEstimator:
                     big.voxels = self._union(big.voxels, small.voxels)
                 for cat, n in small.category_counts.items():
                     big.category_counts[cat] = big.category_counts.get(cat, 0.0) + n
+                _absorb_semantics(big, small)
                 big_views = big.observations
                 big.observations += small.observations
                 big.existence = max(big.existence, small.existence)
@@ -599,6 +647,10 @@ class EgoEstimator:
             # partly hidden and may mix with what lies around, so they do not relabel it.
             for cat, prob in m["probs"].items():
                 track.category_counts[cat] = track.category_counts.get(cat, 0.0) + prob
+            if seg.semantics:
+                for cat, score in seg.semantics.items():
+                    track.semantic_counts[cat] = track.semantic_counts.get(cat, 0.0) + score
+                track.semantic_views += 1
             name = color_name(seg.color, seg.invalid_frac)
             track.color_counts[name] = track.color_counts.get(name, 0.0) + 1.0
         track.observations += 1
@@ -685,8 +737,9 @@ class EgoEstimator:
         if track.mean_rgb is not None:
             # The accumulated box is the best evidence of what the object is: classify it again,
             # with confidence growing with the number of views behind it.
-            probs = classify(size, centre[2] - size[2] / 2, track.mean_rgb, track.mean_invalid,
-                             bottom_seen=track.bottom_seen)
+            mean = {k: v / track.semantic_views for k, v in track.semantic_counts.items()} if track.semantic_views else None
+            probs = self.category_probs(size, centre[2] - size[2] / 2, track.mean_rgb, track.mean_invalid,
+                                        track.bottom_seen, mean)
             weight = float(min(track.observations, 20))
             track.category_counts = {k: v * weight for k, v in probs.items()}
         proto = prototype(track.category) if track.category_counts else None
@@ -793,6 +846,7 @@ class EgoEstimator:
                 keep.var = 1.0 / (w_keep + w_drop)
                 for cat, n in drop.category_counts.items():
                     keep.category_counts[cat] = keep.category_counts.get(cat, 0.0) + n
+                _absorb_semantics(keep, drop)
                 for col, n in drop.color_counts.items():
                     keep.color_counts[col] = keep.color_counts.get(col, 0.0) + n
                 keep.observations += drop.observations
@@ -849,20 +903,30 @@ class EgoEstimator:
         n = track.observations
         track.size = track.size + (np.asarray(det["size"], float) - track.size) / n
 
-    def _decay_unseen(self, cam: dict, matched: set[str]) -> None:
-        fovy = math.radians(self._camera["intrinsics"]["fovy"])
-        aspect = self._camera["intrinsics"]["width"] / self._camera["intrinsics"]["height"]
-        half_v = fovy / 2 * 0.8
-        half_h = math.atan(math.tan(fovy / 2) * aspect) * 0.8
-        inv = pose_inverse(cam)
+    def _decay_unseen(self, cams: dict[str, dict], matched: set[str]) -> None:
+        """Fade every unmatched track that lies well inside the view of at least one of ``cams``
+        (camera id → pose): once per frame, however many cameras should have seen it."""
+        views = []
+        for camera, cam in cams.items():
+            intrinsics = self.camera_intrinsics(camera)
+            fovy = math.radians(intrinsics["fovy"])
+            half_v = fovy / 2 * 0.8
+            half_h = math.atan(math.tan(fovy / 2) * intrinsics["width"] / intrinsics["height"]) * 0.8
+            views.append((pose_inverse(cam), half_h, half_v))
+
+        def in_view(pos: np.ndarray) -> bool:
+            for inv, half_h, half_v in views:
+                local = pose_compose(inv, {"p": pos.tolist(), "q": [1, 0, 0, 0]})["p"]
+                if (0.3 < local[0] < self.config.max_range * 0.8 and abs(math.atan2(local[1], local[0])) <= half_h
+                        and abs(math.atan2(local[2], local[0])) <= half_v):
+                    return True
+            return False
+
         for tid in list(self.tracks):
             track = self.tracks[tid]
             if tid in matched or track.held or track.carried or self._in_closed_drawer(track):
                 continue
-            local = pose_compose(inv, {"p": track.pos.tolist(), "q": [1, 0, 0, 0]})["p"]
-            if not (0.3 < local[0] < self.config.max_range * 0.8):
-                continue
-            if abs(math.atan2(local[1], local[0])) > half_h or abs(math.atan2(local[2], local[0])) > half_v:
+            if not in_view(track.pos):
                 continue
             track.existence *= self.config.missed_decay
             if track.existence < self.config.drop_below:
@@ -1201,6 +1265,13 @@ def _identified(track: Track) -> bool:
     category = track.category
     return track.observations >= ESTABLISHED_VIEWS and category != "unknown" and total > 0 \
         and track.category_counts[category] / total >= IDENTIFIED_SHARE
+
+
+def _absorb_semantics(keep: Track, drop: Track) -> None:
+    """Add the segmenter evidence of a track merged away to the track that keeps it."""
+    for cat, n in drop.semantic_counts.items():
+        keep.semantic_counts[cat] = keep.semantic_counts.get(cat, 0.0) + n
+    keep.semantic_views += drop.semantic_views
 
 
 def _concave(points: np.ndarray, centre: np.ndarray, footprint: float, cam_p: np.ndarray) -> bool:

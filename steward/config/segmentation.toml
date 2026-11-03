@@ -19,7 +19,7 @@ crop_up = 0.3  # share of the region's height added above it, where objects on i
 crop_depth = 0.5  # share of the region's height kept below its top edge: the top surface, not the legs
 max_crops = 2  # crops per frame, largest first; each costs one request (about 1.5 s)
 crop_prompts = ["bowl", "cup", "mug", "plate", "wine glass", "teddy bear", "scissors", "toy airplane",
-                "bottle", "box", "puzzle piece"]
+                "bottle", "box", "puzzle piece", "photo", "picture"]
 # Semantic evidence and shape priors are combined as  p(c) ∝ L(c) · P_shape(c)^shape_weight,
 # where L is the mean SAM score of category c (or `label_floor` for categories SAM did not name).
 shape_weight = 0.5
@@ -55,3 +55,7 @@ fill_free_share = 0.7
 "plant" = "plant"
 "box" = "box"
 "puzzle piece" = "puzzle_piece"
+# A printed top (a puzzle box lid, a picture book) scores about 0.8 as a photo and not at all as a
+# box or lid: the robot sees the print, and the agent names what carries it.
+"photo" = "picture"
+"picture" = "picture"

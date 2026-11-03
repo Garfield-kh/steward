@@ -5,9 +5,13 @@ from __future__ import annotations
 import threading
 import time
 
+import math
+
+import numpy as np
 import pytest
 
 from steward.assets.generators import steward_bot
+from steward.ego.estimator import EgoEstimator, _box_corners
 from steward.ego.perception import decode_rgbd
 from steward.ego.runtime import EgoRuntime, RobotLink, RuntimeConfig
 from steward.net import HttpError, call
@@ -88,6 +92,82 @@ def test_a_camera_the_world_lacks_is_reported_once_and_perception_goes_on_withou
 def test_perception_cameras_must_be_cameras_of_the_robot():
     with pytest.raises(ValueError, match="tail_camera"):
         EgoRuntime(RobotLink("http://127.0.0.1:9"), steward_bot().to_dict(), RuntimeConfig(cameras=("tail_camera",)))
+
+
+def _offline(config: RuntimeConfig | None = None) -> EgoRuntime:
+    return EgoRuntime(RobotLink("http://127.0.0.1:9"), steward_bot().to_dict(), config)
+
+
+def _header(stamp=1.0, x=0.0, yaw=0.0, lift=0.5, gripper="open", holding=False):
+    return {"stamp": stamp, "odometry": {"x": x, "y": 0.0, "yaw": yaw},
+            "joints": {"lift": lift, "reach": 0.0, "wrist_yaw": 0.0, "wrist_roll": 0.0},
+            "gripper": {"state": gripper, "holding": holding}}
+
+
+def test_the_widest_camera_is_in_charge_of_near_regions_unless_one_is_named():
+    assert _offline().near_camera == "wide_camera"
+    assert _offline(RuntimeConfig(cameras=("head_camera",))).near_camera is None, "one camera: no division"
+    assert _offline(RuntimeConfig(near_camera="head_camera")).near_camera == "head_camera"
+    with pytest.raises(ValueError, match="near_camera"):
+        _offline(RuntimeConfig(cameras=("head_camera",), near_camera="wide_camera"))
+
+
+def test_arm_motion_with_the_base_still_makes_a_keyframe_of_the_near_camera_only():
+    runtime = _offline()
+    runtime._keyframe = {c: _header() for c in ("head_camera", "wide_camera")}
+    lifted, gripped = _header(stamp=2.0, lift=0.6), _header(stamp=2.0, gripper="closed", holding=True)
+    assert runtime._keyframe_due(lifted, "wide_camera") and not runtime._keyframe_due(lifted, "head_camera")
+    assert runtime._keyframe_due(gripped, "wide_camera") and not runtime._keyframe_due(gripped, "head_camera")
+    assert not runtime._keyframe_due(_header(stamp=2.0, lift=0.52), "wide_camera"), "a small lift is no new view"
+    assert runtime._keyframe_due(_header(stamp=2.0, x=0.2), "head_camera"), "base motion still makes keyframes"
+
+
+def test_of_one_instant_each_camera_fuses_the_regions_of_its_range_that_the_other_has_in_view():
+    runtime = _offline()
+    head, wide = ({"camera": c, "header": _header()} for c in ("head_camera", "wide_camera"))
+    batch = [head, wide]
+    head_defers, wide_defers = runtime._handoff(head, batch), runtime._handoff(wide, batch)
+    cam = np.asarray(runtime.estimator.camera_pose(_header()["odometry"], "head_camera")["p"])
+
+    def box(x, y, z, size=0.1):
+        return _box_corners(np.array([x, y, z]), np.full(3, size), 0.0)
+
+    near, far = box(cam[0] + 0.7, 0.0, 0.4), box(cam[0] + 3.0, 0.0, 0.5)
+    side = box(cam[0] + 2.0 * math.cos(math.radians(50)), 2.0 * math.sin(math.radians(50)), 0.5)
+    long_table = _box_corners(np.array([cam[0] + 1.6, 0.0, 0.4]), np.array([1.2, 2.4, 0.75]), 0.0)
+    assert head_defers(near) and not head_defers(far), "near regions go to the wide camera"
+    assert wide_defers(far) and not wide_defers(near), "far regions go to the head camera"
+    assert not wide_defers(side), "a far region beside the head camera's view stays with the wide camera"
+    assert not wide_defers(long_table), "the head camera sees only part of the long table: the wide camera keeps it"
+    assert runtime._handoff(wide, [wide]) is None, "a lone frame fuses everything"
+
+
+def test_a_deferred_region_keeps_its_track_but_adds_no_observation_or_track(kitchen_scene):
+    sim = WorldSim(kitchen_scene, seed=1)
+    sim.perception.mode = "rgbd"
+    head, wide = (decode_rgbd(sim.rgbd("w:robot-1", c)) for c in ("head_camera", "wide_camera"))
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    est.update_rgbd(head, defer=lambda corners: True)
+    assert not est.tracks, "every region deferred: no track"
+    est.update_rgbd(wide)
+    seen = {tid: t.observations for tid, t in est.tracks.items()}
+    assert seen
+    est.update_rgbd(head, defer=lambda corners: True)
+    assert set(est.tracks) <= set(seen)
+    assert all(est.tracks[tid].observations == seen[tid] for tid in est.tracks)
+
+
+def test_points_on_the_robots_own_links_are_told_apart_except_the_load_in_the_gripper():
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    est.odometry = {"x": 1.0, "y": 2.0, "yaw": 0.5}
+    est.joints = {"lift": 0.8, "reach": 0.4, "wrist_yaw": 0.0, "wrist_roll": 0.0}
+    grip = est.gripper_position()
+    mast = np.array([1.0 + 0.18 * math.cos(0.5), 2.0 + 0.18 * math.sin(0.5), 1.0])
+    ahead = grip + np.array([0.4 * math.cos(0.5), 0.4 * math.sin(0.5), -0.05])
+    points = np.stack([mast, grip, ahead])
+    assert est.on_body(points).tolist() == [True, True, False]
+    est.gripper = {"state": "closed", "holding": True}
+    assert est.on_body(points).tolist() == [True, False, False], "the load is not the robot"
 
 
 def test_at_the_table_edge_the_wide_camera_reads_the_face_the_head_camera_cannot_see(kitchen_root, tmp_path):

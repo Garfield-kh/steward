@@ -84,6 +84,18 @@ def test_switching_the_phase_level_changes_the_sensors_and_the_robot_follows(kit
         host.stop()
 
 
+def test_a_named_level_outranks_the_scenarios_declared_one_for_every_later_episode(kitchen_root, tmp_path):
+    declared = StewardHost(kitchen_root, scenario="puzzle-dog", run_dir=tmp_path)
+    assert declared.phase == "phase0", "without a named level the scenario's declared one applies"
+    host = StewardHost(kitchen_root, scenario="puzzle-dog", run_dir=tmp_path, phase="phase1")
+    assert host.phase == "phase1" and host.sim.perception.mode == "rgbd"
+    host.set_phase("phase1-sam")
+    host.load_episode("puzzle-dog")
+    assert host.phase == "phase1-sam" and host.sim.perception.masks is False, "a console switch outlives the episode"
+    for h in (declared, host):
+        h.stop()
+
+
 def test_phase1_exploration_builds_an_accurate_ego_state_from_rgbd(kitchen_root, tmp_path):
     host = StewardHost(kitchen_root, scenario="phase0-chores", speed=4.0, seed=3, run_dir=tmp_path,
                        phase="phase1").start()
@@ -138,7 +150,7 @@ def _frame(depth: np.ndarray, mask: np.ndarray) -> dict:
 CAM = {"p": [0.0, 0.0, 3.0], "q": [1.0, 0.0, 0.0, 0.0]}
 
 
-def test_a_region_whose_base_is_cut_by_the_image_or_hidden_by_something_nearer_has_no_seen_bottom():
+def test_a_region_whose_base_is_cut_hidden_or_overhanging_has_no_seen_bottom():
     from steward.ego.perception import segments
 
     h, w = 60, 80
@@ -149,12 +161,15 @@ def test_a_region_whose_base_is_cut_by_the_image_or_hidden_by_something_nearer_h
     depth[30:, 5:25] = 2.95
     mask[5:25, 40:70] = 2  # a wall with a counter right below it, much nearer
     depth[5:25, 40:70] = 3.4
-    mask[25:45, 40:70] = 3  # the counter: background below it is farther
+    mask[25:45, 40:70] = 3  # the counter, standing on the floor right below it
     depth[25:45, 40:70] = 2.0
+    depth[45:, 40:70] = 1.95
     mask[45:60, 30:38] = 4  # reaches the lower image edge
     depth[45:60, 30:38] = 2.5
+    mask[35:45, 72:78] = 5  # a table top segmented without its legs: the room below it is farther
+    depth[35:45, 72:78] = 2.7
     seen = {round(seg.range, 1): seg.bottom_seen for seg in segments(_frame(depth, mask), CAM)}
-    assert seen == {3.0: True, 3.4: False, 2.0: True, 2.5: False}
+    assert seen == {3.0: True, 3.4: False, 2.0: True, 2.5: False, 2.7: False}
 
 
 def test_a_partial_view_without_its_base_is_classified_by_its_visible_top():

@@ -28,7 +28,8 @@ class PerceptionConfig:
     max_points: int = 400
     floor_cut: float = 0.012
     occluder_gap: float = 0.15  # something this much nearer right below a region hides its base
-    occluded_share: float = 0.3  # share of the lower edge hidden that leaves the base unseen
+    overhang_gap: float = 0.15  # something this much farther right below a region: its lower edge overhangs
+    occluded_share: float = 0.3  # share of the lower edge hidden or overhanging that leaves the base unseen
 
 
 @dataclass
@@ -106,7 +107,8 @@ def _bottom_seen(mask: np.ndarray, depth: np.ndarray, instance: int, ys: np.ndar
                  cfg: PerceptionConfig) -> bool:
     """Whether a region's lowest pixels show the object's base: not when the region reaches the
     lower image edge (the base is out of view), nor when much of its lower edge has something
-    clearly nearer right below it (the base is hidden, for example a wall behind a counter). A
+    clearly nearer right below it (the base is hidden, for example a wall behind a counter) or
+    clearly farther (the edge overhangs, for example a table top segmented without its legs). A
     base on the floor has floor right below it, at nearly the same distance."""
     h = mask.shape[0]
     if ys.max() >= h - 1:
@@ -122,7 +124,7 @@ def _bottom_seen(mask: np.ndarray, depth: np.ndarray, instance: int, ys: np.ndar
     measured = (here > 0.05) & other
     if not measured.any():
         return True
-    hidden = measured & (below > 0.05) & (below < here - cfg.occluder_gap)
+    hidden = measured & (below > 0.05) & ((below < here - cfg.occluder_gap) | (below > here + cfg.overhang_gap))
     return float(hidden.sum()) / float(measured.sum()) < cfg.occluded_share
 
 

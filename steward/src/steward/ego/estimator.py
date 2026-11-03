@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import collections
 import copy
+import dataclasses
 import itertools
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -25,7 +27,8 @@ from steward.ego.classify import SHAPES, classify, fuse_semantics, prototype
 from steward.ego.perception import box_at_yaw, box_of, segments
 from steward.ego.planner import Box2D, front_box, protrusion, room_centre
 from steward.ego.priors import compatible, prior
-from steward.math3d import pose_compose, pose_inverse, quat_from_yaw, wrap_angle, yaw_from_quat
+from steward.math3d import (matrix_from_quat, pose_compose, pose_inverse, quat_from_axis_angle, quat_from_yaw,
+                            wrap_angle, yaw_from_quat)
 from steward.scene.schema import Entity, Est, Link, Relation, RigidTree, SceneState, primitive
 
 SELF_ID = "e:self"
@@ -168,6 +171,14 @@ class EstimatorConfig:
     """With robot-side segmentation: exponent of the shape-prior probability (:func:`fuse_semantics`)."""
     semantic_label_floor: float = 0.03
     """With robot-side segmentation: semantic likelihood of a category the segmenter did not name."""
+    semantic_named_score: float = 0.6
+    """With robot-side segmentation: mean segmenter score of a non-wall category, over at least
+    NAMED_VIEWS views, from which a track counts as a real object however hollow it looks."""
+    body_margin_m: float = 0.04
+    """Margin around the robot's own links (:meth:`EgoEstimator.body_boxes`) within which depth
+    points are the robot itself; world masks leave the robot out, robot-side segmentation does not."""
+    body_share: float = 0.5
+    """Share of a region's points on the robot's own links that makes the whole region the robot."""
 
 
 @dataclass
@@ -227,6 +238,46 @@ class EgoEstimator:
     def camera_intrinsics(self, camera: str | None = None) -> dict:
         """``width``, ``height`` and ``fovy`` (degrees) of a camera (None: the primary one)."""
         return self.cameras[camera or self.primary_camera][1]["intrinsics"]
+
+    def on_body(self, points: np.ndarray) -> np.ndarray:
+        """Which of ``points`` (N×3, map frame) lie on the robot's own links (within
+        ``body_margin_m``); while the gripper holds something, none near the gripper, which are the load."""
+        inside = _in_boxes(points, self.body_boxes(), self.config.body_margin_m)
+        if self.gripper.get("holding"):
+            held = self.tracks.get(self.held_id) if self.held_id else None
+            reach = max(HELD_FALLBACK_M, held.footprint if held is not None else 0.0)
+            inside &= np.linalg.norm(points - self.gripper_position(), axis=1) > reach
+        return inside
+
+    def body_boxes(self) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """``(centre, half extents, rotation matrix)`` in the map frame of every visual primitive of
+        the robot's own links, from odometry and joint encoders."""
+        tree = self.robot_model["body"]
+        children = {j["child"] for j in tree["joints"]}
+        poses = {link["id"]: self.base_pose() for link in tree["links"] if link["id"] not in children}
+        pending = list(tree["joints"])
+        while pending:
+            joint = next((j for j in pending if j["parent"] in poses), None)
+            if joint is None:
+                raise ValueError(f"robot model joints {[j['id'] for j in pending]} hang from no reachable link")
+            pending.remove(joint)
+            kind = joint["type"]["value"]
+            q = float(self.joints.get(joint["id"], (joint["q"]["value"] or [0.0])[0]))
+            axis = joint.get("axis", {}).get("value", [0.0, 0.0, 1.0])
+            motion = {"p": [a * q for a in axis], "q": [1.0, 0.0, 0.0, 0.0]} if kind == "prismatic" else \
+                {"p": [0.0, 0.0, 0.0], "q": quat_from_axis_angle(axis, q) if kind == "revolute" else [1.0, 0.0, 0.0, 0.0]}
+            poses[joint["child"]] = pose_compose(pose_compose(poses[joint["parent"]], joint["origin"]["value"]), motion)
+        boxes = []
+        for link in tree["links"]:
+            for geom in link.get("geometry", {}).get("visual", []):
+                size = geom.get("size", [])
+                half = {"box": lambda s: [s[0] / 2, s[1] / 2, s[2] / 2], "cylinder": lambda s: [s[0], s[0], s[1] / 2],
+                        "capsule": lambda s: [s[0], s[0], s[1] / 2 + s[0]], "sphere": lambda s: [s[0]] * 3}.get(geom.get("shape"))
+                if half is None:
+                    continue
+                world = pose_compose(poses[link["id"]], geom.get("pose") or {"p": [0, 0, 0], "q": [1, 0, 0, 0]})
+                boxes.append((np.asarray(world["p"], float), np.asarray(half(size), float), matrix_from_quat(world["q"])))
+        return boxes
 
     def gripper_position(self) -> np.ndarray:
         """Gripper position from the robot's own kinematics (base, lift, reach)."""
@@ -303,10 +354,16 @@ class EgoEstimator:
         return fuse_semantics(semantics, shape, cfg.semantic_shape_weight, cfg.semantic_label_floor)
 
     # ------------------------------------------------------------- RGB-D path
-    def update_rgbd(self, frame: dict) -> None:
+    def update_rgbd(self, frame: dict, defer: Callable[[np.ndarray], bool] | None = None) -> None:
         """Fuse one decoded RGB-D frame: segment it, measure every region, associate regions with
         tracks by position, size and category, and rebuild each matched track's box from the
-        points it has accumulated over recent views."""
+        points it has accumulated over recent views.
+
+        :param frame: decoded RGB-D frame with its sensor header and instance mask.
+        :param defer: true for the eight corners of the box of a region that another frame of the
+            same instant fuses: such a region keeps its track from fading as unseen but adds no
+            points, votes or new track.
+        """
         header = frame["header"]
         self.stamp = float(header["stamp"])
         self.odometry = header["odometry"]
@@ -319,12 +376,18 @@ class EgoEstimator:
         cam_p = np.asarray(cam["p"])
         measurements = []
         for seg in segments(frame, cam, rng=self._rng):
+            on_body = self.on_body(seg.points)
+            if on_body.mean() >= self.config.body_share:
+                continue  # the robot's own arm, mast or base, which robot-side segmentation also names
+            if on_body.any():
+                seg = dataclasses.replace(seg, points=seg.points[~on_body])
             centre, size, yaw = box_of(seg.points)
             probs = self.category_probs(size, centre[2] - size[2] / 2, seg.color, seg.invalid_frac,
                                         seg.bottom_seen, seg.semantics)
             footprint = float(max(size[0], size[1]))
             measurements.append({"seg": seg, "centre": centre, "size": size, "yaw": yaw, "probs": probs,
-                                 "footprint": footprint, "concave": _concave(seg.points, centre, footprint, cam_p)})
+                                 "footprint": footprint, "concave": _concave(seg.points, centre, footprint, cam_p),
+                                 "deferred": defer is not None and defer(_box_corners(centre, size, yaw))})
         pairs = []
         held = self.tracks.get(self.held_id) if self.held_id else None
         for i, m in enumerate(measurements):
@@ -376,8 +439,11 @@ class EgoEstimator:
                 continue
             used.add(i)
             matched.add(tid)
-            self._fuse_cloud(self.tracks[tid], measurements[i], cam_p)
+            if not measurements[i]["deferred"]:
+                self._fuse_cloud(self.tracks[tid], measurements[i], cam_p)
         for i, m in enumerate(measurements):
+            if m["deferred"]:
+                continue
             # A region cut by the image border is only part of something and waits for a full view,
             # except a wall: a near wall always fills the image edge to edge.
             is_wall = m["probs"].get("wall", 0.0) >= 0.5
@@ -407,8 +473,10 @@ class EgoEstimator:
             holds_robot = _inside(track, base, -0.05) and track.bottom() < 1.0
             wall_tall = track.top() >= self.config.wall_like_top and track.footprint >= 0.5
             # A table (open beneath its top) or an open drawer can look hollow from some viewpoints;
-            # an object seen many times and identified with confidence is not a boxed room corner.
-            hollow = not _identified(track) and track.voxels is not None \
+            # an object seen many times and identified with confidence, or one the segmenter keeps
+            # naming as something other than a wall, is not a boxed room corner.
+            hollow = not _identified(track) and not _named(track, self.config.semantic_named_score) \
+                and track.voxels is not None \
                 and _concave(_points(track.voxels), track.pos, track.footprint, cam_p)
             if holds_robot or wall_tall or hollow:
                 self._drop(track, "holds the robot's base" if holds_robot else
@@ -1194,6 +1262,7 @@ HELD_FALLBACK_M = 0.1
 YAW_MOVED = 0.3  # a detected heading this far off a track's means the object was turned
 STACK_TOL = 0.005  # a region this little below another's top face still rests on it
 IDENTIFIED_SHARE = 0.6
+NAMED_VIEWS = 2  # a name from a single view may be a phantom of one mask
 HELD_LARGER = 2.0  # a region with a footprint this many times the held object's is not the held object
 CONVEX_CHECK_M = 0.8  # boxes longer than this are checked for being filled rather than an outline
 MIN_FOOTPRINT_FILL = 0.2
@@ -1201,6 +1270,24 @@ SMALL_M = 0.3
 RECENT_VIEWS = 12
 APPEARANCE_SIZE_CHANGE = 0.2  # an extent this much off the one a face grid was laid out for starts a new grid
 SQUARE_SIDES = 0.9  # a footprint whose shorter side is at least this share of the longer is square
+
+
+def _in_boxes(points: np.ndarray, boxes: list[tuple[np.ndarray, np.ndarray, np.ndarray]], margin: float) -> np.ndarray:
+    """Which of ``points`` (N×3) lie within ``margin`` of any of the oriented ``boxes``."""
+    inside = np.zeros(len(points), dtype=bool)
+    for centre, half, rot in boxes:
+        local = (points - centre) @ rot
+        inside |= np.all(np.abs(local) <= half + margin, axis=1)
+    return inside
+
+
+def _box_corners(centre: np.ndarray, size: np.ndarray, yaw: float) -> np.ndarray:
+    """The eight corners (8×3) of a box turned by ``yaw`` about the vertical."""
+    c, s = math.cos(yaw), math.sin(yaw)
+    signs = np.array([[x, y, z] for x in (-0.5, 0.5) for y in (-0.5, 0.5) for z in (-0.5, 0.5)])
+    local = signs * np.asarray(size, float)
+    return np.asarray(centre, float) + np.stack([c * local[:, 0] - s * local[:, 1], s * local[:, 0] + c * local[:, 1],
+                                                 local[:, 2]], axis=1)
 
 
 def _voxelize(points: np.ndarray) -> np.ndarray:
@@ -1265,6 +1352,15 @@ def _identified(track: Track) -> bool:
     category = track.category
     return track.observations >= ESTABLISHED_VIEWS and category != "unknown" and total > 0 \
         and track.category_counts[category] / total >= IDENTIFIED_SHARE
+
+
+def _named(track: Track, min_score: float) -> bool:
+    """Named by the robot's segmenter in at least :data:`NAMED_VIEWS` views, with a mean score of
+    at least ``min_score`` for some category other than a wall."""
+    if track.semantic_views < NAMED_VIEWS:
+        return False
+    return any(score / track.semantic_views >= min_score
+               for cat, score in track.semantic_counts.items() if cat != "wall")
 
 
 def _absorb_semantics(keep: Track, drop: Track) -> None:

@@ -51,11 +51,23 @@ class RuntimeConfig:
     keyframe_turn_rad: float = 0.3
     keyframe_min_s: float = 0.0
     keyframe_max_s: float = 4.0
+    # Arm motion also makes the near camera's frame a keyframe, while the base stands still: a
+    # prismatic joint moved ``keyframe_arm_m``, a revolute joint turned ``keyframe_turn_rad``, or
+    # the gripper opened, closed, took or let go of something.
+    keyframe_arm_m: float = 0.05
     hold_renew_s: float = 0.5  # below the world's hold lease (HOLD_LEASE_S)
     # Cameras perception uses (sensor ids of the robot model); None: every camera the model has.
     # A frame from each is fused every perception period, so each camera adds its rendering (and,
     # with robot-side segmentation, its segmentation requests) to the period's cost.
     cameras: tuple[str, ...] | None = None
+    # Division of labour between the frames of one instant: the near camera (None: the camera with
+    # the widest vertical field of view when perception uses several) is in charge of regions
+    # nearer than ``near_range_m``, the other cameras of the farther ones. A region is fused from a
+    # camera not in charge of its range only when no camera in charge has it in view (inside its
+    # image by ``handoff_margin`` of the image size), so each object is one observation per instant.
+    near_camera: str | None = None
+    near_range_m: float = 1.5  # from the head at 1.5 m: a table top up to ~1.3 m ahead
+    handoff_margin: float = 0.05
     esim: EsimConfig = field(default_factory=EsimConfig)
     motion: MotionConfig = field(default_factory=MotionConfig)
     roles: RoleConfig = field(default_factory=RoleConfig)
@@ -154,6 +166,18 @@ def view_hint(cam: dict, intrinsics: dict, centre: np.ndarray, top: float, range
     return "in view but hidden by something nearer or cut off at the image edge: look from another side"
 
 
+def in_view(cam: dict, intrinsics: dict, point: np.ndarray, margin: float) -> bool:
+    """Whether ``point`` projects into the image of the pinhole camera at ``cam`` (looking along
+    its +x), at least ``margin`` of the image width and height inside its edges."""
+    x, y, z = pose_compose(pose_inverse(cam), {"p": [float(v) for v in point], "q": [1.0, 0.0, 0.0, 0.0]})["p"]
+    if x <= 0.05:
+        return False
+    w, h = intrinsics["width"], intrinsics["height"]
+    f = (h / 2.0) / math.tan(math.radians(intrinsics["fovy"]) / 2.0)
+    u, v = w / 2.0 - y * f / x, h / 2.0 - z * f / x
+    return margin * w <= u <= (1.0 - margin) * w and margin * h <= v <= (1.0 - margin) * h
+
+
 class EgoRuntime:
     def __init__(self, link: RobotLink, robot_model: dict, config: RuntimeConfig | None = None,
                  out_dir: Path | None = None, segmenter: Segmenter | None = None):
@@ -164,11 +188,14 @@ class EgoRuntime:
         if unknown:
             raise ValueError(f"RuntimeConfig.cameras {unknown} are not cameras of the robot model "
                              f"({', '.join(self.estimator.cameras)})")
+        self.near_camera = self._resolve_near_camera()
+        self._arm_joints = {j["id"]: j["type"]["value"] for j in robot_model["body"]["joints"]
+                            if j["type"]["value"] in ("prismatic", "revolute")}
         self.segmenter = segmenter
         if segmenter is not None:
             self.estimator.config.semantic_shape_weight = segmenter.config.shape_weight
             self.estimator.config.semantic_label_floor = segmenter.config.label_floor
-        self._keyframe: dict[str, tuple[float, float, float, float]] = {}  # camera → (stamp, x, y, yaw) of its last segmented frame
+        self._keyframe: dict[str, dict] = {}  # camera → sensor header of its last segmented frame
         self._missing_cameras: frozenset[str] = frozenset()
         self.segmentation = {"frames": 0, "cached": 0, "failures": 0, "lastSeconds": None, "lastError": None}
         self.esim = Esim(robot_model, self.config.esim)
@@ -245,7 +272,7 @@ class EgoRuntime:
                 if not frames:
                     self.estimator.update_body(frame)
                 for rgbd in frames:
-                    self.estimator.update_rgbd(rgbd)
+                    self.estimator.update_rgbd(rgbd, defer=self._handoff(rgbd, frames))
                     self._look_at_faces(rgbd)
                 self._publish_view_scene()
             return
@@ -270,24 +297,73 @@ class EgoRuntime:
         self._missing_cameras = missing
         return [c for c in wanted if c in provided]
 
+    def _resolve_near_camera(self) -> str | None:
+        """The camera in charge of near regions (:attr:`RuntimeConfig.near_camera`); None when
+        perception uses a single camera. Raises ``ValueError`` for a camera perception does not use."""
+        used = [c for c in self.estimator.cameras if self.config.cameras is None or c in self.config.cameras]
+        if self.config.near_camera is not None:
+            if self.config.near_camera not in used:
+                raise ValueError(f"RuntimeConfig.near_camera {self.config.near_camera!r} is not a camera perception "
+                                 f"uses ({', '.join(used)})")
+            return self.config.near_camera
+        if len(used) < 2:
+            return None
+        return max(used, key=lambda c: self.estimator.camera_intrinsics(c)["fovy"])
+
     def _keyframe_due(self, frame: dict, camera: str) -> bool:
         cfg, last = self.config, self._keyframe.get(camera)
         if last is None:
             return True
-        stamp, odo = float(frame["stamp"]), frame["odometry"]
-        elapsed = stamp - last[0]
+        odo, was = frame["odometry"], last["odometry"]
+        elapsed = float(frame["stamp"]) - float(last["stamp"])
         if elapsed < 0 or elapsed >= cfg.keyframe_max_s:
             return True
-        moved = math.hypot(odo["x"] - last[1], odo["y"] - last[2]) >= cfg.keyframe_move_m
-        turned = abs(wrap_angle(odo["yaw"] - last[3])) >= cfg.keyframe_turn_rad
-        return elapsed >= cfg.keyframe_min_s and (moved or turned)
+        moved = math.hypot(odo["x"] - was["x"], odo["y"] - was["y"]) >= cfg.keyframe_move_m
+        turned = abs(wrap_angle(odo["yaw"] - was["yaw"])) >= cfg.keyframe_turn_rad
+        handled = camera == self.near_camera and self._arm_moved(last, frame)
+        return elapsed >= cfg.keyframe_min_s and (moved or turned or handled)
+
+    def _arm_moved(self, last: dict, frame: dict) -> bool:
+        """Whether the arm or gripper changed enough since ``last`` for a new near-camera keyframe."""
+        grip, was = frame["gripper"], last["gripper"]
+        if grip.get("state") != was.get("state") or bool(grip.get("holding")) != bool(was.get("holding")):
+            return True
+        for jid, kind in self._arm_joints.items():
+            if jid not in frame["joints"] or jid not in last["joints"]:
+                continue
+            dq = frame["joints"][jid] - last["joints"][jid]
+            if (abs(dq) >= self.config.keyframe_arm_m if kind == "prismatic"
+                    else abs(wrap_angle(dq)) >= self.config.keyframe_turn_rad):
+                return True
+        return False
+
+    def _handoff(self, rgbd: dict, batch: list[dict]):
+        """The regions of ``rgbd`` that a camera in charge of their range fuses instead
+        (:attr:`RuntimeConfig.near_camera`): a predicate on the corners of a region's box, true
+        when a camera in charge has the whole box in view; or None to fuse all. A camera in charge
+        that sees only part of the box (a long table up close) leaves the region to this one."""
+        others = [f for f in batch if f is not rgbd]
+        if self.near_camera is None or not others:
+            return None
+        cfg, est = self.config, self.estimator
+        near = rgbd["camera"] == self.near_camera
+        cam_p = np.asarray(est.camera_pose(rgbd["header"]["odometry"], rgbd["camera"])["p"], float)
+        views = [(f["camera"] == self.near_camera, est.camera_pose(f["header"]["odometry"], f["camera"]),
+                  est.camera_intrinsics(f["camera"])) for f in others]
+
+        def defer(corners: np.ndarray) -> bool:
+            near_region = float(np.linalg.norm(corners.mean(axis=0) - cam_p)) < cfg.near_range_m
+            if near_region == near:
+                return False
+            return any(all(in_view(pose, intrinsics, c, cfg.handoff_margin) for c in corners)
+                       for is_near, pose, intrinsics in views if is_near == near_region)
+        return defer
 
     def _segment(self, rgbd: dict) -> bool:
         """Fill ``rgbd["mask"]`` and ``rgbd["labels"]`` from the robot's segmenter; False (and an
         operator alert on the first failure in a row) when the frame could not be segmented."""
         header = rgbd["header"]
-        odo = header["odometry"]
-        self._keyframe[rgbd["camera"]] = (float(header["stamp"]), odo["x"], odo["y"], odo["yaw"])
+        self._keyframe[rgbd["camera"]] = header
         stats = self.segmentation
         if self.segmenter is None:
             error = "this phase level sends no instance masks and the robot has no segmenter (steward ego --segmentation-config)"

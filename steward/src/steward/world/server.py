@@ -56,10 +56,14 @@ class _MainTask:
 class StewardHost:
     def __init__(self, root: Path | str, *, scenario: str | None = None, speed: float = 1.0, seed: int = 0,
                  run_dir: Path | None = None, wca_port: int = 0, robot_ports: dict[str, int] | None = None,
-                 chat: ChatConfig | None = None, phase: str = DEFAULT_PHASE, bind_wait_s: float = 0.0,
-                 pause_on_perception_fault: bool = False, freeze_idle: bool = False):
-        phase_modules(phase)
-        self.phase = phase
+                 chat: ChatConfig | None = None, phase: str | None = None, fallback_phase: str = DEFAULT_PHASE,
+                 bind_wait_s: float = 0.0, pause_on_perception_fault: bool = False, freeze_idle: bool = False):
+        # ``phase`` pins the level for every episode; None: each scenario's declared level, or
+        # ``fallback_phase`` for a scenario that declares none.
+        phase_modules(phase or fallback_phase)
+        self._pinned_phase = phase
+        self._fallback_phase = fallback_phase
+        self.phase = phase or fallback_phase
         self.authoring = AuthoringService(root)
         self.chat = HarnessChat(chat, lambda: self.wca.url)
         self.speed = speed
@@ -90,7 +94,7 @@ class StewardHost:
         scenario = self.authoring.load_scenario(name)
         if scenario.get("phase"):
             phase_modules(scenario["phase"])  # a scenario declares the level it was built for; unknown ones fail here
-            self.phase = scenario["phase"]
+        self.phase = self._pinned_phase or scenario.get("phase") or self._fallback_phase
         if self.sim is not None:
             self.sim.stop()
         self.sim = WorldSim(scenario["sceneState"], speed=self.speed, seed=self.seed, freeze_idle=self.freeze_idle,
@@ -110,7 +114,7 @@ class StewardHost:
         """Switch the running system to a phase level (module implementations), effective with the
         next sensor frame; later episodes start at the same level."""
         modules = phase_modules(level)
-        self.phase = level
+        self.phase = self._pinned_phase = level
         if self.sim is not None:
             self.sim.perception.mode = modules["perception"]
             self.sim.perception.masks = modules.get("masks", True)

@@ -64,7 +64,7 @@ def _host(args, run_dir: Path, start: bool = True):
     ports = {"w:robot-1": args.robot_port} if getattr(args, "robot_port", 0) else {}
     host = StewardHost(args.root, scenario=args.scenario, speed=args.speed, seed=args.seed, run_dir=run_dir,
                        wca_port=args.wca_port, robot_ports=ports, chat=_chat_config(args),
-                       phase=args.phase, bind_wait_s=getattr(args, "bind_wait", 0.0),
+                       phase=args.phase, fallback_phase=LATEST_PHASE, bind_wait_s=getattr(args, "bind_wait", 0.0),
                        pause_on_perception_fault=getattr(args, "pause_on_perception_fault", False),
                        freeze_idle=args.freeze_idle)
     return host.start() if start else host
@@ -502,8 +502,9 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--freeze-idle", action="store_true",
                        help="no world time passes while no robot acts, e.g. while the agents think")
         p.add_argument("--seed", type=int, default=0)
-        p.add_argument("--phase", choices=sorted(PHASES), default=LATEST_PHASE,
-                       help="phase level of the replaceable modules (switchable at run time from the console)")
+        p.add_argument("--phase", choices=sorted(PHASES), default=None,
+                       help="phase level of the replaceable modules for every episode (switchable at run time "
+                            f"from the console); default: the scenario's declared level, else {LATEST_PHASE}")
         p.add_argument("--wca-port", type=int, default=0 if in_process else 7400)
         p.add_argument("--robot-port", type=int, default=0 if in_process else 7410)
         if not in_process:

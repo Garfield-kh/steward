@@ -118,7 +118,8 @@
 <body>
 <header>
   <h1>Steward 控制台</h1>
-  <select id="scenario" title="Scenario"></select>
+  <select id="body" title="本体：这台机器人是哪种身体。本体编译在世界模型里，所以选本体就是选要加载的场景，加载时才会换身体"></select>
+  <select id="scenario" title="Scenario：所选本体的场景；加载另一个本体的 Scenario 会重开 Episode 并换掉机器人运行时"></select>
   <button id="load">加载</button>
   <button id="reset">重置</button>
   <button id="pause">暂停</button>
@@ -185,7 +186,7 @@
       <span class="spacer"></span><button id="egoAlertAck" class="alert-ack" hidden title="确认当前告警：Ego State 窗口停止闪烁，被监测暂停的仿真继续">解除告警</button><button id="chatStop" title="停止当前目标的本轮任务">停止</button><button id="chatReset">新会话</button></h2>
     <div class="targets">
       <button data-target="world" class="on world">世界 · World Harness</button>
-      <button data-target="robot" class="robot">机器人 · robot-1</button>
+      <button data-target="robot" class="robot">机器人</button>
     </div>
     <div class="msgs" id="chatMsgs"></div>
     <div class="chips" id="chatChips"></div>
@@ -517,6 +518,8 @@ async function refresh() {
     perceptionAlerts = state.perceptionAlerts || [];
     renderAlerts();
     renderPhase(state.phase);
+    renderBodies();
+    renderRobotTarget();
     const goal = state.goal;
     const progress = goal ? ` · 目标进度：最大拼合 ${goal.largestGroup}/${goal.entities}，相邻关系 ${goal.satisfied}/${goal.total}${goal.complete ? '（完成）' : ''}` : '';
     $('task').textContent = state.task ? `任务：${state.task}${progress}` : '';
@@ -648,7 +651,7 @@ const TARGETS = {
   world: { name: '世界', placeholder: '描述要对世界做的修改（World Harness 执行），Enter 发送，Shift+Enter 换行',
     chips: ['把黑色咖啡杯挪到操作台上', '在餐桌上再放一个碗', '把剪刀拿走', '把餐桌往东挪 30 厘米'],
     empty: '描述要修改的物体或位置；World Harness 会读取世界状态并调用 world_edit 执行，机器人需要自己发现变化。' },
-  robot: { name: '机器人', placeholder: '给 robot-1 下达新任务（Ego Harness 执行），Enter 发送，Shift+Enter 换行',
+  robot: { name: '机器人', placeholder: '给机器人下达新任务（Ego Harness 执行），Enter 发送，Shift+Enter 换行',
     chips: ['看看周围有什么', '打开餐边柜的抽屉，看看里面有什么', '把红色的碗放到操作台上', '停下来，原地待命'],
     empty: '给机器人下达新任务；本轮对话期间机器人由操作员接管，后台循环搬运暂停，结束后自动继续。机器人只能依靠自己的感知（Ego State）。' },
 };
@@ -830,14 +833,133 @@ async function refreshRobotCamera() {
   $('robotCamLabel').textContent = `${robotId} 头部相机 · ${cameraMeter().toFixed(1)} fps`;
 }
 
+// ------------------------------------------------------------------ scenarios & bodies
+// ---------------------------------------------------------------- body & scenario
+// The body (embodiment) is a property of a scenario, not something swapped at run time: every
+// scenario puts one body in the world. The console makes it a control anyway -- pick the body,
+// the scenario list narrows to that body's scenes, and loading one is what changes the body
+// (with a confirmation, because it means a new episode and another Ego Runtime).
+let catalog = [];
+function bodyLabel(robots) {
+  const labels = [...new Set(Object.values(robots || {}).map(r => r.label))];
+  return labels.length ? labels.join(' + ') : '无机器人';
+}
+function scenarioBody(scenario) {
+  const robots = Object.values((scenario && scenario.robots) || {});
+  return robots.length ? (robots[0].id || 'unknown') : 'none';
+}
+function catalogBodies() {
+  const seen = new Map();
+  for (const s of catalog) {
+    const id = scenarioBody(s);
+    if (!seen.has(id)) {
+      const robots = Object.values(s.robots || {});
+      seen.set(id, { id, label: bodyLabel(s.robots), description: (robots[0] || {}).description || '',
+                     registered: (robots[0] || {}).registered !== false });
+    }
+  }
+  return [...seen.values()];
+}
+function selectedBody() { return $('body').value; }
+// The scenarios of one body; `preferred` is kept selected when it belongs to that body.
+function fillScenarios(bodyId, preferred) {
+  const sel = $('scenario');
+  const items = catalog.filter(s => scenarioBody(s) === bodyId);
+  sel.innerHTML = items.map(s => {
+    const opt = document.createElement('option');
+    opt.value = s.name;
+    opt.textContent = s.built ? s.name : `${s.name} · 首次加载时构建`;
+    opt.title = s.task || '';
+    return opt.outerHTML;
+  }).join('');
+  const want = items.some(s => s.name === preferred) ? preferred : (items[0] ? items[0].name : '');
+  if (want) sel.value = want;
+  updateLoadButton();
+}
+function renderBodies() {
+  const bodies = catalogBodies();
+  const sel = $('body');
+  const key = bodies.map(b => `${b.id}:${b.label}`).join('|');
+  if (sel.dataset.key !== key) {
+    const keep = sel.value;
+    sel.dataset.key = key;
+    sel.innerHTML = bodies.map(b => `<option value="${esc(b.id)}">${esc(b.label)}</option>`).join('');
+    if (bodies.some(b => b.id === keep)) sel.value = keep;
+    else if (state && state.scenario) {
+      const loaded = catalog.find(s => s.name === state.scenario);
+      if (loaded) sel.value = scenarioBody(loaded);
+    }
+  }
+  const body = bodies.find(b => b.id === sel.value) || {};
+  const loadedBody = state && state.embodiments ? bodyLabel(state.embodiments) : null;
+  sel.title = `${body.label || '本体'}${body.description ? '\n' + body.description : ''}`
+    + (loadedBody ? `\n\n当前运行：${loadedBody}` : '');
+  sel.style.color = body.registered === false ? '#ffd27a' : '';
+  updateLoadButton();
+}
+// Say it on the button when loading would mean a different body, so the confirm is no surprise.
+function updateLoadButton() {
+  const name = $('scenario').value;
+  const target = catalog.find(s => s.name === name);
+  const loadedScenario = state && state.loaded ? state.scenario : null;
+  const switching = !!(target && loadedScenario && loadedScenario !== name
+    && scenarioBody(target) !== scenarioBody(catalog.find(s => s.name === loadedScenario) || {}));
+  $('load').textContent = switching ? '加载（换本体）' : '加载';
+  $('load').title = switching
+    ? '这会重开 Episode 并换掉机器人运行时：本体编译在世界模型里，不能热切换'
+    : '加载所选 Scenario';
+}
+// The robot the loaded scenario has: the chat target and its placeholder follow it, since the
+// console can hold a scenario of either body.
+function renderRobotTarget() {
+  const rid = state && state.loaded ? Object.keys(state.robots)[0] : null;
+  const button = document.querySelector('[data-target="robot"]');
+  const body = (state.embodiments || {})[rid] || {};
+  if (button) {
+    button.textContent = `机器人 · ${rid ? rid.replace(/^w:/, '') : '–'}`;
+    button.title = body.label ? `${body.label}\n${body.description || ''}`.trim() : '';
+  }
+  TARGETS.robot.placeholder = `给 ${rid ? rid.replace(/^w:/, '') : '机器人'} 下达新任务`
+    + '（Ego Harness 执行），Enter 发送，Shift+Enter 换行';
+  const skills = (state.robots[rid] || {}).embodiment || {};
+  TARGETS.robot.empty = skills.skills === false
+    ? '这个本体的 Ego API 目前只发布自我态、没有技能接口，Ego Harness 任务没有可调用的动作。'
+    : '给机器人下达新任务；本轮对话期间机器人由操作员接管，后台循环搬运暂停，结束后自动继续。机器人只能依靠自己的感知（Ego State）。';
+  if (chatTarget === 'robot') $('chatInput').placeholder = TARGETS.robot.placeholder;
+}
+
 async function loadScenarios() {
   try {
-    const { scenarios } = await api('GET', '/scenarios');
-    $('scenario').innerHTML = scenarios.map(s => `<option>${s}</option>`).join('');
-    if (state && state.scenario) $('scenario').value = state.scenario;
+    const res = await api('GET', '/scenarios');
+    catalog = res.catalog || res.scenarios.map(name => ({ name, robots: {}, built: true }));
+    renderBodies();
+    // Keep the operator's place: the scenario they are looking at, else the loaded one.
+    const chosen = $('scenario').value
+      || (state && state.scenario) || '';
+    fillScenarios(selectedBody(), chosen || (state && state.scenario));
   } catch (e) { showError(e); }
 }
-$('load').onclick = async () => { try { await api('POST', '/wca/episode', { action: 'load', scenario: $('scenario').value }); viewKey = ''; refresh(); } catch (e) { showError(e); } };
+$('body').onchange = () => {
+  fillScenarios(selectedBody(), state && state.scenario);
+  renderBodies();
+};
+$('scenario').onchange = () => {
+  // Picking a scenario of another body moves the body selector with it (the list is filtered, so
+  // normally it cannot happen, but the loaded scenario and the catalog can disagree for a moment).
+  const target = catalog.find(s => s.name === $('scenario').value);
+  if (target && scenarioBody(target) !== selectedBody()) { $('body').value = scenarioBody(target); }
+  updateLoadButton();
+};
+$('load').onclick = async () => {
+  const name = $('scenario').value;
+  const target = catalog.find(s => s.name === name);
+  const now = state && state.loaded ? bodyLabel(state.embodiments) : null;
+  const next = target ? bodyLabel(target.robots) : null;
+  if (now && next && now !== next && !confirm(
+    `切换本体：${now} → ${next}\n\n本体编译在世界模型里，这不是热切换：会重开 Episode，停掉当前机器人的运行时，再拉起新本体的运行时。继续？`)) return;
+  if (target && !target.built) $('clock').textContent = '正在构建场景…';
+  try { await api('POST', '/wca/episode', { action: 'load', scenario: name }); viewKey = ''; refresh(); loadScenarios(); } catch (e) { showError(e); }
+};
 $('reset').onclick = async () => { try { await api('POST', '/wca/episode', { action: 'reset' }); refresh(); } catch (e) { showError(e); } };
 $('pause').onclick = async () => { try { await api('POST', '/wca/clock', { action: state && state.paused ? 'resume' : 'pause' }); refresh(); } catch (e) { showError(e); } };
 $('speed').onchange = async () => { try { await api('POST', '/wca/clock', { action: 'speed', value: $('speed').value === 'max' ? 'max' : Number($('speed').value) }); refresh(); } catch (e) { showError(e); } };

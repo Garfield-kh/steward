@@ -49,6 +49,24 @@ def _wait_idle(chat: HarnessChat, key: str, timeout: float = 10.0) -> None:
     assert not chat.agents[key].busy
 
 
+def test_a_robot_ego_api_answering_an_unexpected_shape_does_not_break_the_chat_state(tmp_path):
+    """The console polls /console/chat continuously; a malformed robot answer must be absorbed.
+
+    Only "active" is read from /ego/alerts, and any answer without it (an older or different
+    Ego API, a proxy error page) raised out of the poll and took the whole chat endpoint down.
+    """
+    api = JsonServer({("GET", "/ego/alerts"): lambda q, b: {"alerts": []}}).start()
+    try:
+        robot = _home(tmp_path, "robot-1", "ego")
+        chat = HarnessChat(ChatConfig(dsh=_fake_dsh(tmp_path), cwd=tmp_path, env_file=tmp_path / ".env",
+                                      robot_home=robot, ego_api=api.url),
+                           lambda: "http://127.0.0.1:7999")
+        state = chat.state()
+        assert state["agents"]["robot"]["alerts"] == []
+    finally:
+        api.stop()
+
+
 def test_world_chat_keeps_its_session_and_targets_this_hosts_wca(tmp_path):
     world = _home(tmp_path, "world", "world-task")
     chat = HarnessChat(ChatConfig(dsh=_fake_dsh(tmp_path), cwd=tmp_path, env_file=tmp_path / ".env", world_home=world),

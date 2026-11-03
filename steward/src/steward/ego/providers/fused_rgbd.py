@@ -23,7 +23,7 @@ MASK_SOURCES = frozenset({"oracle", "geometric", "sam3", "geo_sam3", "keep"})
 
 @dataclass
 class FuseConfig:
-    mask_source: MaskSource = "sam3"
+    mask_source: MaskSource = "geo_sam3"
     geometric: GeometricMaskConfig | None = None
     # If set, multiply override depth by this scale (oracle calibration / plane fit).
     depth_scale: float = 1.0
@@ -33,7 +33,7 @@ class FuseConfig:
     fallback_on_error: bool = True
 
 
-def env_mask_source(default: str = "sam3") -> str:
+def env_mask_source(default: str = "geo_sam3") -> str:
     """``STEWARD_MASK_SOURCE`` overrides the default: keep | geometric | sam3 | geo_sam3.
 
     Unset → ``default``. Invalid values are ignored.

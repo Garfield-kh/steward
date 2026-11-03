@@ -43,13 +43,13 @@ class RuntimeConfig:
     appearance_min_coverage: float = 0.25  # a view showing less of a face is not kept
     max_risk: float = 0.35
     # Anonymous mask frontend after RGB-D decode:
-    #   "sam3"      — try LinxLab SAM3 PCS on real RGB; on failure keep sensor oracle (default)
-    #   "geo_sam3"  — geometric ∪ SAM3; on failure keep sensor oracle
+    #   "geo_sam3"  — geometric ∪ SAM3 (kitchen ablation best recall); on failure keep oracle (default)
+    #   "sam3"      — SAM3 PCS only; on failure keep sensor oracle
     #   "geometric" — depth clustering only
     #   "keep"      — leave sensor / world mask unchanged
     # Override with env STEWARD_MASK_SOURCE; SAM3 URL via STEWARD_SAM3_URL.
     # World still ships oracle masks; Ego upgrades when SAM3 works.
-    mask_source: str = "sam3"
+    mask_source: str = "geo_sam3"
     sam3_url: str | None = None
     sam3_threshold: float = 0.28
     esim: EsimConfig = field(default_factory=EsimConfig)

@@ -22,6 +22,7 @@ echo 'DEEPSEEK_API_KEY=sk-...' > .env     # 已被 Git 忽略，运行脚本自�
 ./scripts/run-ego.sh "把杯子放到桌上"       # 机器人智能体
 ./scripts/run-world.sh "按描述构建一间厨房……"  # World Harness 一次性任务
 ./scripts/run-world.sh --port 3091        # World Harness 浏览器界面
+./scripts/install-desktop-app.sh          # 在桌面安装 Steward.app：选场景后启动世界、Ego Harness 并打开控制台
 ```
 
 `ego` profile 是机器人的 Ego Harness，只能经 Ego API 感知与行动，shell、文件、网页等通用工具已禁用；`world` 与 `world-task` profile 是 World Harness，经世界控制接口构建资产、组合场景、控制 Episode。机器人与世界使用不同的 `DSH_HOME`。

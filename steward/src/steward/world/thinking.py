@@ -28,7 +28,9 @@ def _session_file(robot_home: str) -> str | None:
 
 
 def _decode(path: str) -> list[dict]:
-    out = subprocess.run(["zstd", "-dc", path], capture_output=True, text=True)
+    out = subprocess.run(["zstd", "-dc", path], capture_output=True, text=True,
+                         encoding="utf-8", errors="replace")  # dsh speaks UTF-8; the Windows
+                         # locale (GBK) would kill the reader thread and leave stdout None
     if out.returncode != 0:
         raise RuntimeError(f"zstd failed to decode {path}: {out.stderr.strip()}")
     return [json.loads(line) for line in out.stdout.splitlines() if line.strip()]

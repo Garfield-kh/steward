@@ -123,6 +123,7 @@ class _Agent:
     session_id: str | None = None
     busy: bool = False
     proc: subprocess.Popen | None = None
+    cancelled: bool = False
 
 
 @dataclass
@@ -233,6 +234,7 @@ class HarnessChat:
         proc = agent.proc
         if not agent.busy or proc is None or proc.poll() is not None:
             return {"stopped": False}
+        agent.cancelled = True
         _terminate(proc)
         with self._lock:
             self._add(key, "system", f"已停止 {agent.label} 的本轮任务")
@@ -341,7 +343,15 @@ class HarnessChat:
             proc.stdin.close()
             err_reader = threading.Thread(target=lambda: stderr_tail.extend(proc.stderr), daemon=True)
             err_reader.start()
-            timer = threading.Timer(cfg.timeout_s, lambda: _terminate(proc))
+            agent.cancelled = False
+            timed_out = False
+
+            def _on_timeout() -> None:
+                nonlocal timed_out
+                timed_out = True
+                _terminate(proc)
+
+            timer = threading.Timer(cfg.timeout_s, _on_timeout)
             timer.start()
             last_text: str | None = None
             for line in proc.stdout:
@@ -349,7 +359,11 @@ class HarnessChat:
             code = proc.wait()
             timer.cancel()
             err_reader.join(2)
-            if code != 0 and code != -15:
+            if timed_out:
+                with self._lock:
+                    self._add(agent.key, "system",
+                              f"{agent.label} 回合预算（{cfg.timeout_s:.0f} 秒）到时，本轮已按设计结束，非异常")
+            elif code != 0 and code != -15 and not agent.cancelled:
                 detail = "".join(stderr_tail[-6:]).strip() or f"exit code {code}"
                 self._report(agent, f"{agent.label} 运行失败：{detail}")
                 if agent.on_failure is not None:

@@ -65,6 +65,14 @@ class PerceptionConfig:
     # "ideal": the robot receives detections (category and box with noise); "rgbd": the robot
     # receives RGB, depth and anonymous instance masks and must detect and estimate by itself.
     mode: str = "ideal"
+    # Instance mask source for RGB-D mode:
+    #   "oracle"     — geom parts rendered then anonymised (sim stand-in for a perfect segmenter)
+    #   "geometric"  — depth voxel clustering only (no learned model; closer to real Phase 1)
+    #   "sam3"       — LinxLab SAM3 PCS on rendered RGB (needs network + requests)
+    #   "geo_sam3"   — geometric ∪ SAM3 (best local Phase-1 recall); falls back to geometric
+    mask_mode: str = "oracle"
+    sam3_url: str | None = None
+    sam3_threshold: float = 0.28
     max_range: float = 8.0
     depth_sigma_base: float = 0.0012
     depth_sigma_quadratic: float = 0.0019
@@ -876,10 +884,34 @@ class WorldSim:
         geom = np.where(seg[..., 1] == int(mujoco.mjtObj.mjOBJ_GEOM), seg[..., 0], -1)
         parts = np.where(geom >= 0, part_of[np.clip(geom, 0, None)], -1)
         clear = np.where(geom >= 0, transparent[np.clip(geom, 0, None)], False)
-        mask = self._anonymous_masks(parts)
         depth_mm = self._noisy_depth(depth, clear)
+        fovy = float(sensor["intrinsics"]["fovy"])
+        mode = self.perception.mask_mode
+        if mode in ("geometric", "sam3", "geo_sam3"):
+            from steward.ego.providers.fused_rgbd import prepare_rgbd_frame
+            from steward.ego.providers.geometric_masks import GeometricMaskConfig
+            from steward.math3d import matrix_from_quat
+            depth_m = depth_mm.astype(np.float32) / 1000.0
+            cam_pose, _ = self.camera_pose(robot_id)
+            up_cam = matrix_from_quat(cam_pose["q"]).T @ np.array([0.0, 0.0, 1.0])
+            frame = {"rgb": rgb, "depth": depth_m, "fovy": fovy,
+                     "mask": np.zeros(depth_m.shape, np.uint8)}
+            prepared = prepare_rgbd_frame(
+                frame,
+                mask_source=mode,  # type: ignore[arg-type]
+                geometric=GeometricMaskConfig(
+                    max_range=self.perception.max_range,
+                    min_pixels=self.perception.min_mask_pixels,
+                ),
+                up_cam=up_cam,
+                sam3_url=self.perception.sam3_url,
+                sam3_threshold=self.perception.sam3_threshold,
+            )
+            mask = prepared["mask"]
+        else:
+            mask = self._anonymous_masks(parts)
         buf = io.BytesIO()
-        np.savez_compressed(buf, rgb=rgb, depth=depth_mm, mask=mask, fovy=np.float32(sensor["intrinsics"]["fovy"]),
+        np.savez_compressed(buf, rgb=rgb, depth=depth_mm, mask=mask, fovy=np.float32(fovy),
                             header=np.array(json.dumps(header)))
         return buf.getvalue()
 

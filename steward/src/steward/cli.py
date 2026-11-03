@@ -116,9 +116,28 @@ def cmd_ego(args) -> int:
 
 
 def _exit_with_parent(parent_pid: int) -> None:
-    """Stop this process (as SIGTERM would) once the process that launched it is gone."""
+    """Stop this process (as SIGTERM would) once the process that launched it is gone.
+
+    On Windows, ``start_new_session=True`` breaks ``os.getppid()`` identity with the
+    launcher, so the old ``getppid() == parent_pid`` watch exited immediately (status 15).
+    Poll whether ``parent_pid`` still exists instead.
+    """
+    def parent_alive() -> bool:
+        if os.name == "nt":
+            import ctypes
+            handle = ctypes.windll.kernel32.OpenProcess(0x1000, False, int(parent_pid))
+            if not handle:
+                return False
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        try:
+            os.kill(parent_pid, 0)
+        except OSError:
+            return False
+        return True
+
     def watch() -> None:
-        while os.getppid() == parent_pid:
+        while parent_alive():
             time.sleep(1.0)
         os.kill(os.getpid(), signal.SIGTERM)
 

@@ -57,7 +57,8 @@ class StewardHost:
     def __init__(self, root: Path | str, *, scenario: str | None = None, speed: float = 1.0, seed: int = 0,
                  run_dir: Path | None = None, wca_port: int = 0, robot_ports: dict[str, int] | None = None,
                  chat: ChatConfig | None = None, phase: str | None = None, fallback_phase: str = DEFAULT_PHASE,
-                 bind_wait_s: float = 0.0, pause_on_perception_fault: bool = False, freeze_idle: bool = False):
+                 bind_wait_s: float = 0.0, pause_on_perception_fault: bool = False, freeze_idle: bool = False,
+                 appearance: str = "flat"):
         # ``phase`` pins the level for every episode; None: each scenario's declared level, or
         # ``fallback_phase`` for a scenario that declares none.
         phase_modules(phase or fallback_phase)
@@ -68,6 +69,7 @@ class StewardHost:
         self.chat = HarnessChat(chat, lambda: self.wca.url)
         self.speed = speed
         self.freeze_idle = freeze_idle
+        self.appearance = appearance
         self.seed = seed
         self.run_dir = run_dir
         self.sim: WorldSim | None = None
@@ -98,6 +100,7 @@ class StewardHost:
         if self.sim is not None:
             self.sim.stop()
         self.sim = WorldSim(scenario["sceneState"], speed=self.speed, seed=self.seed, freeze_idle=self.freeze_idle,
+                            appearance=self.appearance,
                             perception=PerceptionConfig(mode=phase_modules(self.phase)["perception"],
                                                         masks=phase_modules(self.phase).get("masks", True)))
         self.scenario = scenario

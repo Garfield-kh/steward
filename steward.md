@@ -1610,6 +1610,9 @@ flowchart LR
 | NovelAnything 1.3 | `novelanything` | [服务](https://linxlab-research.com/novelanything)，[文档](https://linxlab-research.com/novelanything/docs) | 由带位姿的输入视角预测目标视角的 RGB 与深度；可选对预测图像做 SAM 3.1 分割；渲染分辨率 518×336 | 根目录含 `scene.json` 的 ZIP；每个输入帧需 RGB、`w2c` 与 `fxfycxcy`，深度可选；目标帧只需 `w2c` | `POST /api/uploads`、`POST /api/jobs`、`GET /api/jobs/{id}` 与产物 |
 | NVS rgbd_videogen 1.0 | `nvs` | [服务](http://linxlab-research.com/nvs)，[能力说明](http://linxlab-research.com/nvs/v1/capabilities)，界面在 `/nvs/ui` | RGB-D 新视角视频生成：默认 6 个源视角，最多 24 个目标视角；输出 RGB 与深度视频、深度 `npz`、逐帧 ZIP | `rgbd_videogen_scene_v1`，分辨率 378×672，2–64 帧 | `POST /v1/nvs/jobs/upload`、`GET /v1/nvs/jobs/{id}/result` |
 | SLARM 0.4 | `slarm` | [服务](http://linxlab-research.com/slarm)，[OpenAPI](http://linxlab-research.com/slarm/openapi.json) | 多帧场景重建：深度、场景流、语义、点云、3D 高斯；可用重建结果渲染新视角 | Waymo 单场景 ZIP 或通用三相机场景，分辨率 160×240，16–300 帧；同时只能运行 1 个重建任务 | `POST /v1/datasets`、`POST /v1/reconstructions`、`POST /v1/views` |
+| SAM 3D Objects | `sam3d` | [服务](https://linxlab-research.com/sam3d)，文档在 `/sam3d/docs`，OpenAPI 在 `/sam3d/openapi.json` | 由一张 RGB、可选掩码和度量点云生成物体形状（体素或高斯）。看不见的部分是生成结果，须用观测深度校验后才能当形状先验 | 异步任务：RGB，可选掩码（非零为前景），可选点云 `npy`（H×W×3，+X 左、+Y 上、+Z 前；掩码外必须是 NaN，不能是 0） | `POST /api/jobs`；`GET /api/jobs/{id}`；`GET /api/jobs/{id}/artifacts/{path}` |
+
+Phase 1 不调用 `sam3d`。度量深度已经给出可见部分的尺寸；在本厨房上，生成形状没有比可见盒子更接近真值，可见表面贴合时盒子也会偏小，ESim 只对盒子的地面投影做碰撞。清单只提供地址，供需要离线试这个接口的人调用。`steward services` 报告它是否在线。
 
 **初步结论（2026-11）。** 直接把这几个服务接到 Phase 1 的感知链路上，ES 效果没有改善。Phase 1 的瓶颈是语义分割：能力 A 和 C（13.7.1）没有到位，后面的重建与深度估计都无从发挥。目前正在把分割模型与上述重建、深度模型融合。另有两个影响结论的因素：
 

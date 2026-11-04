@@ -9,15 +9,20 @@ import time
 import numpy as np
 import pytest
 
+import mujoco
+
 from steward.assets.generators import steward_bot
+from steward.authoring.service import AuthoringService
 from steward.ego.classify import classify
-from steward.ego.perception import box_of
+from steward.ego.estimator import EgoEstimator
+from steward.ego.perception import box_of, decode_rgbd
 from steward.ego.runtime import EgoRuntime, RobotLink
 from steward.ego.server import ego_api
 from steward.net import call
 from steward.phases import PHASES, phase_modules
 from steward.world.console import console_state
 from steward.world.server import StewardHost
+from steward.world.sim import PerceptionConfig, WorldSim
 
 
 def _pump_until(host: StewardHost, done, timeout: float = 120.0) -> None:
@@ -389,3 +394,23 @@ def test_a_well_known_table_that_looks_hollow_from_afar_is_kept_while_an_unknown
     est.tracks = {"e:29": table, "e:30": unknown}
     est._drop_impossible(cam)
     assert list(est.tracks) == ["e:29"]
+
+
+def test_phase1_keeps_the_far_edge_of_a_counter(kitchen_root):
+    """The far edge of a counter top is a few percent of its pixels. A random sample of the cloud
+    publishes about half the depth; the box of every valid pixel keeps it."""
+    scene = AuthoringService(kitchen_root).load_scenario("phase0-chores")["sceneState"]
+    sim = WorldSim(scene, seed=1, perception=PerceptionConfig(mode="rgbd", masks=True))
+    names = sim.build.names["w:robot-1"]
+    for jname, val in zip(names.root_joints, (0.6, -2.2, 1.57), strict=True):
+        jid = mujoco.mj_name2id(sim.model, mujoco.mjtObj.mjOBJ_JOINT, jname)
+        sim.data.qpos[sim.model.jnt_qposadr[jid]] = val
+    sim.command("w:robot-1", {"base": [0.6, -2.2, 1.57]})
+    mujoco.mj_forward(sim.model, sim.data)
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    est.update_rgbd(decode_rgbd(sim.rgbd("w:robot-1")))
+    gt = sim.entity_obb("w:counter-1")
+    counter = min((t for t in est.tracks.values() if t.category == "counter"),
+                  key=lambda t: float(np.linalg.norm(t.pos - gt.center)))
+    assert float(np.linalg.norm(counter.pos - gt.center)) < 0.12
+    assert float(np.mean(np.abs(np.sort(counter.size) - np.sort(gt.size)))) < 0.05

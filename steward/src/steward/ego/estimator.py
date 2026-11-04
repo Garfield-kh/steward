@@ -73,6 +73,7 @@ class Track:
     held_offset: np.ndarray | None = None
     color_counts: dict[str, float] = field(default_factory=dict)
     voxels: np.ndarray | None = None  # 1 cm voxels of every surface seen of this object (RGB-D mode)
+    span: np.ndarray | None = None  # corners of each view's full-resolution box; the voxel cloud is only a sample
     completion: float = 0.0  # how far the box was extended beyond what was seen (shape prior)
     settled: bool = True  # False right after the robot put it down, until it is seen again
     mean_rgb: np.ndarray | None = None  # running mean colour of its regions (RGB-D mode)
@@ -615,6 +616,7 @@ class EgoEstimator:
                     continue
                 keep, drop = (a, b) if a.observations >= b.observations else (b, a)
                 keep.voxels = self._union(keep.voxels, drop.voxels)
+                _absorb_span(keep, drop)
                 for cat, n in drop.category_counts.items():
                     keep.category_counts[cat] = keep.category_counts.get(cat, 0.0) + n
                 _absorb_semantics(keep, drop)
@@ -645,6 +647,7 @@ class EgoEstimator:
                     continue
                 keep, drop = (a, b) if a.observations >= b.observations else (b, a)
                 keep.voxels = self._union(keep.voxels, drop.voxels)
+                _absorb_span(keep, drop)
                 for cat, n in drop.category_counts.items():
                     keep.category_counts[cat] = keep.category_counts.get(cat, 0.0) + n
                 _absorb_semantics(keep, drop)
@@ -685,6 +688,7 @@ class EgoEstimator:
                     # in front of a wall piece misread as furniture)
                 if small.voxels is not None:
                     big.voxels = self._union(big.voxels, small.voxels)
+                _absorb_span(big, small)
                 for cat, n in small.category_counts.items():
                     big.category_counts[cat] = big.category_counts.get(cat, 0.0) + n
                 _absorb_semantics(big, small)
@@ -748,6 +752,8 @@ class EgoEstimator:
         if len(points) > self.config.points_per_cloud:
             points = points[self._rng.choice(len(points), self.config.points_per_cloud, replace=False)]
         track.voxels = self._union(track.voxels, _voxelize(points))
+        if seg.span is not None:
+            track.span = _larger_span(track.span, seg.span)
         self._rebuild_geometry(track, cam_p, seg.range)
 
     def _furniture_of(self, drawer: Track) -> Track | None:
@@ -792,6 +798,21 @@ class EgoEstimator:
         boxes instead: a union of views swells when a merged duplicate or a stray view sits a few
         centimetres off, enough to turn a mug into a bowl."""
         centre, size, yaw = box_of(_points(track.voxels), trim=0.01)
+        if track.span is not None:
+            # The sample keeps the surfaces that hold most of the points. A wide top's far edge is
+            # real but only a few percent of the pixels, so the sampled box loses decimetres of
+            # depth and its centre moves toward the camera. A sideways fringe is left trimmed.
+            full_centre, full_size, full_yaw = box_of(track.span)
+            missing = float(np.max(np.sort(full_size) - np.sort(size)))
+            view = full_centre[:2] - cam_p[:2]
+            norm = float(np.linalg.norm(view))
+            deeper = float((full_centre[:2] - centre[:2]) @ (view / norm)) if norm > 1e-6 else 0.0
+            # The long face is dense, so the sample already has it. Only the far edge, a few
+            # percent of the pixels, is missing — and it lies further from the camera.
+            long_seen = float(np.max(size[:2])) > 0.85 * float(np.max(full_size[:2]))
+            wide = track.category in ("counter", "sideboard", "table", "cabinet")
+            if wide and missing > 0.08 and deeper > 0.04 and long_seen:
+                centre, size, yaw = full_centre, full_size, full_yaw
         if max(size[0], size[1]) < SMALL_M and len(track.recent) >= 3:
             centre = np.median([c for c, _ in track.recent], axis=0)
             size = np.median([z for _, z in track.recent], axis=0)
@@ -1027,6 +1048,7 @@ class EgoEstimator:
             if other is not track and not other.held and self.support_of(other) is track:
                 other.carried_offset = other.pos - track.pos
                 other.voxels = None
+                other.span = None
         track.held = True
         track.held_offset = track.pos - self.gripper_position()
         track.held_yaw = wrap_angle(track.yaw - self.odometry["yaw"] - self.joints.get("wrist_yaw", 0.0))
@@ -1070,6 +1092,7 @@ class EgoEstimator:
             track.held = False
             track.held_offset = None
             track.voxels = None
+            track.span = None
             track.settled = False  # it drops a little when released; the next view places it
             track.var = np.maximum(track.var, 0.02**2)
             track.yaw_var = max(track.yaw_var, YAW_MOVED**2)
@@ -1149,6 +1172,8 @@ class EgoEstimator:
             moved.pos = moved.pos + np.asarray(delta, float)
             if moved.voxels is not None:
                 moved.voxels = _voxelize(_points(moved.voxels) + np.asarray(delta, float))
+            if moved.span is not None:
+                moved.span = moved.span + np.asarray(delta, float)
         self.version += 1
         return carried
 
@@ -1361,6 +1386,27 @@ def _named(track: Track, min_score: float) -> bool:
         return False
     return any(score / track.semantic_views >= min_score
                for cat, score in track.semantic_counts.items() if cat != "wall")
+
+
+def _larger_span(old: np.ndarray | None, new: np.ndarray) -> np.ndarray:
+    """The full-resolution box that covers more floor, unless the new one is a different object.
+
+    Corners from several views are not unioned: a few centimetres of disagreement between views
+    would swell the box the same way a merged duplicate does."""
+    if old is None:
+        return new
+    old_s, new_s = box_of(old)[1], box_of(new)[1]
+    old_area, new_area = float(old_s[0] * old_s[1]), float(new_s[0] * new_s[1])
+    if old_area * 1.05 < new_area < old_area * 1.5:
+        return new
+    return old
+
+
+def _absorb_span(keep: Track, drop: Track) -> None:
+    """Keep the fuller of two merged tracks' full-resolution boxes."""
+    if drop.span is None:
+        return
+    keep.span = _larger_span(keep.span, drop.span)
 
 
 def _absorb_semantics(keep: Track, drop: Track) -> None:

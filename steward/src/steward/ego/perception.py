@@ -44,6 +44,7 @@ class Segment:
     range: float  # median distance from the camera
     bottom_seen: bool = True  # the lowest points are the object's base, not an image edge or an occluder
     semantics: dict[str, float] | None = None  # category → segmenter score, when the robot segmented the image
+    span: np.ndarray | None = None  # eight corners of the box around every valid pixel, before the point sample
 
 
 def decode_rgbd(blob: bytes) -> dict:
@@ -82,6 +83,14 @@ def segments(frame: dict, cam_pose: dict, config: PerceptionConfig | None = None
         if int(valid.sum()) < cfg.min_points:
             continue
         u, v, dv = xs[valid].astype(np.float64), ys[valid].astype(np.float64), d[valid].astype(np.float64)
+        local = np.stack([dv, -(u - cx) * dv / f, -(v - cy) * dv / f], axis=1)
+        measured = local @ rot.T + origin
+        measured = measured[measured[:, 2] > cfg.floor_cut]
+        if len(measured) < cfg.min_points:
+            continue
+        # The stored cloud stays a sample, unchanged from before. The corners are the box of every
+        # valid pixel: a wide top's far edge is too few of them to survive the sample.
+        span = box_corners(*box_of(measured))
         if len(dv) > cfg.max_points:
             keep = rng.choice(len(dv), cfg.max_points, replace=False)
             u, v, dv = u[keep], v[keep], dv[keep]
@@ -99,6 +108,7 @@ def segments(frame: dict, cam_pose: dict, config: PerceptionConfig | None = None
             range=float(np.median(dv)),
             bottom_seen=_bottom_seen(mask, depth, instance, ys, xs, cfg),
             semantics=None if labels is None else dict(labels.get(int(instance), {})) or None,
+            span=span,
         ))
     return out
 
@@ -185,6 +195,22 @@ def box_of(points: np.ndarray, trim: float = 0.0) -> tuple[np.ndarray, np.ndarra
     z_lo, z_hi = points[:, 2].min(), points[:, 2].max()
     yaw = (yaw + math.pi / 2) % math.pi - math.pi / 2
     return np.array([centre_xy[0], centre_xy[1], (z_lo + z_hi) / 2]), np.array([ex, ey, z_hi - z_lo]), yaw
+
+
+def box_corners(centre: np.ndarray, size: np.ndarray, yaw: float) -> np.ndarray:
+    """Eight corners of an oriented box.
+
+    :param centre: box centre, metres.
+    :param size: full extents, x along ``yaw``.
+    :param yaw: heading of the box x axis, radians.
+    :returns: ``(8, 3)`` corner positions.
+    """
+    c, s = math.cos(float(yaw)), math.sin(float(yaw))
+    ax, ay = np.array([c, s, 0.0]), np.array([-s, c, 0.0])
+    hx, hy, hz = (float(v) / 2 for v in size)
+    up = np.array([0.0, 0.0, 1.0])
+    return np.array([centre + sx * hx * ax + sy * hy * ay + sz * hz * up
+                     for sx in (-1.0, 1.0) for sy in (-1.0, 1.0) for sz in (-1.0, 1.0)])
 
 
 def box_at_yaw(points: np.ndarray, yaw: float) -> tuple[np.ndarray, np.ndarray, float]:

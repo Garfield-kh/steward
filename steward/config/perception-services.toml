@@ -70,3 +70,16 @@ reconstruction_result = "GET /v1/reconstructions/{id}/result"
 reconstruction_artifact = "GET /v1/reconstructions/{id}/artifacts/{artifact_id}"
 create_view = "POST /v1/views"
 view_result = "GET /v1/views/{id}/result"
+
+[services.sam3d]
+title = "SAM 3D Objects（单视图形状补全，Ascend NPU）"
+kind = "shape-completion"
+urls = ["https://linxlab-research.com/sam3d", "http://115.120.57.9/sam3d"]
+docs = "https://linxlab-research.com/sam3d/docs"
+openapi = "/openapi.json"
+health = "/api/health"
+timeout_s = 600
+[services.sam3d.endpoints]
+submit_job = "POST /api/jobs"
+job = "GET /api/jobs/{job_id}"
+artifact = "GET /api/jobs/{job_id}/artifacts/{path}"

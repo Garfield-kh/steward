@@ -6,6 +6,8 @@ The robot Ego Harness can use the `rgbd_video_gen` and `NovelAnything` skills fo
 
 Model evidence uses the existing `head_camera`. Continuous recording samples in simulation time with measured robot odometry and encoders; target gripper views use robot-owned forward kinematics. Snapshots retain the head/wide cameras and their individual calibration, layout, field of view and perception responsibilities. These capabilities do not install SLARM or extra cameras.
 
+See the [perception model skills guide](docs/novel-view-generation/README.md) for copyable robot prompts, camera conventions and package responsibilities.
+
 Steward is an embodied robotics system built on DeepSeek Harness. See [steward.md](../steward.md) for the design, its “13. Implementation Progress” section for progress and launch commands, and [13.7](../steward.md#137-phase-1-感知方法与泛化) for Phase 1 RGB-D geometry, classification and generalization.
 
 ## Quick start

@@ -1,0 +1,16 @@
+# Bilingual-pair consistency record for guide.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/upgrade-guide/v0.2.1-rc.3/steward-model-files/guide.md
+/:
+  en: b4690f0494374fec
+  zh: 637ead971e309f32
+/steward-model-input-and-output-directories:
+  en: adb0ca911bbb4a74
+  zh: 57061f8a45f45c55
+/steward-model-input-and-output-directories/change:
+  en: ea1c735b57d29110
+  zh: de53dc71b27f5475
+/steward-model-input-and-output-directories/migration:
+  en: f74c20f612ed240c
+  zh: 1fe31521dd5d81e0

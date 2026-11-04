@@ -415,3 +415,43 @@
     root: !!js >-
       (process.env.DSH_HOME ?? process.env.HOME + '/.dsh') +
       '/steward-capabilities'
+# == @steward/dsh-bundle-rgbd-video-gen
+- id: steward-rgbd-video-gen-api
+  name: '@steward/dsh-rgbd-video-gen-client'
+  config:
+    endpoint: http://115.120.57.9/nvs
+    inputRoot: .
+    stateDir: var/rgbd_video_gen
+    inputsDir: inputs/rgbd_video_gen
+    outputsDir: outputs/rgbd_video_gen
+- id: steward-tool-rgbd-video-gen
+  name: '@steward/dsh-tool-rgbd-video-gen'
+- id: steward-rgbd-video-gen-skills
+  name: '@deepseek-ai/dsh-skill-filesystem'
+  config:
+    providerName: steward-rgbd-video-gen
+    includeDefaultRoots: false
+    watch: false
+    bundledSkillDir: !!js >-
+      process.getBuiltinModule('node:path').join(process.getBuiltinModule('node:path').dirname(process.getBuiltinModule('node:module').createRequire(baseUrl).resolve('@steward/dsh-bundle-rgbd-video-gen/package.json')),
+      'skills')
+# == @steward/dsh-bundle-novelanything
+- id: steward-novelanything-api
+  name: '@steward/dsh-novelanything-client'
+  config:
+    endpoint: http://115.120.57.9/novelanything
+    inputRoot: .
+    stateDir: var/novelanything
+    inputsDir: inputs/novelanything
+    outputsDir: outputs/novelanything
+- id: steward-tool-novelanything
+  name: '@steward/dsh-tool-novelanything'
+- id: steward-novelanything-skills
+  name: '@deepseek-ai/dsh-skill-filesystem'
+  config:
+    providerName: steward-novelanything
+    includeDefaultRoots: false
+    watch: false
+    bundledSkillDir: !!js >-
+      process.getBuiltinModule('node:path').join(process.getBuiltinModule('node:path').dirname(process.getBuiltinModule('node:module').createRequire(baseUrl).resolve('@steward/dsh-bundle-novelanything/package.json')),
+      'skills')

@@ -1,0 +1,19 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "lib",
+    "rewriteRelativeImportExtensions": true
+  },
+  "include": [
+    "src"
+  ],
+  "references": [
+    {
+      "path": "../dsh-rgbd-video-gen"
+    },
+    {
+      "path": "../dsh-ego"
+    }
+  ]
+}

@@ -47,7 +47,8 @@ function tool(tools, name) {
 
 test('ego tools expose the robot vocabulary without World State concepts', () => {
   const names = egoTools(fakeEgo()).map(t => t.name)
-  assert.deepEqual(names, ['ego_state', 'ego_query', 'ego_observe', 'ego_explore', 'ego_predict', 'ego_inspect',
+  assert.deepEqual(names, ['ego_state', 'ego_query', 'ego_observe', 'ego_capture_cameras', 'ego_rgb_recording_start',
+    'ego_rgb_recording_status', 'ego_rgb_recording_stop', 'ego_camera_calibration', 'ego_gripper_pose', 'ego_explore', 'ego_predict', 'ego_inspect',
     'ego_match_face', 'ego_annotate', 'skill_run', 'skill_status', 'body_stop', 'report_problem'])
   for (const t of egoTools(fakeEgo())) assert.doesNotMatch(t.description, /ground truth|world state/i)
 })

@@ -1,0 +1,11 @@
+{
+  "name": "@steward/dsh-bundle-novelanything",
+  "version": "0.0.1",
+  "private": true,
+  "description": "NovelAnything novel-view synthesis tools and skill for the robot Ego Harness.",
+  "type": "module",
+  "files": ["cordis.patch.yml", "skills"],
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "engines": { "dsh": ">=0.2.1-rc.3 <0.3.0" },
+  "dependencies": { "@steward/dsh-novelanything-client": "workspace:*", "@steward/dsh-tool-novelanything": "workspace:*", "@deepseek-ai/dsh-skill-filesystem": "0.2.1-rc.3" }
+}

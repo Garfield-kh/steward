@@ -1,0 +1,34 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write steward/dsh/packages/dsh-tool-novelanything/README.md
+/:
+  en: e04fdf20528daefb
+  zh: 71f19737c63f847a
+/steward-dsh-tool-novelanything:
+  en: 669cf77d143a1d4c
+  zh: d8815cd11e79f0f8
+/steward-dsh-tool-novelanything/summary:
+  en: 74f01db42d7eb6f0
+  zh: fedff71f4d9eca36
+/steward-dsh-tool-novelanything/table-of-contents:
+  en: d152484eb41ac6b4
+  zh: d152484eb41ac6b4
+/steward-dsh-tool-novelanything/use-this-package:
+  en: 97691fa405589a1a
+  zh: 581b8599afe8fc29
+/steward-dsh-tool-novelanything/understand-the-implementation:
+  en: aa6cfd579894d30d
+  zh: cf0680b6691ffee6
+/steward-dsh-tool-novelanything/further-exploration:
+  en: 1230028b9b8737a6
+  zh: 1230028b9b8737a6
+/steward-dsh-tool-novelanything/model-experience:
+  en: 291d4ae423c1f2fc
+  zh: 1ec603d8385bf32d
+/steward-dsh-tool-novelanything/known-limitations-and-deferred-work:
+  en: e58f1a56270397d1
+  zh: ba033b41c179924e
+/steward-dsh-tool-novelanything/dev-note:
+  en: b75c8458928b72b9
+  zh: 02cbcc6baa338b07

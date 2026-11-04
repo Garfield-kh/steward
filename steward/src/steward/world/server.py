@@ -34,6 +34,7 @@ from steward.world.chat import ChatConfig, HarnessChat
 from steward.viewloop import ViewLoop, ViewSettings, frame_response
 from steward.world.goals import evaluate as evaluate_goal
 from steward.world.sim import EditError, PerceptionConfig, WorldSim, speed_json
+from steward.world.sensor_cameras import SensorCameras
 from steward.world.world_view import WorldViewRenderer
 
 
@@ -71,6 +72,7 @@ class StewardHost:
         self.seed = seed
         self.run_dir = run_dir
         self.sim: WorldSim | None = None
+        self.sensor_cameras = SensorCameras(self._require_sim)
         self.scenario: dict | None = None
         self.observer = Observer(self._require_sim, run_dir, phase=lambda: self.phase, on_anomaly=self._perception_fault)
         self.pause_on_perception_fault = pause_on_perception_fault
@@ -95,6 +97,7 @@ class StewardHost:
         if scenario.get("phase"):
             phase_modules(scenario["phase"])  # a scenario declares the level it was built for; unknown ones fail here
         self.phase = self._pinned_phase or scenario.get("phase") or self._fallback_phase
+        self.sensor_cameras.recordings.interrupt("Scene changed; start a new RGB recording")
         if self.sim is not None:
             self.sim.stop()
         self.sim = WorldSim(scenario["sceneState"], speed=self.speed, seed=self.seed, freeze_idle=self.freeze_idle,
@@ -191,6 +194,7 @@ class StewardHost:
             server.stop()
         self.wca.stop()
         self.world_view.stop()
+        self.sensor_cameras.close()
         if self.sim is not None:
             self.sim.stop()
 
@@ -218,6 +222,7 @@ class StewardHost:
                 return self.on_main(load)
             if action == "reset":
                 sim = self._require_sim()
+                self.sensor_cameras.recordings.interrupt("Scene reset; start a new RGB recording")
                 self.on_main(sim.reset)
                 self.observer.reset()
                 return {"reset": True}
@@ -483,6 +488,14 @@ class StewardHost:
         return {
             ("GET", "/sensors"): lambda q, b: self._require_sim().sensors(rid),
             ("GET", "/sensors/rgbd"): lambda q, b: Binary(self._require_sim().rgbd(rid, camera_id(q)), "application/octet-stream"),
+            ("GET", "/sensors/cameras"): lambda q, b: self.sensor_cameras.sensor_snapshot(rid),
+            ("GET", "/sensors/kinematics"): lambda q, b: self.sensor_cameras.kinematics(rid),
+            ("GET", "/sensors/cameras/calibration"): lambda q, b: self.sensor_cameras.calibration(rid),
+            ("POST", "/sensors/rgb/record/start"): lambda q, b: self.sensor_cameras.recordings.start(rid, b or {}),
+            ("GET", "/sensors/rgb/record/status"): lambda q, b: self.sensor_cameras.recordings.get(rid, q["recording_id"]).status(),
+            ("POST", "/sensors/rgb/record/stop"): lambda q, b: self.sensor_cameras.recordings.get(rid, b["recording_id"]).finish(b.get("cancel", False)),
+            ("GET", "/sensors/rgb/record/result"): lambda q, b: self.sensor_cameras.recordings.get(rid, q["recording_id"]).result(),
+            ("GET", "/sensors/rgb/pose"): lambda q, b: self.sensor_cameras.odometry_kinematics(rid),
             ("GET", "/camera/rgb"): camera,
             ("POST", "/command"): lambda q, b: self._require_sim().command(rid, b or {}),
             ("POST", "/telemetry"): telemetry,

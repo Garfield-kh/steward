@@ -186,6 +186,8 @@ test('local manifest associates archived evidence with target RGB, depth and cam
   manifest = JSON.parse(await readFile(rgb.local_manifest_path, 'utf8'))
   assert.equal(manifest.files.length, 2)
   assert.equal(manifest.targets[0].rgb_path, rgb.files[0].path)
+  assert.equal(rgb.files[0].local_filename, 'target_prediction_00.jpg')
+  assert.ok(rgb.files[0].path.endsWith('target_prediction_00.jpg'))
   assert.equal(manifest.targets[0].depth_path, first.files[0].path)
   f.state.reservedName = true
   await assert.rejects(f.call('result', { job_id: 'j_one' }), /INVALID_METADATA/)
@@ -212,4 +214,39 @@ test('disposal aborts an in-flight download, removes partial files and sends no 
   await rejected
   assert.ok(!(await readdir(join(f.root, 'outputs', 'rgbd_video_gen'), { recursive: true })).some(p => p.endsWith('.part')))
   assert.ok(!f.calls.some(c => c.path.endsWith('/cancel')))
+})
+
+
+test('local frame names distinguish source reconstructions and zero-based target predictions, reusing verified legacy bytes', async t => {
+  const f = await fixture(t); f.state.job = 'succeeded'
+  f.state.params.num_source_views = 3
+  f.state.targetCameras = [{}, {}]
+  f.state.frameNames = ['pred_00.jpg', 'pred_03.jpg', 'pred_04.jpg']
+  const result = await f.call('result', { job_id: 'j_one' })
+  const frames = result.artifacts.filter(a => a.filename.startsWith('pred_'))
+  assert.deepEqual(frames.map(a => a.local_filename), ['source_reconstruction_00.jpg', 'target_prediction_00.jpg', 'target_prediction_01.jpg'])
+  const directory = join(f.root, 'outputs', 'rgbd_video_gen', 'j_one')
+  await writeFile(join(directory, 'pred_00.jpg'), f.bytes)
+  const downloaded = await f.call('download', { job_id: 'j_one', filenames: frames.map(a => a.filename) })
+  assert.equal(downloaded.files[0].reused, true)
+  assert.ok(!f.calls.some(c => c.path.endsWith('/artifacts/pred_00.jpg')))
+  assert.ok(f.calls.some(c => c.path.endsWith('/artifacts/pred_03.jpg')))
+  for (const file of downloaded.files) {
+    assert.equal(file.path, join(directory, file.local_filename))
+    assert.deepEqual(await readFile(file.path), f.bytes)
+  }
+  assert.ok(!(await readdir(directory)).includes('pred_00.jpg'))
+  const manifest = JSON.parse(await readFile(downloaded.local_manifest_path, 'utf8'))
+  assert.deepEqual(manifest.targets.map(t => t.rgb_path), downloaded.files.slice(1).map(f => f.path))
+  assert.deepEqual(manifest.targets.map(t => t.depth_key), ['v03', 'v04'])
+  assert.ok((await f.call('download', { job_id: 'j_one', filenames: frames.map(a => a.filename) })).files.every(f => f.reused))
+})
+
+test('ambiguous local names and prediction indices without cameras are rejected before publication', async t => {
+  const f = await fixture(t); f.state.job = 'succeeded'
+  for (const names of [['pred_00.jpg', 'source_reconstruction_00.jpg'], ['pred_99.jpg']]) {
+    f.state.frameNames = names
+    await assert.rejects(f.call('result', { job_id: 'j_one' }), /INVALID_METADATA/)
+  }
+  assert.ok(!f.calls.some(c => c.path.includes('/artifacts/')))
 })

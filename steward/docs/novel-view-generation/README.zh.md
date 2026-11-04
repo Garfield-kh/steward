@@ -84,6 +84,8 @@ rgbd_video_gen 的准备工具支持在参考相机或手爪坐标系中显式�
 
 Python 采集与导出由 [sensor_cameras.py](../../src/steward/world/sensor_cameras.py)、[rgb_recording.py](../../src/steward/world/rgb_recording.py)、[recording_evidence.py](../../src/steward/ego/recording_evidence.py) 和 [novelanything_scene.py](../../src/steward/ego/novelanything_scene.py) 支持；机器人工具由 `dsh-ego`、`dsh-ego-runtime-client`、`dsh-tool-ego` 接入。
 
+预测散图使用 `source_reconstruction_00.jpg` 表示输入视角重建，`target_prediction_00.jpg` 表示第一个目标视角；目标独立从零编号。远端 `filename` 仍用于选择下载，`local_filename` 和 `path` 表示本地文件。重新下载已校验的旧 `pred_*.jpg` 会直接更名，无需再次传输。服务器 `result.json`、ZIP 内部文件名和深度键名保持原样；目标 RGB／深度对应关系以清单 `targets` 为准。
+
 <a id="results-and-recovery"></a>
 
 ## 结果检查与故障处理

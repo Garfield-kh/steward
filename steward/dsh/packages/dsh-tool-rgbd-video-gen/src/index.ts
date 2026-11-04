@@ -116,11 +116,11 @@ export function rgbdVideoGenTools(service: RgbdVideoGenService): ToolDefinition[
       execute: (args, exec) => service.status(jobId(args.job_id), args.wait_seconds ?? 0, exec.signal) }),
     defineTool({ name: 'rgbd_video_gen_result',
       description: 'Read a successful result and save its manifest. RGB, metric depth and videos are predictions, not observed geometry. '
-        + 'Target PSNR exists only with target GT. target_cameras[i] maps to pred_{num_source_views+i}.jpg, not always pred_{6+i}.jpg. Select returned filenames for download.',
+        + 'Target PSNR exists only with target GT. target_cameras[i] maps to pred_{num_source_views+i}.jpg, not always pred_{6+i}.jpg. Select remote filenames for download; local_filename distinguishes source_reconstruction_*.jpg from target_prediction_*.jpg.',
       parameters: { job_id: job }, output, execute: (args, exec) => service.result(jobId(args.job_id), exec.signal) }),
     defineTool({ name: 'rgbd_video_gen_download',
       description: 'Save under outputsDir and return local_manifest_path for downstream consumers. Download exact artifact filenames from a successful result (videos, frames.zip, depth.npz, comparison strip, meta.json). '
-        + 'Verifies byte counts and SHA256 before publishing local files; retries reuse verified files. No arbitrary URL or destination path is accepted.',
+        + 'Saves loose predictions as source_reconstruction_*.jpg or zero-based target_prediction_*.jpg; ZIP entries retain remote names. Verifies byte counts and SHA256 before publishing local files; retries reuse verified files. No arbitrary URL or destination path is accepted.',
       parameters: { job_id: job, filenames: { type: 'array', items: { type: 'string' }, required: true } }, output,
       execute: (args, exec) => service.download(jobId(args.job_id), args.filenames, exec.signal) }),
     defineTool({ name: 'rgbd_video_gen_cancel',

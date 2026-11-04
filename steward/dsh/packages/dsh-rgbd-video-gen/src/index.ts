@@ -134,11 +134,11 @@ export abstract class RgbdVideoGenService extends Service {
    * @returns metrics, artifact descriptors and manifest path; rejects pending or failed jobs.
    */
   abstract result(id: JobId, signal: AbortSignal): Promise<JsonObject>
-  /** Download exact filenames from the result; only size/hash-verified files are published.
+  /** Download exact remote filenames; local prediction names distinguish source reconstruction from target prediction. Only size/hash-verified files are published.
    * @param id - successful job identity.
    * @param filenames - unique nonempty selection from result().
    * @param signal - aborts transfers and removes incomplete files.
-   * @returns verified local paths and local_manifest_path; completed downloads survive a later transfer failure.
+   * @returns verified local paths, remote filename/local_filename mappings and local_manifest_path; completed downloads survive a later transfer failure.
    */
   abstract download(id: JobId, filenames: string[], signal: AbortSignal): Promise<JsonObject>
   /** Explicitly request cancellation of a job submitted or recovered in this store.

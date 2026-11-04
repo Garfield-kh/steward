@@ -59,6 +59,8 @@ The provider requires the robot ego service. Recording preparation exports every
 
 -----
 
+Loose prediction images use `source_reconstruction_00.jpg` for input-view reconstruction and `target_prediction_00.jpg` for the first requested target; target numbering starts at zero independently of source count. Remote `filename` remains the download selector; `local_filename` and `path` identify the local file. Re-downloading verified legacy `pred_*.jpg` files renames them without another transfer. Server `result.json`, ZIP entries and depth keys keep their original names; use manifest `targets` for the target RGB/depth mapping.
+
 <a id="understand-the-implementation"></a>
 ## Understand the implementation
 

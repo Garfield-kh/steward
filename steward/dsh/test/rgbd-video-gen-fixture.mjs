@@ -49,6 +49,7 @@ export async function fixture(t, overrides = {}) {
       bytes: bytes.length, sha256: hash(bytes), media_type: 'application/octet-stream',
     }))
     if (state.targetRgb) artifacts.push({ ...artifacts[0], kind: 'rgb', filename: 'pred_03.jpg' })
+    for (const filename of state.frameNames ?? []) artifacts.push({ ...artifacts[0], kind: 'frame_pred', filename })
     if (state.reservedName) artifacts[0].filename = 'manifest.json'
     if (state.duplicate) artifacts.push({ ...artifacts[0], filename: 'FRAMES.zip' })
     return { job_id: state.wrongId ? 'j_other' : 'j_one', state: 'succeeded', metrics: { src_recon_rgb_psnr: 25.5 },

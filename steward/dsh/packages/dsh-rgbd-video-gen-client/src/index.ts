@@ -15,6 +15,20 @@ import { digest, fileDigest, hasCode, inputDirectory, load, readBounded, reserve
 import { buildScene } from './scene.ts'
 import { buildRecordingScene } from './recording.ts'
 
+/** Keep server artifact identities separate from locally named source reconstructions and target predictions. */
+function localArtifactName(filename: string, data: z.infer<typeof protocol.result>): string {
+  const match = /^pred_(\d+)\.jpg$/.exec(filename)
+  if (!match) return filename
+  const sources = protocol.parse(z.number().int().min(1).max(8), data.params.num_source_views)
+  const targets = protocol.parse(z.array(protocol.object), data.meta.target_cameras).length
+  const frame = Number(match[1])
+  if (!Number.isSafeInteger(frame) || frame >= sources + targets) {
+    throw new RgbdVideoGenError('Prediction frame has no source or target camera.', 'INVALID_METADATA')
+  }
+  return frame < sources ? `source_reconstruction_${String(frame).padStart(2, '0')}.jpg`
+    : `target_prediction_${String(frame - sources).padStart(2, '0')}.jpg`
+}
+
 /** Deployment settings; input/output directories resolve beneath inputRoot, other directories from the invocation directory. */
 export interface Config {
   endpoint: string
@@ -423,10 +437,11 @@ export class RgbdVideoGenClient extends RgbdVideoGenService {
     }
     const data = protocol.parse(protocol.result, value), files: JsonObject[] = []
     for (const item of data.artifacts) {
-      const path = join(directory, item.filename)
+      const localFilename = localArtifactName(item.filename, data)
+      const path = join(directory, localFilename)
       try {
         if ((await stat(path)).size === item.bytes && await fileDigest(path, signal) === item.sha256) {
-          files.push({ ...item, path, verified: true })
+          files.push({ ...item, local_filename: localFilename, path, verified: true })
         }
       } catch (error) { if (!hasCode(error, 'ENOENT')) throw error }
     }
@@ -456,6 +471,10 @@ export class RgbdVideoGenClient extends RgbdVideoGenService {
     if (data.job_id !== id || new Set(data.artifacts.map(a => a.filename.toLowerCase())).size !== data.artifacts.length) {
       throw new RgbdVideoGenError('Result has a different job id or colliding filenames.', 'INVALID_METADATA')
     }
+    const localNames = data.artifacts.map(item => localArtifactName(item.filename, data).toLowerCase())
+    if (new Set(localNames).size !== localNames.length) {
+      throw new RgbdVideoGenError('Artifacts collide after local frame naming.', 'INVALID_METADATA')
+    }
     for (const item of data.artifacts) {
       if (['manifest.json', 'result.json'].includes(item.filename.toLowerCase())) {
         throw new RgbdVideoGenError('Artifact filename collides with local result metadata.', 'INVALID_METADATA')
@@ -474,9 +493,10 @@ export class RgbdVideoGenClient extends RgbdVideoGenService {
   result(id: JobId, signal: AbortSignal): Promise<JsonObject> {
     return this.run(signal, async signal => {
       const data = await this.manifest(id, signal)
-      return { ...data, completed: true, local_result_path: join(this.outputs, id, 'result.json'),
+      return { ...data, artifacts: data.artifacts.map(item => ({ ...item, local_filename: localArtifactName(item.filename, data) })),
+        completed: true, local_result_path: join(this.outputs, id, 'result.json'),
         local_manifest_path: join(this.outputs, id, 'manifest.json'),
-        interpretation: 'RGB and depth are generated predictions, not observed geometry. Target PSNR is available only with target ground truth. target_cameras[i] corresponds to pred_{num_source_views+i}.jpg.' }
+        interpretation: 'RGB and depth are generated predictions, not observed geometry. Target PSNR is available only with target ground truth. Local source_reconstruction_*.jpg files reconstruct inputs; target_prediction_*.jpg files predict requested views, numbered from zero. Use artifacts[].filename for downloads and local_filename/path for local consumers. ZIP contents and depth keys retain server names.' }
     })
   }
 
@@ -494,10 +514,21 @@ export class RgbdVideoGenClient extends RgbdVideoGenService {
       const directory = join(this.outputs, id)
       await mkdir(directory, { recursive: true })
       for (const item of selected) {
-        const target = join(directory, item.filename)
+        const localFilename = localArtifactName(item.filename, data)
+        const target = join(directory, localFilename)
         let reused = false
         try { reused = (await stat(target)).size === item.bytes && await fileDigest(target, signal) === item.sha256 }
         catch (error) { if (!hasCode(error, 'ENOENT')) throw error }
+        if (!reused && localFilename !== item.filename) {
+          const legacy = join(directory, item.filename)
+          try {
+            if ((await stat(legacy)).size === item.bytes && await fileDigest(legacy, signal) === item.sha256) {
+              signal.throwIfAborted()
+              await rename(legacy, target)
+              reused = true
+            }
+          } catch (error) { if (!hasCode(error, 'ENOENT')) throw error }
+        }
         if (!reused) {
           const temporary = `${target}.${randomUUID()}.part`
           const response = await fetch(`${this.base}/v1/nvs/jobs/${id}/artifacts/${item.filename}`, { redirect: 'error',
@@ -531,7 +562,7 @@ export class RgbdVideoGenClient extends RgbdVideoGenService {
             try { await unlink(temporary) } catch (error) { if (!hasCode(error, 'ENOENT')) throw error }
           }
         }
-        files.push({ filename: item.filename, kind: item.kind, path: target, bytes: item.bytes,
+        files.push({ filename: item.filename, local_filename: localFilename, kind: item.kind, path: target, bytes: item.bytes,
           sha256: item.sha256, verified: true, reused })
       }
       await this.localManifest(id, data, signal)

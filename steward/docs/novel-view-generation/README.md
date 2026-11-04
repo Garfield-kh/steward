@@ -84,6 +84,8 @@ The `tool` packages expose executable operations. The bundled `skill` explains t
 
 Python capture and export use [sensor_cameras.py](../../src/steward/world/sensor_cameras.py), [rgb_recording.py](../../src/steward/world/rgb_recording.py), [recording_evidence.py](../../src/steward/ego/recording_evidence.py) and [novelanything_scene.py](../../src/steward/ego/novelanything_scene.py); `dsh-ego`, `dsh-ego-runtime-client` and `dsh-tool-ego` expose robot tools.
 
+Loose prediction images use `source_reconstruction_00.jpg` for input-view reconstruction and `target_prediction_00.jpg` for the first requested target; target numbering starts at zero independently of source count. Remote `filename` remains the download selector; `local_filename` and `path` identify the local file. Re-downloading verified legacy `pred_*.jpg` files renames them without another transfer. Server `result.json`, ZIP entries and depth keys keep their original names; use manifest `targets` for the target RGB/depth mapping.
+
 <a id="results-and-recovery"></a>
 
 ## Results and recovery

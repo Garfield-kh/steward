@@ -48,11 +48,15 @@ class RuntimeConfig:
     # world time passed, or after ``keyframe_max_s`` in any case. Other perception periods only
     # follow the robot's own state; the world waits while a frame is segmented.
     keyframe_move_m: float = 0.15
-    keyframe_turn_rad: float = 0.3
+    keyframe_turn_rad: float = 0.1
+    keyframe_arm_turn_rad: float = 0.3
     keyframe_min_s: float = 0.0
     keyframe_max_s: float = 4.0
+    keyframe_still_s: float = 0.4
+    """Segment again after the base has been still this long, when the pose has changed at all
+    since the last segmented frame. A look-around stops on a heading the fast turn did not sample."""
     # Arm motion also makes the near camera's frame a keyframe, while the base stands still: a
-    # prismatic joint moved ``keyframe_arm_m``, a revolute joint turned ``keyframe_turn_rad``, or
+    # prismatic joint moved ``keyframe_arm_m``, a revolute joint turned ``keyframe_arm_turn_rad``, or
     # the gripper opened, closed, took or let go of something.
     keyframe_arm_m: float = 0.05
     hold_renew_s: float = 0.5  # below the world's hold lease (HOLD_LEASE_S)
@@ -196,6 +200,8 @@ class EgoRuntime:
             self.estimator.config.semantic_shape_weight = segmenter.config.shape_weight
             self.estimator.config.semantic_label_floor = segmenter.config.label_floor
         self._keyframe: dict[str, dict] = {}  # camera → sensor header of its last segmented frame
+        self._pose_sample: tuple[float, float, float] | None = None
+        self._still_since: float | None = None
         self._missing_cameras: frozenset[str] = frozenset()
         self.segmentation = {"frames": 0, "cached": 0, "failures": 0, "lastSeconds": None, "lastError": None}
         self.esim = Esim(robot_model, self.config.esim)
@@ -250,6 +256,10 @@ class EgoRuntime:
             mode = "detections"
         else:
             mode = "rgbd" if frame.get("masks", True) else "rgbd-segmenter"
+        # A fast look-around steps farther than the heading window in which a long table is fully
+        # inside the head camera, and a border-truncated region does not start a track. Slow the
+        # turn only while perception keeps keyframes; fusing every frame already samples that window.
+        self.executor._keyframed = mode == "rgbd-segmenter"
         if mode != self.perception_mode:
             with self._lock:
                 if self.perception_mode is not None:
@@ -258,6 +268,8 @@ class EgoRuntime:
                     self.estimator.forget_objects()
                 self.perception_mode = mode
                 self._keyframe = {}
+                self._pose_sample = None
+                self._still_since = None
         cameras = self._cameras(frame)
         if mode in ("rgbd", "rgbd-segmenter"):
             due = [c for c in cameras if mode == "rgbd" or self._keyframe_due(frame, c)]
@@ -310,8 +322,23 @@ class EgoRuntime:
             return None
         return max(used, key=lambda c: self.estimator.camera_intrinsics(c)["fovy"])
 
+    def _note_pose(self, frame: dict) -> None:
+        """Remember whether the base has stayed still since the previous polled pose."""
+        odo = frame["odometry"]
+        pose = (float(odo["x"]), float(odo["y"]), float(odo["yaw"]))
+        prev, stamp = self._pose_sample, float(frame["stamp"])
+        self._pose_sample = pose
+        if prev is None or stamp < (self._still_since or stamp):
+            self._still_since = stamp
+            return
+        shifted = math.hypot(pose[0] - prev[0], pose[1] - prev[1]) >= 0.01 \
+            or abs(wrap_angle(pose[2] - prev[2])) >= 0.02
+        if shifted:
+            self._still_since = stamp
+
     def _keyframe_due(self, frame: dict, camera: str) -> bool:
         cfg, last = self.config, self._keyframe.get(camera)
+        self._note_pose(frame)
         if last is None:
             return True
         odo, was = frame["odometry"], last["odometry"]
@@ -321,7 +348,11 @@ class EgoRuntime:
         moved = math.hypot(odo["x"] - was["x"], odo["y"] - was["y"]) >= cfg.keyframe_move_m
         turned = abs(wrap_angle(odo["yaw"] - was["yaw"])) >= cfg.keyframe_turn_rad
         handled = camera == self.near_camera and self._arm_moved(last, frame)
-        return elapsed >= cfg.keyframe_min_s and (moved or turned or handled)
+        changed = math.hypot(odo["x"] - was["x"], odo["y"] - was["y"]) >= 0.02 \
+            or abs(wrap_angle(odo["yaw"] - was["yaw"])) >= 0.02
+        settled = self._still_since is not None and float(frame["stamp"]) - self._still_since >= cfg.keyframe_still_s \
+            and changed
+        return elapsed >= cfg.keyframe_min_s and (moved or turned or handled or settled)
 
     def _arm_moved(self, last: dict, frame: dict) -> bool:
         """Whether the arm or gripper changed enough since ``last`` for a new near-camera keyframe."""
@@ -333,7 +364,7 @@ class EgoRuntime:
                 continue
             dq = frame["joints"][jid] - last["joints"][jid]
             if (abs(dq) >= self.config.keyframe_arm_m if kind == "prismatic"
-                    else abs(wrap_angle(dq)) >= self.config.keyframe_turn_rad):
+                    else abs(wrap_angle(dq)) >= self.config.keyframe_arm_turn_rad):
                 return True
         return False
 

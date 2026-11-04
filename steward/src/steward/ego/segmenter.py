@@ -47,6 +47,9 @@ class SegmenterConfig:
     threshold: float = 0.4
     merge_iou: float = 0.6
     min_pixels: int = 25
+    crop_min_pixels: int = 8
+    """Smallest mask kept from the enlarged crop. A cup three metres away is only a few dozen
+    pixels after it is mapped back, below ``min_pixels``, and would otherwise be discarded."""
     crop_categories: tuple[str, ...] = ("table", "counter", "sideboard", "cabinet")
     crop_target_px: int = 480
     crop_max_scale: float = 4.0
@@ -318,7 +321,7 @@ class Segmenter:
         out = []
         for prompt, score, mask in self.client.segment(_png(rgb), prompts, cfg.threshold):
             if score >= cfg.threshold and prompt in cfg.vocabulary and mask.shape == rgb.shape[:2]:
-                out.append((cfg.vocabulary[prompt], score, mask))
+                out.append((cfg.vocabulary[prompt], score, mask, False))
         return out
 
     def _full_pass(self, rgb: np.ndarray) -> list[tuple[str, float, np.ndarray]]:
@@ -331,7 +334,7 @@ class Segmenter:
             return []
         h, w = rgb.shape[:2]
         boxes = []
-        for category, _score, mask in found:
+        for category, _score, mask, _from_crop in found:
             if category not in cfg.crop_categories:
                 continue
             ys, xs = np.nonzero(mask)
@@ -346,8 +349,8 @@ class Segmenter:
                 continue  # already large in the image: the full pass saw it at full resolution
             size = (max(1, round((x1 - x0) * scale)), max(1, round((y1 - y0) * scale)))
             tile = np.asarray(Image.fromarray(rgb[y0:y1, x0:x1]).resize(size, Image.BICUBIC))
-            parents = [(category, mask) for category, _score, mask in found]
-            for category, score, mask in self._detections(tile, list(cfg.crop_prompts)):
+            parents = [(category, mask) for category, _score, mask, _from_crop in found]
+            for category, score, mask, _from_crop in self._detections(tile, list(cfg.crop_prompts)):
                 small = np.asarray(Image.fromarray(mask.astype(np.uint8) * 255).resize((x1 - x0, y1 - y0), Image.NEAREST)) > 127
                 if _crop_background(small):
                     continue  # the enlarged window's background came back as part of the mask
@@ -356,31 +359,35 @@ class Segmenter:
                 if _furniture_slice(category, full, parents):
                     continue  # the upper body of the cabinet, not a box standing on it
                 if full.any():
-                    out.append((category, score, full))
+                    out.append((category, score, full, True))
         return out
 
     def _instances(self, detections, shape) -> tuple[np.ndarray, dict[int, dict[str, float]]]:
         """Merge detections of one object and paint instances largest first, so smaller ones keep
-        the pixels they share with what they stand on."""
+        the pixels they share with what they stand on.
+
+        A detection found only in an enlarged crop is kept down to ``crop_min_pixels``. The full
+        image still drops anything under ``min_pixels``."""
         cfg = self.config
-        groups: list[tuple[np.ndarray, dict[str, float]]] = []
-        for category, score, mask in sorted(detections, key=lambda d: -d[1]):
-            for i, (gmask, glabels) in enumerate(groups):
+        groups: list[tuple[np.ndarray, dict[str, float], bool]] = []
+        for category, score, mask, from_crop in sorted(detections, key=lambda d: -d[1]):
+            for i, (gmask, glabels, crop_only) in enumerate(groups):
                 if _iou(gmask, mask) >= cfg.merge_iou:
                     glabels[category] = max(glabels.get(category, 0.0), score)
-                    groups[i] = (gmask | mask, glabels)
+                    groups[i] = (gmask | mask, glabels, crop_only and from_crop)
                     break
             else:
-                groups.append((mask.copy(), {category: score}))
+                groups.append((mask.copy(), {category: score}, from_crop))
         groups.sort(key=lambda g: -int(g[0].sum()))
         canvas = np.zeros(shape, dtype=np.int32)
-        for i, (gmask, _) in enumerate(groups, start=1):
+        for i, (gmask, _, _) in enumerate(groups, start=1):
             canvas[gmask] = i
         mask = np.zeros(shape, dtype=np.uint8)
         labels: dict[int, dict[str, float]] = {}
-        for i, (_, glabels) in enumerate(groups, start=1):
+        for i, (_, glabels, crop_only) in enumerate(groups, start=1):
             visible = canvas == i
-            if int(visible.sum()) < cfg.min_pixels or len(labels) >= 255:
+            floor = cfg.crop_min_pixels if crop_only else cfg.min_pixels
+            if int(visible.sum()) < floor or len(labels) >= 255:
                 continue
             new_id = len(labels) + 1
             mask[visible] = new_id

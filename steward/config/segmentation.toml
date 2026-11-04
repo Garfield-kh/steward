@@ -10,6 +10,8 @@ threshold = 0.4
 merge_iou = 0.6
 # Instances with fewer visible pixels after overlaps are resolved are dropped.
 min_pixels = 25
+# A cup found in the enlarged crop maps back to a few dozen original pixels, under min_pixels.
+crop_min_pixels = 8
 # Second pass: regions of these categories (support surfaces) are cropped, enlarged and segmented
 # again with `crop_prompts`, so small objects standing on them are found. 0 disables the pass.
 crop_categories = ["table", "counter", "sideboard", "cabinet"]

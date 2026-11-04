@@ -548,3 +548,53 @@ def test_an_upper_half_named_box_is_folded_back_into_the_cabinet():
     cab = next(t for t in after.tracks.values() if t.category == "cabinet")
     assert cab.top() == pytest.approx(0.76, abs=0.06)
     assert "box" not in cab.category_counts
+
+
+def test_a_printed_lid_with_a_visible_wall_gains_the_box_under_it():
+    """The segmenter names the printed lid and not the 5 cm box under it. Depth of that wall,
+    inside the lid's outline, becomes its own box. A lid with nothing under it does not."""
+    from steward.ego.perception import segments
+    from steward.math3d import matrix_from_quat
+
+    header = {"stamp": 1.0, "odometry": {"x": 0.0, "y": 0.0, "yaw": 0.0},
+              "joints": {"lift": 0.4, "reach": 0.0, "wrist_yaw": 0.0, "wrist_roll": 0.0},
+              "gripper": {"state": "open", "holding": False}}
+    cam = EgoEstimator(robot_model=steward_bot().to_dict()).camera_pose(header["odometry"])
+    rot = matrix_from_quat(cam["q"])
+    origin = np.asarray(cam["p"], float)
+    h, w, fovy = 120, 160, 60.0
+    rng = np.random.default_rng(1)
+    lid_centre = origin + rot @ np.array([1.15, 0.0, 0.0])
+    lid = rng.uniform(lid_centre - np.array([0.17, 0.17, 0.004]), lid_centre + np.array([0.17, 0.17, 0.004]), (120, 3))
+    forward = rot @ np.array([1.0, 0.0, 0.0])
+    forward[2] = 0.0
+    forward /= np.linalg.norm(forward)
+    wall = lid.copy()
+    wall[:, :2] -= forward[:2] * 0.08
+    wall[:, 2] = lid[:, 2] - rng.uniform(0.02, 0.06, len(wall))
+
+    def frame_of(points_lid, points_wall):
+        depth = np.zeros((h, w), np.float32)
+        mask = np.zeros((h, w), np.uint8)
+        _paint(depth, mask, cam, fovy, points_lid, 1)
+        if points_wall is not None:
+            lid_mask = mask.copy()
+            depth_lid = depth.copy()
+            _paint(depth, mask, cam, fovy, points_wall, 1)
+            wall_depth = depth.copy()
+            wall_only = (mask == 1) & (lid_mask == 0)
+            depth[:] = depth_lid
+            depth[wall_only] = wall_depth[wall_only]
+            mask[:] = lid_mask
+        return {"depth": depth, "mask": mask, "rgb": np.full((h, w, 3), 180, np.uint8), "fovy": fovy,
+                "header": header, "labels": {1: {"picture": 0.8}}}
+
+    seen = segments(frame_of(lid, wall), cam)
+    assert any(s.semantics and "box" in s.semantics for s in seen)
+    assert not any(s.semantics and "box" in (s.semantics or {}) for s in segments(frame_of(lid, None), cam))
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    est.update_rgbd(frame_of(lid, wall))
+    boxes = [t for t in est.tracks.values() if t.category == "box"]
+    assert len(boxes) == 1
+    assert boxes[0].size[2] == pytest.approx(0.05, abs=0.03)
+    assert min(boxes[0].size[0], boxes[0].size[1]) > 0.2

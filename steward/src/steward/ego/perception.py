@@ -127,7 +127,68 @@ def segments(frame: dict, cam_pose: dict, config: PerceptionConfig | None = None
                 range=float(np.median(np.linalg.norm(cluster - origin, axis=1))),
                 bottom_seen=bottom, semantics=semantics, span=span,
             ))
+    if labels is not None:
+        for seg in list(out):
+            if not seg.semantics or "picture" not in seg.semantics:
+                continue
+            body = _box_below_picture(depth, mask, cam_pose, frame["fovy"], seg.points, cfg.min_points)
+            if body is None:
+                continue
+            out.append(Segment(
+                points=body, color=seg.color, pixels=len(body), invalid_frac=0.0, border=False,
+                range=seg.range, bottom_seen=True, semantics={"box": 0.7},
+                span=box_corners(*box_of(body)),
+            ))
     return out
+
+
+def _box_below_picture(depth: np.ndarray, mask: np.ndarray, cam_pose: dict, fovy: float,
+                       picture: np.ndarray, min_points: int) -> np.ndarray | None:
+    """Points of a shallow box standing under a printed lid.
+
+    The segmenter names the printed top ``picture`` and does not return the walls. Unlabelled
+    depth inside the lid's footprint, between 1.2 cm and 9 cm below the lid and spread over
+    2.5–8 cm of height, is that wall. The returned cloud uses the lid's outline down to the
+    wall, because the lid hides the floor of the box. A flat surface or a tall body is not a box.
+
+    :param depth: (H, W) metres.
+    :param mask: instance ids; 0 is unlabelled.
+    :param picture: map-frame points of the lid.
+    :returns: map-frame points, or ``None`` when no such wall is visible."""
+    if len(picture) < min_points:
+        return None
+    z_lid = float(np.percentile(picture[:, 2], 20))
+    xy = picture[:, :2]
+    h, w = depth.shape
+    f = (h / 2.0) / math.tan(math.radians(fovy) / 2.0)
+    cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
+    rot = matrix_from_quat(cam_pose["q"])
+    origin = np.asarray(cam_pose["p"], float)
+    free = (depth > 0.05) & (depth < 6.0) & (mask == 0)
+    ys, xs = np.nonzero(free)
+    if len(ys) == 0:
+        return None
+    d = depth[ys, xs].astype(np.float64)
+    local = np.stack([d, -(xs.astype(np.float64) - cx) * d / f, -(ys.astype(np.float64) - cy) * d / f], axis=1)
+    world = local @ rot.T + origin
+    x0, y0 = xy.min(axis=0) - 0.02
+    x1, y1 = xy.max(axis=0) + 0.02
+    inside = (world[:, 0] >= x0) & (world[:, 0] <= x1) & (world[:, 1] >= y0) & (world[:, 1] <= y1)
+    band = inside & (world[:, 2] < z_lid - 0.012) & (world[:, 2] > z_lid - 0.09)
+    wall = world[band]
+    if len(wall) < min_points:
+        return None
+    z_span = float(wall[:, 2].max() - wall[:, 2].min())
+    if not 0.025 <= z_span <= 0.08:
+        return None
+    z0 = float(wall[:, 2].min())
+    z1 = z_lid - 0.03  # a voxel below the lid, so the box and the lid do not share a surface
+    wall = wall[wall[:, 2] <= z1]
+    if len(wall) < min_points or float(wall[:, 2].max() - wall[:, 2].min()) < 0.02:
+        return None
+    corners = [[x, y, z] for x in (float(xy[:, 0].min()), float(xy[:, 0].max()))
+               for y in (float(xy[:, 1].min()), float(xy[:, 1].max())) for z in (z0, z1)]
+    return np.vstack([wall, np.asarray(corners, float)])
 
 
 def _raised_cluster_indices(points: np.ndarray, min_points: int) -> list[np.ndarray] | None:

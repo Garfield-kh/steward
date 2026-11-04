@@ -450,11 +450,14 @@ class EgoEstimator:
             is_wall = m["probs"].get("wall", 0.0) >= 0.5
             if m["concave"] and not is_wall:
                 continue  # the inside of a corner is room, not a solid object
+            if _mixed_ranges(m["seg"].points, cam_p, m["size"]) and m["probs"].get("wall", 0.0) < 0.5:
+                continue  # near surface and far background in one mask: a wide thick blob, not an object
             if i not in used and (not m["seg"].border or is_wall):
                 track = self._new_cloud_track(m, cam_p)
                 matched.add(track.id)
         self._decay_unseen_rgbd(cam, matched, frame)
         self._merge_parts(cam_p)
+        self._fold_furniture_slices(cam_p)
         self._merge_same_surface(cam_p)
         self._merge_walls(cam_p)
         self._drop_impossible(cam_p)
@@ -464,9 +467,9 @@ class EgoEstimator:
     def _drop_impossible(self, cam_p: np.ndarray) -> None:
         """Remove tracks that cannot be solid objects: one whose surfaces lie behind its own box
         centre as seen from the camera (a concave corner of the room boxed as if it were a convex
-        block), one whose footprint holds the robot's base (the robot stands there), and a non-wall
-        track as tall as a wall (wall pieces swept into it). Such boxes would otherwise fill the
-        room's corners, hide the objects in them and block every path."""
+        block), one whose footprint holds the robot's base (the robot stands there), a non-wall
+        track as tall as a wall (wall pieces swept into it), and a ``box`` wider than 0.9 m.
+        Such boxes would otherwise fill the room's corners, hide the objects in them and block every path."""
         base = np.array([self.odometry["x"], self.odometry["y"], 0.0])
         for track in list(self.tracks.values()):
             if track.held or track.category == "wall":
@@ -479,9 +482,12 @@ class EgoEstimator:
             hollow = not _identified(track) and not _named(track, self.config.semantic_named_score) \
                 and track.voxels is not None \
                 and _concave(_points(track.voxels), track.pos, track.footprint, cam_p)
-            if holds_robot or wall_tall or hollow:
+            oversized_box = track.category == "box" and track.footprint > 0.9
+            if holds_robot or wall_tall or hollow or oversized_box:
                 self._drop(track, "holds the robot's base" if holds_robot else
-                           "as tall as a wall" if wall_tall else "hollow: its surfaces lie behind its centre")
+                           "as tall as a wall" if wall_tall else
+                           "hollow: its surfaces lie behind its centre" if hollow else
+                           "box wider than any object the segmenter names box")
 
     def _decay_unseen_rgbd(self, cam: dict, matched: set[str], frame: dict) -> None:
         """Weigh the evidence against tracks that should be in view but were not segmented.
@@ -702,6 +708,40 @@ class EgoEstimator:
                     self._rename(big, small.id)
                 if big.voxels is not None:
                     self._rebuild_geometry(big, cam_p, 2.0)
+
+    def _fold_furniture_slices(self, cam_p: np.ndarray) -> None:
+        """Fold a ``box`` that is the upper half of a cabinet, sideboard or counter back into it.
+
+        The segmenter names that half ``box`` while the furniture keeps its own name. The slice's
+        centre lies in the furniture's footprint and it does not rise above the furniture; a box
+        standing on the top does, and stays a separate track. The ``box`` votes are not copied, so
+        they cannot relabel the furniture."""
+        hosts = ("cabinet", "sideboard", "counter", "table", "drawer")
+        for small in list(self.tracks.values()):
+            if small.id not in self.tracks or small.held or small.carried or small.perceived_category != "box":
+                continue
+            host = None
+            for big in self.tracks.values():
+                if big.id == small.id or big.held or big.category not in hosts or big.footprint < 0.4:
+                    continue
+                if small.footprint < 0.45 * big.footprint or not _inside(big, small.pos, 0.08):
+                    continue
+                if small.top() > big.top() + 0.06 or small.bottom() > big.top() + 0.05:
+                    continue  # it stands on the top, or floats clear of it
+                if small.top() < big.bottom() + 0.1:
+                    continue
+                if host is None or big.footprint > host.footprint:
+                    host = big
+            if host is None:
+                continue
+            if small.voxels is not None:
+                host.voxels = self._union(host.voxels, small.voxels)
+            _absorb_span(host, small)
+            host.observations += small.observations
+            host.existence = max(host.existence, small.existence)
+            self._drop(small, "merged: slice of the furniture", into=host)
+            if host.voxels is not None:
+                self._rebuild_geometry(host, cam_p, 2.0)
 
     def _new_cloud_track(self, m: dict, cam_p: np.ndarray) -> Track:
         track = Track(id=f"e:{next(self._ids)}", category_counts=dict(m["probs"]), pos=m["centre"].copy(),
@@ -1386,6 +1426,23 @@ def _named(track: Track, min_score: float) -> bool:
         return False
     return any(score / track.semantic_views >= min_score
                for cat, score in track.semantic_counts.items() if cat != "wall")
+
+
+def _mixed_ranges(points: np.ndarray, cam_p: np.ndarray, size: np.ndarray) -> bool:
+    """Whether a region mixes a near surface with far background.
+
+    The camera distance between the near and far tenths of its points exceeds 0.9 m, little of the
+    cloud sits between them, and the box is wide and thick. A table seen along its length also
+    spans that distance, but its points fill the interval. A wall is thin along its normal."""
+    if min(float(size[0]), float(size[1])) <= 0.25 or max(float(size[0]), float(size[1])) <= 1.0:
+        return False
+    dist = np.linalg.norm(points - cam_p, axis=1)
+    lo, hi = float(np.percentile(dist, 10)), float(np.percentile(dist, 90))
+    if hi - lo <= 0.9:
+        return False
+    span = hi - lo
+    mid = (dist > lo + 0.3 * span) & (dist < hi - 0.3 * span)
+    return float(mid.mean()) < 0.15
 
 
 def _larger_span(old: np.ndarray | None, new: np.ndarray) -> np.ndarray:

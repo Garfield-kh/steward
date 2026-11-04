@@ -85,32 +85,88 @@ def segments(frame: dict, cam_pose: dict, config: PerceptionConfig | None = None
         u, v, dv = xs[valid].astype(np.float64), ys[valid].astype(np.float64), d[valid].astype(np.float64)
         local = np.stack([dv, -(u - cx) * dv / f, -(v - cy) * dv / f], axis=1)
         measured = local @ rot.T + origin
-        measured = measured[measured[:, 2] > cfg.floor_cut]
+        above = measured[:, 2] > cfg.floor_cut
+        measured = measured[above]
         if len(measured) < cfg.min_points:
             continue
-        # The stored cloud stays a sample, unchanged from before. The corners are the box of every
-        # valid pixel: a wide top's far edge is too few of them to survive the sample.
-        span = box_corners(*box_of(measured))
-        if len(dv) > cfg.max_points:
-            keep = rng.choice(len(dv), cfg.max_points, replace=False)
-            u, v, dv = u[keep], v[keep], dv[keep]
-        local = np.stack([dv, -(u - cx) * dv / f, -(v - cy) * dv / f], axis=1)
-        points = local @ rot.T + origin
-        points = points[points[:, 2] > cfg.floor_cut]
-        if len(points) < cfg.min_points:
+        semantics = None if labels is None else dict(labels.get(int(instance), {})) or None
+        border = bool(xs.min() == 0 or ys.min() == 0 or xs.max() == w - 1 or ys.max() == h - 1)
+        bottom = _bottom_seen(mask, depth, instance, ys, xs, cfg)
+        color = rgb[ys, xs].reshape(-1, 3).mean(axis=0) / 255.0
+        invalid = float(1.0 - valid.mean())
+        # A segmenter mask sometimes covers two things standing side by side. Anonymous world masks
+        # stay whole: splitting them would cut a single object whose points happen to have a gap.
+        split = _raised_cluster_indices(measured, cfg.min_points) if labels is not None else None
+        if split is None:
+            # The stored cloud stays a sample, unchanged from before. The corners are the box of every
+            # valid pixel: a wide top's far edge is too few of them to survive the sample.
+            span = box_corners(*box_of(measured))
+            if len(dv) > cfg.max_points:
+                keep = rng.choice(len(dv), cfg.max_points, replace=False)
+                u, v, dv = u[keep], v[keep], dv[keep]
+            local = np.stack([dv, -(u - cx) * dv / f, -(v - cy) * dv / f], axis=1)
+            points = local @ rot.T + origin
+            points = points[points[:, 2] > cfg.floor_cut]
+            if len(points) < cfg.min_points:
+                continue
+            out.append(Segment(
+                points=points, color=color, pixels=len(ys), invalid_frac=invalid, border=border,
+                range=float(np.median(dv)), bottom_seen=bottom, semantics=semantics, span=span,
+            ))
             continue
-        out.append(Segment(
-            points=points,
-            color=rgb[ys, xs].reshape(-1, 3).mean(axis=0) / 255.0,
-            pixels=len(ys),
-            invalid_frac=float(1.0 - valid.mean()),
-            border=bool(xs.min() == 0 or ys.min() == 0 or xs.max() == w - 1 or ys.max() == h - 1),
-            range=float(np.median(dv)),
-            bottom_seen=_bottom_seen(mask, depth, instance, ys, xs, cfg),
-            semantics=None if labels is None else dict(labels.get(int(instance), {})) or None,
-            span=span,
-        ))
+        for idx in split:
+            cluster = measured[idx]
+            if len(cluster) < cfg.min_points:
+                continue
+            span = box_corners(*box_of(cluster))
+            points = cluster
+            if len(points) > cfg.max_points:
+                points = points[rng.choice(len(points), cfg.max_points, replace=False)]
+            out.append(Segment(
+                points=points, color=color, pixels=len(idx), invalid_frac=invalid, border=border,
+                range=float(np.median(np.linalg.norm(cluster - origin, axis=1))),
+                bottom_seen=bottom, semantics=semantics, span=span,
+            ))
     return out
+
+
+def _raised_cluster_indices(points: np.ndarray, min_points: int) -> list[np.ndarray] | None:
+    """Two index arrays into ``points`` when a raised region is two compact objects with a gap.
+
+    Furniture and anything standing on the floor stay one region. The gap is measured along the
+    longer horizontal direction and has to be at least 5 cm, with each side smaller than a bowl
+    is wide: a handle or a thin stem does not qualify.
+
+    :param points: map-frame points of one mask, already above the floor cut.
+    :param min_points: fewest points each side must keep.
+    :returns: ``None`` when the region is one object."""
+    if len(points) < 2 * min_points:
+        return None
+    if float(np.percentile(points[:, 2], 10)) <= 0.2:
+        return None
+    span = points.max(axis=0) - points.min(axis=0)
+    if max(float(span[0]), float(span[1])) > 0.55 or float(span[2]) > 0.3:
+        return None
+    centred = points[:, :2] - points[:, :2].mean(axis=0)
+    axis = np.linalg.eigh(centred.T @ centred / len(points))[1][:, 1]
+    order = np.argsort(centred @ axis)
+    gaps = np.diff((centred @ axis)[order])
+    if len(gaps) < 8:
+        return None
+    lo, hi = len(gaps) // 5, len(gaps) - len(gaps) // 5
+    if hi <= lo:
+        return None
+    k = lo + int(np.argmax(gaps[lo:hi]))
+    if float(gaps[k]) < 0.05:
+        return None
+    left, right = order[:k + 1], order[k + 1:]
+    if len(left) < min_points or len(right) < min_points:
+        return None
+    for idx in (left, right):
+        extent = points[idx].max(axis=0) - points[idx].min(axis=0)
+        if max(float(extent[0]), float(extent[1])) > 0.25 or float(extent[2]) > 0.22:
+            return None
+    return [left, right]
 
 
 def _bottom_seen(mask: np.ndarray, depth: np.ndarray, instance: int, ys: np.ndarray, xs: np.ndarray,

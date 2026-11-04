@@ -211,6 +211,38 @@ def _merge_boxes(boxes: list[tuple[int, int, int, int]], inside: float = 0.7) ->
     return sorted((tuple(b) for b in merged), key=lambda b: -(b[1] - b[0]) * (b[3] - b[2]))
 
 
+def _crop_background(mask: np.ndarray) -> bool:
+    """Whether a crop mask paints most of its window: background mixed in, not an object on the surface."""
+    return mask.size > 0 and int(mask.sum()) >= 0.6 * mask.size
+
+
+def _furniture_slice(category: str, mask: np.ndarray, parents: list[tuple[str, np.ndarray]]) -> bool:
+    """Whether a ``box`` detection is the upper body of a cabinet, sideboard or counter.
+
+    Most of its pixels lie on that furniture and it covers at least a quarter of the furniture.
+    A box standing on the top is much smaller than the body, so it stays.
+
+    :param category: the detection's category name.
+    :param mask: the detection in the full image.
+    :param parents: support surfaces from the full-image pass, each ``(category, mask)``.
+    """
+    if category != "box":
+        return False
+    area = int(mask.sum())
+    if area < 1:
+        return False
+    for parent_cat, parent in parents:
+        if parent_cat not in ("cabinet", "sideboard", "counter"):
+            continue
+        parent_area = int(parent.sum())
+        if parent_area < 1:
+            continue
+        inside = int(np.logical_and(mask, parent).sum())
+        if inside >= 0.7 * area and area >= 0.25 * parent_area:
+            return True
+    return False
+
+
 def _iou(a: np.ndarray, b: np.ndarray) -> float:
     union = np.logical_or(a, b).sum()
     return float(np.logical_and(a, b).sum() / union) if union else 0.0
@@ -314,10 +346,15 @@ class Segmenter:
                 continue  # already large in the image: the full pass saw it at full resolution
             size = (max(1, round((x1 - x0) * scale)), max(1, round((y1 - y0) * scale)))
             tile = np.asarray(Image.fromarray(rgb[y0:y1, x0:x1]).resize(size, Image.BICUBIC))
+            parents = [(category, mask) for category, _score, mask in found]
             for category, score, mask in self._detections(tile, list(cfg.crop_prompts)):
                 small = np.asarray(Image.fromarray(mask.astype(np.uint8) * 255).resize((x1 - x0, y1 - y0), Image.NEAREST)) > 127
+                if _crop_background(small):
+                    continue  # the enlarged window's background came back as part of the mask
                 full = np.zeros((h, w), dtype=bool)
                 full[y0:y1, x0:x1] = small
+                if _furniture_slice(category, full, parents):
+                    continue  # the upper body of the cabinet, not a box standing on it
                 if full.any():
                     out.append((category, score, full))
         return out

@@ -398,7 +398,10 @@ export class LocalSandboxProvider extends SandboxProvider {
    * SID to enter it. A fresh provider always chooses a new path; crash
    * residue therefore cannot collide with or authorize a resumed session.
    * Fail-closed: a half-materialized temp grant is revoked and its directory
-   * removed before the error propagates.
+   * removed before the error propagates. A cached temp capability whose
+   * directory was removed out of band (temp hygiene, disk cleanup) is revoked
+   * and re-materialized: its ACEs died with the directory, and reusing the
+   * cached path would fail closed on every later launch.
    * @param sessionId - the policy's calling-session identity.
    * @param workspaceRoot - the resolved policy root.
    * @returns the pair's private temp directory and write capability.
@@ -425,7 +428,20 @@ export class LocalSandboxProvider extends SandboxProvider {
     }
     const key = JSON.stringify([String(sessionId), workspaceRoot])
     const existing = this.tempCapabilities.get(key)
-    if (existing !== undefined) return existing
+    if (existing !== undefined) {
+      if (existsSync(existing.dir)) return existing
+      // The private temp directory was removed out of band (temp hygiene, disk
+      // cleanup): its ACEs died with it, so the cached grant is a dead SID and
+      // every later launch would fail closed at the runner boundary. Revoke
+      // what remains and materialize a fresh pair; a disposal failure does not
+      // block recovery.
+      this.tempCapabilities.delete(key)
+      try {
+        existing.grant.dispose()
+      } catch {
+        // The grant's ACEs died with the directory; freeing the SID is best-effort.
+      }
+    }
     const tempDir = mkdtempSync(join(tmpdir(), 'dsh-'))
     const tempSid = tempWriteSid(tempDir)
     let grant: AclWriteGrant | undefined

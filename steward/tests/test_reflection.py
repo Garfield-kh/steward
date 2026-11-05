@@ -136,6 +136,15 @@ def test_a_failed_pick_reports_its_target_and_ids_no_longer_known():
     assert all(c["id"] != "e:5" for c in result["candidates"])
 
 
+def test_a_blocked_path_offers_no_candidates():
+    result = reflect(OBJECTS, EVIDENCE, WORDS, CFG, {
+        "tool": "ego_predict", "arguments": {"skill": "navigate", "params": {"x": 1.0, "y": 0.0}},
+        "message": "navigate is not feasible: goal pose collides with e:5"})
+    assert result["cause"]["key"] not in CFG.candidate_causes
+    assert [t["id"] for t in result["targets"]] == ["e:5"]
+    assert result["candidates"] == []
+
+
 def test_reflect_needs_the_failure_message():
     with pytest.raises(ValueError, match="failure message"):
         reflect(OBJECTS, EVIDENCE, WORDS, CFG, {"tool": "skill_run"})

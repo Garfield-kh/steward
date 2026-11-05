@@ -34,6 +34,10 @@ class ReflectionConfig:
     hidden_gap_m: float = 0.02
     # Match score of a name sharing a word with the sought one ("dinner table" for "table").
     shared_word_score: float = 0.8
+    # Failure causes (steward.diagnosis keys) for which other objects may be the one meant; a
+    # blocked path or a full surface is about the scene, not about which object was named.
+    candidate_causes: tuple[str, ...] = ("perception-missing", "out-of-reach", "low-confidence", "grasp-miss",
+                                         "support-unknown", "unknown")
     min_alternative: float = 0.05  # perceived categories below this probability are not listed
 
 
@@ -274,7 +278,7 @@ def reflect(objects: list[dict], evidence: dict[str, Evidence], prompt_words: di
     :param failure: ``{tool?, arguments?, message, name?, size?}``; ``name`` and ``size`` describe
         what the instruction asked for when the agent knows them.
     :returns: the failure cause with its usual remedy, the objects the call was about (``missing``
-        lists ids the Ego-State no longer holds), and candidates for the sought object: by
+        lists ids the Ego-State no longer holds), and, for a cause in ``candidate_causes``, candidates for the sought object: by
         ``name``/``size``, else by the category the call asked for or of its first target, plus the
         doubtfully named objects.
     :raises ValueError: no failure message."""
@@ -291,9 +295,11 @@ def reflect(objects: list[dict], evidence: dict[str, Evidence], prompt_words: di
         name = targets[0]["category"]
     size = failure.get("size")
     exclude = [t["id"] for t in targets]
-    found = candidates(objects, evidence, prompt_words, cfg, name, size, exclude) if (name or size) else []
-    seen = {c["id"] for c in found} | set(exclude)
-    found += [c for c in candidates(objects, evidence, prompt_words, cfg, exclude=list(seen))][:max(0, cfg.candidate_limit - len(found))]
+    found = []
+    if cause.key in cfg.candidate_causes:
+        found = candidates(objects, evidence, prompt_words, cfg, name, size, exclude) if (name or size) else []
+        seen = {c["id"] for c in found} | set(exclude)
+        found += candidates(objects, evidence, prompt_words, cfg, exclude=list(seen))[:max(0, cfg.candidate_limit - len(found))]
     return {
         "cause": {"key": cause.key, "label": cause.label, "advice": cause.advice},
         "sought": {"name": name, "size": size},

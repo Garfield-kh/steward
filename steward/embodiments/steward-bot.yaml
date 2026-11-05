@@ -1,0 +1,67 @@
+# Steward mobile kitchen robot: the Phase 0 embodiment (sim only)
+#
+# This is the body the chores/shuttle/kitchen scenarios were built around. It has no
+# real-machine counterpart and none is planned: the real-robot line is cobot-magic.yaml.
+# Kinematic ground truth is the generator, not this file:
+# src/steward/assets/generators.py steward_bot().
+
+id: steward-bot
+display: Steward mobile manipulator (planar base + lift + reach + parallel gripper)
+
+mechanical:
+  base: planar            # x, y, yaw position-controlled root actuator; 0.5 x 0.44 x 0.28 m box collides
+  arms:
+    - id: arm
+      model: lift-reach   # two prismatic joints, no wrist
+      dof: 2
+      joints:
+        lift:  {axis: z, range_m: [0.30, 1.30], home_m: 0.60, velocity_mps: 0.3}
+        reach: {axis: x, range_m: [0.05, 0.70], home_m: 0.10, velocity_mps: 0.3}
+  grippers:
+    - arm: arm
+      type: parallel-2f
+      control: binary     # open / close only
+      aperture_m: [0.0, 0.09]
+  grasp:
+    sim: ideal-attach     # WSim attaches the nearest object within 5-6 cm of the grasp point on close
+    real: n/a
+
+sensors:
+  cameras:
+    - id: head_camera
+      kind: rgbd
+      mount_link: head    # head fixed on the base at [0.16, 0, 1.50]
+      mount: {p: [0.05, 0, 0], pitch_deg: 30}   # looks 30 degrees down: a survey view
+      intrinsics: {width: 320, height: 240, fovy: 60}
+      rate_hz: 10
+      role: survey
+  proprioception: [odometry (noisy), lift encoder, reach encoder, gripper state]
+  visibility_contract:
+    sees_own_gripper: no at a tabletop pick (gripper projects to v = 260 on a 240-row frame); 45 degrees would
+      show the hand but lose the far side of the room
+    near_field_blind: everything below the frame's lower edge (60 degrees down) while parked at a table
+    invisible_materials: transparent glass is detected in only 60 % of frames (ideal detector) / depth has 40 %
+      dropouts and 3x noise on transparent surfaces (RGB-D)
+    honest_fix: a head pitch joint driven by the working skill, not a compromise angle
+
+self_model:
+  kinematics: {source: generators.py steward_bot(), format: entity, sim: mjcf-converted}
+  ik: none              # lift/reach are Cartesian already; navigation solves the base pose
+  collision: base box only (lift carriage, arm and gripper are visual-only)
+  camera_fk: generic joint-tree FK in ego/estimator.py
+  actuator: position control (base kp 8000/900, lift kp 6000, reach kp 2500)
+
+control_face:
+  verbs: [navigate, pick, place, open, close, look_around]
+  primitives: [base_pose, lift, reach, gripper]
+  rates_hz: {sim: 20}
+
+execution_stack:
+  planning: 2-D path planning on the Ego-State, docking footprint checks, ESim geometric prediction with receipts
+  perception: phase0 ideal detections / phase1 RGB-D + anonymous masks (ego/perception.py, ego/classify.py)
+
+sim2real:
+  real_backend: none
+
+tasks:
+  sim: phase0-kitchen (cup onto the table), phase0-shuttle (rotation), phase0-chores (row, nest, drawer swap)

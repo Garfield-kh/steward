@@ -23,6 +23,7 @@ from steward.assets.generators import GENERATORS
 from steward.assets.library import AssetLibrary, instantiate
 from steward.assets.preview import render_scene, render_template
 from steward.assets.validator import validate_template
+from steward.embodiments import EMBODIMENTS, describe, scenario_embodiments
 from steward.math3d import pose_compose, quat_from_yaw, yaw_from_quat
 from steward.scene.extent import entity_obb
 from steward.scene.mjcf import build_mjcf
@@ -200,6 +201,33 @@ class AuthoringService:
 
     def list_scenes(self) -> list[str]:
         return sorted(p.stem for p in (self.root / "scenes").glob("*.json"))
+
+    def scenario_catalog(self) -> list[dict]:
+        """Every scenario the host can load, with its task and the body of each robot.
+
+        Built scenarios are read from disk; builtin scenarios not yet built in this root are
+        listed from their specs (``built: false``) so the console can offer them and
+        :meth:`ensure_scenario` builds them on first load.
+        """
+        out: dict[str, dict] = {}
+        for name in self.list_scenarios():
+            scenario = self.load_scenario(name)
+            out[name] = {"name": name, "task": scenario["task"], "mission": scenario.get("mission"),
+                         "robots": scenario_embodiments(scenario), "built": True}
+        for name, builtin in BUILTIN_SCENARIOS.items():
+            if name in out:
+                continue
+            robots = {e["id"]: describe(e["asset"]) for e in builtin["spec"]()["entities"]
+                      if e["asset"] in EMBODIMENTS}
+            out[name] = {"name": name, "task": builtin["task"], "mission": builtin.get("mission"),
+                         "robots": robots, "built": False}
+        return [out[name] for name in sorted(out)]
+
+    def ensure_scenario(self, name: str) -> None:
+        """Build a builtin scenario that is not in this root yet; anything else is left to
+        :meth:`load_scenario` to find or report."""
+        if name in BUILTIN_SCENARIOS and name not in self.list_scenarios():
+            BUILTIN_SCENARIOS[name]["build"](self)
 
     # -------------------------------------------------------------- scenarios
     def save_scenario(self, scenario: dict) -> dict:
@@ -516,3 +544,230 @@ def build_default_kitchen(service: AuthoringService) -> dict:
     puzzles = build_puzzle_scenarios(service)
     return {"assets": {k: v["version"][:12] for k, v in published.items()}, "scene": scene, "scenario": scenario,
             "puzzles": puzzles}
+
+
+def cobot_spec() -> dict:
+    """The Cobot Magic workstation: the twin parked at a tabletop, a bowl and a plate on it.
+
+    The table's near edge sits at x = 0.40, just in front of the chassis (half-length 0.34), so
+    the twin works the band its arms can reach over the edge (measured: x 0.40-0.60 at y +-0.45,
+    strictly vertical only in the nearest part of it). The bowl and the plate stand on the same
+    arm's side: the errand is one arm's job, pick and place both.
+    """
+    return {
+        "name": "cobot-table",
+        "entities": [
+            {"id": "w:room", "asset": "cobot-room", "at": {"x": 0.0, "y": 0.0}},
+            {"id": "w:table-1", "asset": "cobot-table", "at": {"x": 0.85, "y": 0.0}},
+            {"id": "w:cobot-1", "asset": "cobot-magic", "at": {"x": 0.0, "y": 0.0}},
+            # Table centre is (0.85, 0); both pieces stand on the left arm's side (the mission is
+            # one arm's errand), fully on the tabletop and clear of each other's footprint --
+            # verified against the solver, see tests/test_cobot_table.py.
+            {"id": "w:bowl-1", "asset": "bowl", "on": "w:table-1", "offset": [-0.35, 0.20]},
+            {"id": "w:plate-1", "asset": "plate", "on": "w:table-1", "offset": [-0.31, 0.42]},
+        ],
+        "regions": [{"id": "workcell", "label": "workcell", "polygon": [[-2, -2], [2, -2], [2, 2], [-2, 2]]}],
+    }
+
+
+COBOT_TASK = "把碗搬到盘子上；一次只用一个夹爪，搬完再回到停放姿态。"
+
+
+def cobot_kitchen_spec() -> dict:
+    """The chores kitchen's tableware on one table the twin is parked at.
+
+    The same three nesting bowls (30, 20 and 12 cm), wine glass and black mug as the chores
+    kitchen. The table's near edge sits at x = 0.38, just in front of the chassis; every piece
+    stands in the strip the arms reach over that edge (measured: x 0.38-0.60, and y +-0.25 puts a
+    piece in front of one arm rather than between both). The largest bowl stands on the left
+    arm's line because stacking happens along that line, the other two on the arms that carry
+    them.
+    """
+    return {
+        "name": "cobot-kitchen",
+        "entities": [
+            {"id": "w:room", "asset": "kitchen-room", "at": {"x": 0.0, "y": 0.0}},
+            {"id": "w:cobot-1", "asset": "cobot-magic", "at": {"x": 0.0, "y": 0.0}},
+            {"id": "w:table-1", "asset": "cobot-kitchen-table", "at": {"x": 0.90, "y": 0.0}},
+            # Every piece is fully on the tabletop (near edge x = 0.35) and inside the strip the
+            # arms reach over it (x 0.40-0.60): a cylinder resting on one contact point tips.
+            # The largest bowl is the stack point and both arms reach it; the others sit on their
+            # own arm's side, spaced by their radii.
+            {"id": "w:bowl-red", "asset": "bowl-red-large", "on": "w:table-1", "offset": [-0.42, 0.00]},
+            {"id": "w:bowl-green", "asset": "bowl-green-medium", "on": "w:table-1", "offset": [-0.45, 0.38]},
+            {"id": "w:bowl-blue", "asset": "bowl-blue-small", "on": "w:table-1", "offset": [-0.44, -0.28]},
+            # The glass and the mug are left alone by this task: they stand on the far half, out of
+            # the arms' strip but inside the overhead camera's view.
+            {"id": "w:wine-glass", "asset": "wine-glass", "on": "w:table-1", "offset": [0.20, -0.30]},
+            {"id": "w:mug", "asset": "black-mug", "on": "w:table-1", "offset": [0.20, 0.30]},
+        ],
+        "regions": [{"id": "kitchen", "label": "kitchen", "polygon": [[-3, -2.5], [3, -2.5], [3, 2.5], [-3, 2.5]]}],
+    }
+
+
+COBOT_KITCHEN_TASK = "把桌上三个颜色不同的碗按大小叠起来；高脚杯和咖啡杯留在桌上。"
+
+
+def _publish_assets(service: AuthoringService, assets: dict[str, tuple[str, dict]]) -> dict[str, str]:
+    """Generate, validate and publish a set of generated assets."""
+    published = {}
+    for name, (generator, params) in assets.items():
+        created = service.create_asset(generator=generator, params=params)
+        if not created["validation"]["ok"]:
+            raise AuthoringError(f"generated asset {name} failed validation: {created['validation']['errors']}")
+        published[name] = service.publish_asset(name, created["template"],
+                                                meta={"generator": generator, "params": params})
+    return published
+
+
+KITCHEN_TASK = "把杯子放到桌上。"
+
+def build_cobot_workstation(service: AuthoringService) -> dict:
+    """Publish the Cobot Magic twin's assets, compose its workcell and save the cobot-table scenario."""
+    from steward.assets.cobot import cobot_magic
+
+    # The twin's generator lives in its own module and imports the shared generators' constants,
+    # so it is registered here rather than at import time (that would be a cycle).
+    GENERATORS.setdefault("cobot_magic", cobot_magic)
+    assets = {
+        "cobot-room": ("building", {"width": 4.0, "depth": 4.0, "height": 2.6}),
+        "cobot-table": ("dining_table", {"width": 1.0, "depth": 0.9}),
+        "cobot-magic": ("cobot_magic", {}),
+        "bowl": KITCHEN_ASSETS["bowl"],
+        "plate": KITCHEN_ASSETS["plate"],
+    }
+    published = _publish_assets(service, assets)
+    scene = service.compose_scene(cobot_spec())
+    scenario = service.save_scenario({
+        "name": "cobot-table",
+        "scene": "cobot-table",
+        "robots": ["w:cobot-1"],
+        "task": COBOT_TASK,
+        # The scripted mission the twin's Ego Runtime runs in this scene (`steward cobot-ego --task`).
+        "mission": "bowl-on-plate",
+        # Frame the console on the workstation: both arms and both pieces of tableware fill the
+        # view, which is the only way a three-centimetre grasp is visible on the Ego-State panel.
+        "view": {"lookat": [0.30, 0.14, 0.80], "distance": 1.9, "azimuth": 90.0, "elevation": -35.0},
+    })
+    return {"assets": {k: v["version"][:12] for k, v in published.items()}, "scene": scene, "scenario": scenario}
+
+
+def build_cobot_kitchen(service: AuthoringService) -> dict:
+    """Put the twin in the chores kitchen: the coloured bowls on one table within its reach."""
+    from steward.assets.cobot import cobot_magic
+
+    GENERATORS.setdefault("cobot_magic", cobot_magic)
+    assets = {
+        "kitchen-room": KITCHEN_ASSETS["kitchen-room"],
+        "cobot-magic": ("cobot_magic", {}),
+        # 0.8 x 0.8 under the overhead camera's cone: the whole top has to be inside the frame,
+        # or the table never becomes a track (see assets/cobot.py's top_camera note).
+        "cobot-kitchen-table": ("dining_table", {"width": 1.2, "depth": 1.0}),
+        "bowl-red-large": KITCHEN_ASSETS["bowl-red-large"],
+        "bowl-green-medium": KITCHEN_ASSETS["bowl-green-medium"],
+        "bowl-blue-small": KITCHEN_ASSETS["bowl-blue-small"],
+        "wine-glass": KITCHEN_ASSETS["wine-glass"],
+        "black-mug": KITCHEN_ASSETS["black-mug"],
+    }
+    published = _publish_assets(service, assets)
+    scene = service.compose_scene(cobot_kitchen_spec())
+    scenario = service.save_scenario({
+        "name": "cobot-kitchen",
+        "scene": "cobot-kitchen",
+        "robots": ["w:cobot-1"],
+        "task": COBOT_KITCHEN_TASK,
+        "mission": "nest-bowls",
+        # Frame the console on the twin and its table: the arms are 0.5 m tall and the grasp is
+        # 3 cm, which is invisible from the room-sized default.
+        "view": {"lookat": [0.32, 0.10, 0.80], "distance": 1.9, "azimuth": 90.0, "elevation": -35.0},
+    })
+    return {"assets": {k: v["version"][:12] for k, v in published.items()}, "scene": scene, "scenario": scenario}
+
+
+# The errand's map: where the twin stands to work each station, the route it drives between them,
+# and where the bowl goes. The route leaves the table's near edge and comes back to the counter
+# along the counter's own centre line -- the last turn is at x = 2.0, where the chassis's swept
+# corner (0.45 m) still clears the counter's front at 2.70, and the last 0.30 m is a straight
+# drive into the working pose, which is how a real base parks against a counter.
+COBOT_ERRAND_MISSION = {
+    "drive": {"at": [2.30, 0.0, 0.0],
+              "path": [[-0.20, -1.10], [2.00, -1.10], [2.00, 0.0], [2.30, 0.0]]},
+    # The counter's top (0.90) plus the bowl's half height and the 3 cm it is released above it.
+    "place": [2.80, 0.0, 0.96],
+    # The counter is 15 cm taller than the table: the torso rises before the place.
+    "lift": 0.78,
+    "grip": "L_link6",
+}
+
+
+def cobot_errand_spec() -> dict:
+    """Two stations the twin has to drive between: the dining table and a kitchen counter.
+
+    Nothing here is within reach of the other: the table's bowl is 0.46 m from the start pose,
+    the counter's drop point is 2.8 m away and 15 cm higher, so the mission can only succeed by
+    carrying the bowl across the room and raising the torso.
+    """
+    return {
+        "name": "cobot-errand",
+        "entities": [
+            {"id": "w:room", "asset": "cobot-errand-room", "at": {"x": 0.0, "y": 0.0}},
+            {"id": "w:cobot-1", "asset": "cobot-magic", "at": {"x": 0.0, "y": 0.0}},
+            {"id": "w:table-1", "asset": "cobot-errand-table", "at": {"x": 0.90, "y": 0.0}},
+            # The bowl stands in the same reachable band as the kitchen: 0.46 m ahead, in front of
+            # the left arm, fully on the tabletop.
+            {"id": "w:bowl-1", "asset": "bowl", "on": "w:table-1", "offset": [-0.44, 0.20]},
+            # Turned a quarter turn so its 1.8 m front faces the robot: you park along a counter,
+            # not at its end.
+            {"id": "w:counter-1", "asset": "cobot-errand-counter",
+             "at": {"x": 3.0, "y": 0.0, "yaw": 1.5707963267948966}},
+        ],
+        "regions": [{"id": "flat", "label": "flat", "polygon": [[-4, -2.5], [4, -2.5], [4, 2.5], [-4, 2.5]]}],
+    }
+
+
+COBOT_ERRAND_TASK = "把桌上的碗搬到对面的台面上：自己开过去，到了再把升降柱升起来。"
+
+
+def build_cobot_errand(service: AuthoringService) -> dict:
+    """Publish the two stations and save the cobot-errand scenario (one bowl, two stations)."""
+    from steward.assets.cobot import cobot_magic
+
+    GENERATORS.setdefault("cobot_magic", cobot_magic)
+    assets = {
+        # Long enough for a 2.3 m drive around the table with room to spare at both ends.
+        "cobot-errand-room": ("building", {"width": 8.0, "depth": 5.0, "height": 2.6}),
+        "cobot-magic": ("cobot_magic", {}),
+        "cobot-errand-table": ("dining_table", {"width": 1.2, "depth": 1.0}),
+        "cobot-errand-counter": ("counter", {"width": 1.8, "depth": 0.6, "height": 0.9}),
+        "bowl": KITCHEN_ASSETS["bowl"],
+    }
+    published = _publish_assets(service, assets)
+    scene = service.compose_scene(cobot_errand_spec())
+    scenario = service.save_scenario({
+        "name": "cobot-errand",
+        "scene": "cobot-errand",
+        "robots": ["w:cobot-1"],
+        "task": COBOT_ERRAND_TASK,
+        "mission": "carry-to-counter",
+        # The map the mission is scripted against; stations belong to the deployment, not the code.
+        "missionConfig": COBOT_ERRAND_MISSION,
+        # From behind the start pose: the table, the robot and the route to the counter in one view.
+        "view": {"lookat": [1.4, 0.0, 0.70], "distance": 3.6, "azimuth": 90.0, "elevation": -40.0},
+    })
+    return {"assets": {k: v["version"][:12] for k, v in published.items()}, "scene": scene, "scenario": scenario}
+
+
+# The scenarios the CLI and the console can build on demand, with what the catalog says about
+# them before they exist in a root. ``build`` may write several scenarios at once (the kitchen
+# builder saves all three Phase 0 scenarios), so the table names each one it produces.
+BUILTIN_SCENARIOS: dict[str, dict] = {
+    "phase0-kitchen": {"build": build_default_kitchen, "spec": kitchen_spec, "task": KITCHEN_TASK},
+    "phase0-shuttle": {"build": build_default_kitchen, "spec": shuttle_spec, "task": SHUTTLE_TASK},
+    "phase0-chores": {"build": build_default_kitchen, "spec": chores_spec, "task": CHORES_TASK},
+    "cobot-table": {"build": build_cobot_workstation, "spec": cobot_spec, "task": COBOT_TASK,
+                    "mission": "bowl-on-plate"},
+    "cobot-kitchen": {"build": build_cobot_kitchen, "spec": cobot_kitchen_spec, "task": COBOT_KITCHEN_TASK,
+                      "mission": "nest-bowls"},
+    "cobot-errand": {"build": build_cobot_errand, "spec": cobot_errand_spec, "task": COBOT_ERRAND_TASK,
+                     "mission": "carry-to-counter"},
+}

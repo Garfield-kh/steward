@@ -407,6 +407,14 @@ def steward_bot(camera_pitch_deg: float = 30.0, camera_fovy_deg: float = 60.0, w
     The base collides with the world. The lift carriage, arm and gripper are visual-only links,
     so an approaching gripper never pushes the target: Phase 0 grasping is an ideal attach
     performed by WSim when the gripper closes within capture range.
+
+    The head camera looks 30 degrees down, which is a survey view: from where the robot parks it
+    sees the furniture and the room. It is not a work view — at a tabletop pick the gripper sits
+    34 degrees below the horizon and the frame's lower edge is at 60 degrees, so the hand and the
+    near edge of the table fall out of the bottom of the image (measured: the gripper projects to
+    v = 260 on a 240-pixel-high frame). At 45 degrees the hand comes into view (v = 191) but the
+    same robot can no longer see the far side of the room. The honest fix is a head with a pitch
+    joint driven by the skill that is working, not a compromise angle.
     """
     base = Link(
         id="base", name="base",
@@ -505,3 +513,5 @@ GENERATORS: dict[str, Callable[..., Entity]] = {
     "open_box": open_box,
     "steward_bot": steward_bot,
 }
+# The agilex embodiment's generator lives in its own module (it imports these constants), so it is
+# registered by whoever needs it: see authoring.service.build_cobot_workstation.

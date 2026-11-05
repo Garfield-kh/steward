@@ -55,12 +55,17 @@ class MotionConfig:
     joint_tol: float = 0.01
     tick_s: float = 0.04
     retract_reach: float = 0.10
+    reach_max: float = 0.70  # the wrist slide's upper joint limit; asking beyond it only fails
     stow_lift: float = 0.60
     dock_tol: float = 0.06
     dock_yaw_tol: float = 0.12
     align_min: float = 0.01
     align_max: float = 0.15
     stall_s: float = 2.0
+    # Offsets from the estimate at which a pick closes the gripper before giving up: the first
+    # probe is at the estimate itself, then forward/back, then left/right, then other heights.
+    grasp_probe_xy: tuple[float, ...] = (0.035, -0.035)
+    grasp_probe_z: tuple[float, ...] = (-0.025, 0.025)
     settle_s: float = 0.4
     """Robot time after a joint command at which a joint still short of its target (sagging under
     a load) gets one corrected setpoint."""
@@ -73,7 +78,6 @@ class MotionConfig:
     pour_tip_s: float = 2.5
     """Robot time to tip a container over and to set it upright again: slow, so the contents slide
     out rather than fly."""
-    """Pause at each quarter turn of a look-around, so perception gathers views in every direction."""
 
 
 @dataclass
@@ -119,6 +123,8 @@ class SkillExecutor:
     def __init__(self, command: Callable[[dict], None], state: Callable[[], dict], mark_held: Callable[[str], str],
                  config: MotionConfig | None = None, shift: Callable[[str, list[float]], None] | None = None,
                  on_error: Callable[[str], None] | None = None, on_finish: Callable[[Job], None] | None = None,
+                 on_begin: Callable[[str, dict], None] | None = None,
+                 on_release: Callable[[str, list[float]], None] | None = None,
                  clock: RobotLink | None = None):
         """``clock`` is the robot link whose world clock times the control ticks (one hold per job,
         ``skill/<job id>``); without it a tick sleeps ``tick_s`` of wall time."""
@@ -127,6 +133,8 @@ class SkillExecutor:
         self._now = 0.0
         self._hold = ""
         self._on_finish = on_finish
+        self._on_begin = on_begin
+        self._on_release = on_release
         self._command = command
         self._state = state
         self._mark_held = mark_held
@@ -178,12 +186,32 @@ class SkillExecutor:
         return job
 
     # ---------------------------------------------------------------- runner
+    def _begin(self, job: Job, skill: str, receipt: dict) -> None:
+        """Run the caller's preparation inside the job thread, so ``start`` returns at once.
+
+        Preparation may take tens of seconds (a fresh segmentation of the scene). The caller that
+        waits on the job has a budget for that; the caller that issues the run only has its
+        transport timeout, and must not be made to hold it."""
+        if self._on_begin is None:
+            return
+        try:
+            self._on_begin(skill, receipt)
+        except SkillFailed:
+            raise  # the skill itself reports it; a preparation that found the plan stale is not an alert
+        except Exception as exc:  # noqa: BLE001 - an unexpected preparation error is an alert, and fails the skill
+            if self._on_error is not None:
+                self._on_error(f"技能 {skill}（{job.id}）准备阶段出错：{type(exc).__name__}: {exc}")
+            raise
+
     def _run(self, job: Job, skill: str, receipt: dict) -> None:
         try:
             if self._clock is not None:
                 self._hold = f"skill/{job.id}"
                 self._now = self._clock.wait_until(None, self._hold)
             plan = receipt.get("plan", {})
+            self._begin(job, skill, receipt)
+            if self._stop.is_set():
+                raise SkillStopped()
             self._gentle = bool(plan.get("gentle"))
             if skill == "look_around":
                 self._look = True
@@ -222,6 +250,10 @@ class SkillExecutor:
                 self._release_clock(f"skill/{job.id}")
             if self._on_finish is not None:
                 self._on_finish(job)
+
+    def _released(self, object_id: str, spot: list[float]) -> None:
+        if self._on_release is not None:
+            self._on_release(object_id, list(spot))
 
     def _release_clock(self, hold: str) -> None:
         try:
@@ -393,11 +425,16 @@ class SkillExecutor:
         self._translate_to(plan["predock"][0], plan["predock"][1], plan["yaw"])
 
     def _reach_to(self, target_xy: list[float]) -> float:
+        """Wrist extension that puts the gripper over ``target_xy``, within the joint's travel.
+
+        The plan's reach and the pose the base actually stopped at differ by a few centimetres; a
+        target a little beyond the arm used to fail the whole pick with "joint reach did not
+        reach", when all it costs is that the gripper closes short — inside its capture radius."""
         st = self._state()
         o = st["odometry"]
         heading = np.array([math.cos(o["yaw"]), math.sin(o["yaw"])])
         rel = np.array(target_xy) - np.array([o["x"], o["y"]])
-        return float(rel @ heading) - st["toolOffset"]
+        return min(self.config.reach_max, float(rel @ heading) - st["toolOffset"])
 
     def _over_support(self, plan: dict) -> bool:
         """True when the held object's footprint at the gripper lies within the support top."""
@@ -420,6 +457,10 @@ class SkillExecutor:
     def _pick(self, job: Job, plan: dict) -> None:
         self._dock(job, plan)
         target = self._state()["entities"].get(plan["target"])
+        if target is None and plan.get("targetP") is not None:
+            # The track was renumbered while docking; the predicted position is seconds old and
+            # the gripper is already beside it — go on with the position.
+            target = {"p": list(plan["targetP"])}
         if target is None:
             raise SkillFailed(f"target {plan['target']} is no longer in the ego state")
         self._align_lateral(target["p"][:2])
@@ -431,13 +472,42 @@ class SkillExecutor:
             self._set_joint("reach", self.config.retract_reach)
             self._backoff(plan)
             raise SkillFailed(f"gripper is {miss * 100:.0f} cm from {plan['target']}; not closing")
-        self._command({"gripper": "close"})
-        self._wait(self.config.grasp_wait_s)
-        if not self._state()["gripper"]["holding"]:
+        # A real object's estimate is a few centimetres off in any direction as often as not, and
+        # the hand only feels the object when it closes. Probe around the estimate the way a person
+        # feels for a cup in the dark: at the estimate, then a little forward and back (the arm
+        # alone moves), then to either side (the base shifts), then at other heights. The estimate
+        # is re-read before each probe -- it is best while the camera is right over the object.
+        probes = [(0.0, 0.0, 0.0)]
+        probes += [(dx, 0.0, 0.0) for dx in self.config.grasp_probe_xy]
+        probes += [(0.0, dy, 0.0) for dy in self.config.grasp_probe_xy]
+        probes += [(0.0, 0.0, dz) for dz in self.config.grasp_probe_z]
+        grasped = False
+        for n, (forward, sideways, dz) in enumerate(probes):
+            latest = self._state()["entities"].get(plan["target"]) or target
+            o = self._state()["odometry"]
+            heading = np.array([math.cos(o["yaw"]), math.sin(o["yaw"])])
+            left = np.array([-heading[1], heading[0]])
+            goal = np.array(latest["p"][:2]) + forward * heading + sideways * left
+            if n:
+                self._align_lateral(goal.tolist())
+                self._set_joint("lift", latest["p"][2] + dz)
+                self._set_joint("reach", max(0.05, self._reach_to(goal.tolist())))
+            self._command({"gripper": "close"})
+            self._wait(self.config.grasp_wait_s)
+            if self._state()["gripper"]["holding"]:
+                if n:
+                    job.log.append(f"grasped {plan['target']} on probe {n} "
+                                   f"(forward {forward * 100:+.0f} cm, left {sideways * 100:+.0f} cm, "
+                                   f"height {dz * 100:+.1f} cm)")
+                grasped = True
+                break
+        if not grasped:
             self._command({"gripper": "open"})
+            self._wait(0.2)
+        if not grasped:
             self._set_joint("reach", self.config.retract_reach)
             self._backoff(plan)
-            raise SkillFailed(f"grasp missed {plan['target']}")
+            raise SkillFailed(f"grasp missed {plan['target']} ({len(probes)} probes)")
         try:
             held = self._mark_held(plan["target"])
         except KeyError as exc:
@@ -467,6 +537,7 @@ class SkillExecutor:
             self._backoff(plan)
             raise SkillFailed(f"gripper is not over {plan['support']}; keeping {plan['object']}")
         self._command({"gripper": "open"})
+        self._released(plan["object"], plan["spot"])
         self._wait(self.config.release_wait_s)
         job.log.append(f"released {plan['object']} on {plan['support']}")
         self._set_joint("reach", self.config.retract_reach)
@@ -550,6 +621,7 @@ class SkillExecutor:
         self._dock(job, plan, retract=False)
         self._set_joint("lift", plan["lift"])
         self._command({"gripper": "open"})
+        self._released(plan["object"], plan["floor"])
         self._wait(self.config.release_wait_s)
         job.log.append(f"released {plan['object']} on the floor at ({plan['floor'][0]:.2f}, {plan['floor'][1]:.2f})")
         self._backoff(plan)

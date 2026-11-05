@@ -1319,7 +1319,14 @@ steward（fork 仓库根目录）
 | 视图渲染与帧同步 | 两个视图与仿真、估计解耦，各在自己的渲染线程上渲染（`steward/viewloop.py`）：World State 视图在主机进程的渲染线程上，持有 WSim 模型与数据的私有副本，每帧只在 WSim 锁内拷贝一次状态，渲染与 JPEG 编码在锁外进行，不占用主线程，也不阻塞物理与传感器渲染；Ego State 视图在 Ego Runtime 的渲染线程上，只读机器人自己的 ES，经 Ego API `POST /ego/view` 设置、`GET /ego/view/frame` 取帧；机器人与地面编译进固定模型，其余物体（ES 中每个都是一个盒子）画在一组预编译的盒子槽位上，每帧只改槽位位姿、尺寸与颜色，Phase 1 中轨迹频繁新建与合并也无需重新编译（槽位不够时翻倍扩容），1024×768 一帧约 10 毫秒；感知线程每次更新后在锁内发布一份 ES 快照，渲染线程只读快照，不等感知更新完成。`steward up` 把 Ego Runtime（含 Ego API 与 Ego State 渲染）作为独立子进程启动，两个渲染器不在同一进程，Ego 一侧可以整体迁移到真实机器人上；子进程随父进程退出，意外退出时父进程报错。两个渲染器之间不通信，只靠一个时钟松散同步：第 k 帧落在 Unix 时间 k / fps 秒，按同一 fps 渲染的视图在同一时刻产出同一帧号（不同主机用 NTP / PTP 对时），来不及时跳到下一刻度而不漂移；没人取帧 3 秒后停止渲染。控制台把相机与帧率一次提交给 WCA `POST /console/view`，主机配置 World State 视图并转发给各机器人的 Ego API；两个面板在每个刻度后经 `GET /console/frame?view=world|ego` 取最新帧（主机只转发 Ego State 帧，不渲染），帧头带帧号、渲染所用相机与渲染端实测帧率，面板标题显示「实测 fps · 帧 #k」，叠加层按该帧的相机绘制。叠加层的物体标签统一排布、互不重叠：离相机近的物体先占原位，其余上下按行、左右按半个标签宽挪到最近的空位并用引线连回物体，附近没有空位的标签不显示；误差曲线上的 Phase 切换标记放在第一个不重叠的行 |
 | 渲染线程归属 | 每个渲染器的 OpenGL 上下文从创建、使用到释放都在同一个线程上（macOS 的 CGL 离屏上下文可在任意线程使用，但同一时刻只能在一个线程上为当前上下文）：机器人相机与 RGB-D 传感器渲染、资产预览、Episode 加载与重置由请求线程排队、主线程执行，没有主线程服务时请求超时而不阻塞物理；两个控制台视图在各自的渲染线程上。关闭渲染器前先切换到它自己的 OpenGL 上下文（`mujoco.Renderer.close` 不会这样做，会误删其他渲染器的 GPU 资源） |
 | Episode 切换 | ER 检测到世界时钟倒退即视为重新开机，清空 ES、收据并取消正在执行的技能 |
-| 检查与工具 | pytest 187 项；DSH 单元测试与跨语言集成测试 7 项；三个 profile 的组合配置快照比对；多随机种子回归脚本；命令行 `steward build-kitchen / world / ego / up / demo / shuttle / chores`（均可用 `--phase` 选择功能级别）；运行脚本 `run-ego.sh`、`run-world.sh` |
+| 本体（Embodiment）注册 | `steward/embodiments.py` 与 `phases.py` 同款：一处登记每个本体（`steward-bot` 移动厨房机器人、`cobot-magic` Cobot Magic 双 Piper），给出控制台标签、五层 profile 文件（`steward/embodiments/*.yaml`）与该本体的 Ego Runtime 子命令，以及任务是否由运行时自己执行。本体的身份就是场景里机器人实体的资产 id，场景是唯一的真相来源；未登记的本体照常显示并注明「没有 Ego Runtime 会去驱动它」。控制台顶栏的本体选择器选身体，Scenario 列表随之收窄到该本体的场景，选中另一个本体的场景时「加载」按钮变成「加载（换本体）」并弹出确认：本体编译在世界模型里，所以这不是热切换，而是重开 Episode 并换掉机器人运行时；顶栏标题与机器人对话目标都跟随场景里的机器人与本体 |
+| 按本体派遣 Ego Runtime | `steward up` 的 `EgoSupervisor` 为已加载场景的每个机器人各起一个本体的运行时进程（孪生用 `steward cobot-ego`，移动机器人用 `steward ego`），第一个机器人占用固定的 Ego API 端口。切换 Scenario 分两步：世界换之前先停下要离开的运行时（否则它在时钟归零时会向新场景开一轮它不会做的事），世界换好再起新本体的运行时；保留进程的条件是机器人、本体、任务与任务参数都相同（运行时是围绕它的任务与信念建立的，换任务就换进程；同一任务只是重开 Episode 则自己按时钟倒退重启）。机器人离开时其端口一并释放；固定机器人端口给场景的第一台机器人，与它叫什么无关 |
+| 内置场景按需构建 | `AuthoringService.scenario_catalog()` 列出已构建的 Scenario 与内置 Scenario（未构建的标 `built: false`），`GET /scenarios` 同时返回；控制台加载未构建的内置 Scenario 时由主机先在当前 root 里构建（`ensure_scenario`），因此 `steward up` 停在任意场景都能直接切到另一个本体的场景，不必先跑构建命令 |
+| Cobot Magic 孪生运行时 | `steward cobot-ego` 把孪生的 Ego Runtime 放到机器人端口后面：感知、估计、mink 技能与场景规定的脚本化任务都在进程内，Ego API 发布这份信念；场景的 `mission` 键（`bowl-on-plate` / `nest-bowls` / `carry-to-counter`）决定它跑哪个任务，`missionConfig` 把该任务的站点参数（导航路线、放置点、升降高度）交给运行时——站点属于部署，不属于代码，所以同一段任务换一间厨房只需换场景。每轮结束停住等新 Episode，控制台「重置」让时钟倒退即重启信念并开始下一轮；遥测线程按固定节奏把信念（自身按编码器）发给 Observer，任务进行中也不间断。机器人端口新增 `/sensors/proprioception`（只给编码器与夹爪状态，不抽取感知噪声，供自我态视图按帧率轮询）与 `/sensors/rgbd?camera=`（按名字取某支相机） |
+| 孪生的移动本体 | 真机是 Mobile-ALOHA 架构（TRACER 2.0 差速底盘 + 升降柱 + 四条 Piper，其中主臂仅遥操），孪生按自主那半边建模：`cobot_magic()` 的根是 `planar`（x、y、yaw 位置控制，底盘 0.685×0.57×0.155 m），两条从臂和顶部相机挂在升降台（prismatic `lift`，行程 0.35–1.05 m，home 0.70 → 臂高 0.855 m）。**几何是测出来的，不是猜的**：臂只比桌面高 4 cm 时前臂一伸就穿进桌沿、连 HOME 都收不回；抬到桌面上方约 10 cm 才够，再高则横向前伸反而变短（实测可达带 x 0.38–0.60、|y| ≤ 0.45）；底盘前缘 0.34 m 之前的东西拿不到，所有可抓物必须整只落在桌面上（圆柱只靠一个接触点会翻）。IK 求解器按实测位姿摆放模型（底盘位姿 + 升降高度），并把全部非本臂自由度（含底盘与升降）冻结——否则求解器会把机器人“走”到目标旁边。技能层新增底盘动词 `navigate`（路径点 + 原地转，带按“误差是否继续减小”判定的卡死检测）与 `lift`；位置伺服加入一次积分补偿（重载下垂 0.04 rad 时补一次目标，而不是判为受阻）|
+| 孪生的跨工位差事 | `cobot-errand` 场景：餐桌上一个碗（0.46 m 处，左臂可达）＋ 3 m 外转 90° 的 0.9 m 台面，中间是绕开餐桌的四点路线；任务是 `carry-to-counter`——自己看碗、抓起来、**先把臂收回 HOME 再开**（端着臂扫 2 米既不真实也会撞东西）、开过去、把升降柱升到 0.78 m、再放到台面上。路线是几何算过的：底盘旋转扫掠半径 0.45 m，所以最后一个原地转放在 x=2.0（离台面 0.7 m），最后 0.30 m 是直线开进工位——真机也是这么靠台的。**落点由抓取精度决定**：碗按自己估的中心被抓，放的时候偏移 1:1 带到落点，实测落点误差 3 cm（放宽到 5 cm 是抓取精度界，不是导航界）；底盘到位误差 <3 cm、升降 0.78 m 停止误差 <1 cm，都由 World State 与编码器验证。台面比桌面高 15 cm，站着不动够不到——测试同时断言了“落点离初始位置 >2 m”和“台面比桌面高 15 cm”，所以这一关过了就意味着车真的开了、升降柱真的升了 |
+| 孪生开抽屉 | 抽屉技能从移动版移植到孪生，但关节不同：移动版用伸缩臂 + 原地转沿抽屉轴开，孪生用 mink 把指尖放到拉手上、闭爪后**把指尖沿滑轨方向分步拉回**。世界侧沿用同一套抓拉手模型——被握住的拉手按指尖位置在滑轨上施加 PD 力（`_nearest_handle` 捕获半径 6 cm，`_drive_handles` 每步施力），所以“手臂拉抽屉”是这个世界里真实发生的，不是脚本搬运。站姿几何：机柜 0.5 m 深、抽屉朝机身，底盘前缘必须停在柜面外 3 cm（0.58 m 站位），拉手在指尖前方 0.35 m、高 0.676 m，所以升降柱先降到 0.60（肩高 0.755）；拉出 0.18 m 后指尖仍在可达带内。实测滑轨被拉开 0.208 m、松爪后有 `grasp/handle-release`；断言读的是 World State 里 `drawer_slide` 关节的实际位移，不是技能日志 |
+| 检查与工具 | pytest 187 项；DSH 单元测试与跨语言集成测试 7 项；三个 profile 的组合配置快照比对；多随机种子回归脚本；命令行 `steward build-kitchen / world / ego / up / demo / shuttle / chores / services`，孪生另有 `steward cobot / cobot-ego`（均可用 `--phase` 选择功能级别）；运行脚本 `run-ego.sh`、`run-world.sh` |
 
 ### 13.3 实际布局
 
@@ -1329,12 +1336,14 @@ steward/
 ├── src/steward/
 │   ├── scene/                       # SceneState 数据结构、validate_world / validate_ego、SceneState → MJCF、包围盒
 │   ├── assets/                      # 资产生成器、物理校验、预览渲染、内容寻址资产库
-│   ├── authoring/                   # 资产创建与发布、场景组合与检查、Scenario、默认厨房
+│   ├── authoring/                   # 资产创建与发布、场景组合与检查、Scenario 与内置场景目录、默认厨房
 │   ├── world/                       # WSim（物理、理想抓取、理想检测器、运行中编辑）、Steward 主机（WCA 与机器人端口）、浏览器控制台、WH 对话桥
-│   ├── ego/                         # ER：估计器、规划器、ESim、技能执行、Ego API
+│   ├── ego/                         # ER：估计器、规划器、ESim、技能执行、Ego API；孪生的运行时装在 cobot_runtime.py
 │   ├── observer/                    # Observer：ES 与 GT 对比、NEES、JSONL 记录
+│   ├── embodiments.py               # 本体注册表：标签、profile、该本体的 Ego Runtime 子命令
 │   ├── mission.py                   # 只经 Ego API 的脚本化任务「把杯子放到桌上」
-│   └── cli.py                       # steward build-kitchen / world / ego / up / demo
+│   └── cli.py                       # steward build-kitchen / world / ego / cobot-ego / up / demo / cobot / chores / shuttle
+├── embodiments/                     # 本体的五层 profile（cobot-magic.yaml、steward-bot.yaml）
 ├── tests/                           # pytest：数据结构、资产、ES 收敛、ESim 把关、端到端任务、端口隔离
 ├── dsh/                             # Steward 的独立 pnpm 工作区（仅此目录依赖 @deepseek-ai/*）
 │   ├── packages/
@@ -1389,6 +1398,14 @@ curl -X POST http://127.0.0.1:7400/wca/edit -H 'content-type: application/json' 
 # 分别运行世界与机器人（可放在不同进程或机器上）
 .venv/bin/steward world --wca-port 7400 --robot-port 7410
 .venv/bin/steward ego --robot-url http://127.0.0.1:7410 --api-port 7420
+
+# 孪生的运行时单独跑（Cobot Magic）：任务按场景的 mission 键，控制台照常经 Ego API 看它的信念
+.venv/bin/steward world --wca-port 7430 --robot-port 7440
+.venv/bin/steward cobot-ego --robot-url http://127.0.0.1:7440 --api-port 7450 --task nest-bowls
+
+# 一个 `steward up` 里换本体：控制台顶栏的 Scenario 下拉按本体分组，切到另一个本体的场景会
+# 重开 Episode、停掉旧运行时、拉起新本体的运行时（内置场景首次加载时自动构建）
+.venv/bin/steward up --scenario phase0-chores     # 控制台里加载 cobot-kitchen 即换成孪生
 
 # 加载指定 Scenario（默认 phase0-shuttle；也可用 phase0-kitchen 或 WH 生成的 llm-kitchen）
 .venv/bin/steward up --scenario llm-kitchen

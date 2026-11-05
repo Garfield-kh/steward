@@ -20,11 +20,13 @@ import math
 import queue
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from steward.authoring.service import AuthoringError, AuthoringService
+from steward.embodiments import scenario_embodiments
 from steward.glrender import IMAGE_FORMATS
 from steward.net import NO_CONTENT, Binary, HttpError, JsonServer, call, fetch
 from steward.observer.observer import Observer
@@ -76,6 +78,7 @@ class StewardHost:
         self.sim: WorldSim | None = None
         self.sensor_cameras = SensorCameras(self._require_sim)
         self.scenario: dict | None = None
+        self.embodiments: dict[str, dict] = {}
         self.observer = Observer(self._require_sim, run_dir, phase=lambda: self.phase, on_anomaly=self._perception_fault)
         self.pause_on_perception_fault = pause_on_perception_fault
         self.perception_alerts: list[dict] = []
@@ -87,6 +90,12 @@ class StewardHost:
         self.robot_servers: dict[str, JsonServer] = {}
         self._main_tasks: queue.Queue[_MainTask] = queue.Queue()
         self.ego_apis: dict[str, str] = {}
+        # Called with the scenario about to load, before the world it replaces stops, and again
+        # after it is up: `steward up` stops the Ego Runtimes of bodies that are leaving and
+        # starts the ones the new bodies need. Stopping first matters -- a runtime whose clock
+        # went backwards would otherwise begin a round against a scenario it is not built for.
+        self.before_episode_load: Callable[[dict], None] | None = None
+        self.on_episode_loaded: Callable[[], None] | None = None
         self.view_settings: ViewSettings | None = None
         renderer = WorldViewRenderer(lambda: self.sim)
         self.world_view = ViewLoop("world", renderer.render, renderer.close)
@@ -95,6 +104,9 @@ class StewardHost:
 
     # --------------------------------------------------------------- episodes
     def load_episode(self, name: str) -> dict:
+        # A builtin scenario the operator picked from the catalog is built on first use, so the
+        # console offers every body's scenes without a separate build command per root.
+        self.authoring.ensure_scenario(name)
         scenario = self.authoring.load_scenario(name)
         if scenario.get("phase"):
             phase_modules(scenario["phase"])  # a scenario declares the level it was built for; unknown ones fail here
@@ -107,10 +119,26 @@ class StewardHost:
                             perception=PerceptionConfig(mode=phase_modules(self.phase)["perception"],
                                                         masks=phase_modules(self.phase).get("masks", True)))
         self.scenario = scenario
+        self.embodiments = scenario_embodiments(scenario)
         self.observer.reset()
-        for rid in scenario["robots"]:
+        # The chat and the console name the robot the scenario actually has, not a fixed one.
+        robot_label = next(iter(scenario["robots"]), "robot-1").removeprefix("w:")
+        if "robot" in self.chat.agents:
+            self.chat.agents["robot"].label = robot_label
+        # A robot that left with the previous episode takes its port with it: the port is how
+        # clients reach a robot, and nothing is behind it once the robot is gone.
+        for rid in list(self.robot_servers):
+            if rid not in scenario["robots"]:
+                self.robot_servers.pop(rid).stop()
+                self.detach_ego_api(rid)
+        for index, rid in enumerate(scenario["robots"]):
             if rid not in self.robot_servers:
-                server = JsonServer(self._robot_routes(rid), port=self._robot_port_config.get(rid, 0), name=f"robot-{rid}",
+                port = self._robot_port_config.get(rid)
+                if port is None:
+                    # The configured fixed port goes to the scenario's first robot, whichever body
+                    # it is; any further robot of the same scenario takes a free one.
+                    port = self._robot_port_config.get("*", 0) if index == 0 else 0
+                server = JsonServer(self._robot_routes(rid), port=port, name=f"robot-{rid}",
                                     bind_wait_s=self.bind_wait_s)
                 self.robot_servers[rid] = server.start()
         return {"scenario": name, "robots": {rid: self.robot_servers[rid].url for rid in scenario["robots"]},
@@ -178,11 +206,22 @@ class StewardHost:
         else:
             time.sleep(timeout)
 
-    def attach_ego_api(self, robot: str, url: str) -> None:
-        """Relay the console's Ego-State view of ``robot`` from the Ego API at ``url``."""
+    def attach_ego_api(self, robot: str, url: str, skills: bool = True) -> None:
+        """Relay the console's Ego-State view of ``robot`` from the Ego API at ``url``.
+
+        ``skills`` says whether that Ego API also takes work (``/skill/*``); a body whose runtime
+        only publishes its belief is shown in the console, but an Ego Harness task addressed to it
+        is refused up front instead of failing on every tool call."""
         self.ego_apis[robot] = url
+        self.chat.robot_reason = None if skills else (
+            f"this robot's body publishes its Ego-State but takes no work: its Ego API has no "
+            f"skill endpoints, so an Ego Harness task has nothing to call")
         if self.view_settings is not None:
             self._configure_robot_view(url)
+
+    def detach_ego_api(self, robot: str) -> None:
+        """Stop relaying ``robot``'s Ego-State view (its Ego Runtime is gone or being replaced)."""
+        self.ego_apis.pop(robot, None)
 
     def start(self) -> StewardHost:
         self.wca.start()
@@ -219,10 +258,20 @@ class StewardHost:
             action = b.get("action")
             if action == "load":
                 def load() -> dict:
+                    if self.before_episode_load is not None:
+                        self.authoring.ensure_scenario(b["scenario"])
+                        self.before_episode_load(self.authoring.load_scenario(b["scenario"]))
                     result = self.load_episode(b["scenario"])
                     self.sim.start()
                     return result
-                return self.on_main(load)
+                result = self.on_main(load)
+                if self.on_episode_loaded is not None:
+                    try:
+                        self.on_episode_loaded()
+                    except Exception as exc:  # noqa: BLE001 - the world is up; say what is not
+                        raise HttpError(500, f"the episode is loaded but its robot runtime is not: "
+                                             f"{type(exc).__name__}: {exc}") from exc
+                return result
             if action == "reset":
                 sim = self._require_sim()
                 self.sensor_cameras.recordings.interrupt("Scene reset; start a new RGB recording")
@@ -309,7 +358,8 @@ class StewardHost:
             ("POST", "/scenes/compose"): guard(lambda q, b: a.compose_scene(b)),
             ("POST", "/scenes/render"): guard(lambda q, b: {"images": self.on_main(
                 lambda: a.render_scene_views(b["name"]))}),
-            ("GET", "/scenarios"): guard(lambda q, b: {"scenarios": a.list_scenarios()}),
+            ("GET", "/scenarios"): guard(lambda q, b: {"scenarios": a.list_scenarios(),
+                                                       "catalog": a.scenario_catalog()}),
             ("POST", "/scenarios/save"): guard(lambda q, b: a.save_scenario(b)),
             ("POST", "/wca/edit"): guard(lambda q, b: self.edit(b)),
             ("GET", "/wca/phase"): guard(lambda q, b: self.phase_state()),
@@ -490,6 +540,9 @@ class StewardHost:
 
         return {
             ("GET", "/sensors"): lambda q, b: self._require_sim().sensors(rid),
+            # The robot's own encoders without a perception sample: an Ego-State view polling
+            # them at frame rate must not advance the detector's noise stream.
+            ("GET", "/sensors/proprioception"): lambda q, b: self._require_sim().proprioception(rid),
             ("GET", "/sensors/rgbd"): lambda q, b: Binary(self._require_sim().rgbd(rid, camera_id(q)), "application/octet-stream"),
             ("GET", "/sensors/cameras"): lambda q, b: self.sensor_cameras.sensor_snapshot(rid),
             ("GET", "/sensors/kinematics"): lambda q, b: self.sensor_cameras.kinematics(rid),

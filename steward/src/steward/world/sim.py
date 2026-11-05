@@ -129,13 +129,54 @@ class _Hold:
 
 
 @dataclass
-class _RobotState:
-    entity_id: str
+class _GripState:
+    """Per-gripper ideal-grasp state; a robot has one entry per ``grasp-point`` link."""
     closed: bool = False
     attached: str | None = None
     rel: dict | None = None
     saved_contacts: dict[int, tuple[int, int]] = field(default_factory=dict)
-    handle: dict | None = None  # articulated grasp: {"entity", "link", "dof", "axis", "q0", "grip0", "lo", "hi"}
+    handle: dict | None = None  # articulated grasp: {"entity", "link", "dof", ..., "gripper": link id}
+
+
+@dataclass
+class _RobotState:
+    entity_id: str
+    grippers: dict[str, _GripState] = field(default_factory=dict)
+
+    def holding_any(self, entity_id: str) -> bool:
+        return any(g.attached == entity_id or (g.handle is not None and g.handle["entity"] == entity_id)
+                   for g in self.grippers.values())
+
+    @property
+    def attached(self) -> str | None:
+        """The object the robot is holding, for a body with one gripper (the arm's own state is
+        the authority for a multi-gripper body: read ``grippers[link].attached``)."""
+        held = [g.attached for g in self.grippers.values() if g.attached is not None]
+        return held[0] if len(held) == 1 else None
+
+
+def _gripper_links(ent) -> list[str]:
+    return [link.id for link in ent.rigid.links if any(a.value == "grasp-point" for a in link.affordances)]
+
+
+def _finger_joints(ent, gripper_link: str) -> list[tuple[str, float, float]]:
+    """Finger joints of a gripper: ``(joint id, closed target, open target)``.
+
+    A finger is a prismatic joint whose parent is the gripper link. Its closed position is 0 when
+    the range contains it (the Piper URDF has 0..0.05 and -0.05..0), so the open position is the
+    range end farthest from 0."""
+    out = []
+    for joint in ent.rigid.joints:
+        if joint.parent != gripper_link or joint.type.value != "prismatic":
+            continue
+        lo, hi = joint.limits.value["lo"], joint.limits.value["hi"]
+        closed = 0.0 if lo <= 0.0 <= hi else (lo if abs(lo) < abs(hi) else hi)
+        out.append((joint.id, closed, hi if closed == lo else lo))
+    return out
+
+
+def _robot_state(ent) -> _RobotState:
+    return _RobotState(ent.id, {lid: _GripState() for lid in _gripper_links(ent)})
 
 
 class WorldSim:
@@ -164,6 +205,7 @@ class WorldSim:
         self.paused = False
         self.events: list[dict] = []
         self._render_requests: queue.Queue[_RenderRequest] = queue.Queue()
+        self._realsegs: dict = {}  # robot id -> world.realseg.RealSegmenter, when enabled
         self._step_listeners = []
         self._load(self._initial_scene)
 
@@ -176,7 +218,7 @@ class WorldSim:
         self.model = self.build.compile()
         self.data = mujoco.MjData(self.model)
         self.build.apply_initial(self.model, self.data)
-        self.robots = {e.id: _RobotState(e.id) for e in self.template.entities if e.role == "robot"}
+        self.robots = {e.id: _robot_state(e) for e in self.template.entities if e.role == "robot"}
         for renderer in getattr(self, "_renderers", {}).values():
             close_renderer(renderer)
         self._epoch = getattr(self, "_epoch", 0) + 1
@@ -250,7 +292,7 @@ class WorldSim:
         if ent.role in ("robot", "environment"):
             raise EditError(f"{entity_id} is a {ent.role} and cannot be edited")
         for rs in self.robots.values():
-            if rs.attached == entity_id:
+            if rs.holding_any(entity_id):
                 raise EditError(f"{entity_id} is held by {rs.entity_id}")
         return ent
 
@@ -290,7 +332,7 @@ class WorldSim:
             carried = [r.a["entity"] for r in self._relations()
                        if r.type == "supported-by" and r.b["entity"] == entity_id and r.a["entity"] != entity_id]
             carried = [c for c in carried if self.template.entity(c).rigid.root.value == "free"
-                       and all(rs.attached != c for rs in self.robots.values())]
+                       and all(not rs.holding_any(c) for rs in self.robots.values())]
             saved = {eid: self._entity_pose(eid) for eid in [entity_id, *carried]}
             self._set_root_pose(ent, target)
             for cid in carried:
@@ -377,14 +419,15 @@ class WorldSim:
                 self.data.ctrl[a] = ctrl[name]
         self.data.time = sim_time
         self._index_bodies()
-        self.robots = {e.id: robots.get(e.id, _RobotState(e.id)) for e in scene.entities if e.role == "robot"}
+        self.robots = {e.id: robots.get(e.id, _robot_state(e)) for e in scene.entities if e.role == "robot"}
         for rs in self.robots.values():
-            rs.saved_contacts = {}
-            rs.handle = None
-            if rs.attached is not None and scene.find(rs.attached) is None:
-                rs.attached, rs.rel = None, None
-            if rs.attached is not None:
-                self._suspend_contacts(rs)
+            for g in rs.grippers.values():
+                g.saved_contacts = {}
+                g.handle = None
+                if g.attached is not None and scene.find(g.attached) is None:
+                    g.attached, g.rel = None, None
+                if g.attached is not None:
+                    self._suspend_contacts(rs, g)
         self._epoch += 1
         mujoco.mj_forward(self.model, self.data)
 
@@ -435,6 +478,8 @@ class WorldSim:
 
     def stop(self) -> None:
         self._running = False
+        for segmenter in self._realsegs.values():
+            segmenter.stop()
         if self._thread is not None:
             self._thread.join(timeout=2.0)
             self._thread = None
@@ -566,7 +611,8 @@ class WorldSim:
     # --------------------------------------------------------------- commands
     def command(self, robot_id: str, cmd: dict) -> dict:
         """Apply a robot actuator command: base [x, y, yaw], lift, reach, wrist_yaw, wrist_roll,
-        gripper "open"/"close"."""
+        gripper "open"/"close", or generic ``joints`` {joint id: target} for any actuated joint of
+        any embodiment, and ``gripper`` {grasp-point link id: "open"/"close"} for multi-gripper robots."""
         with self.lock:
             rs = self._robot(robot_id)
             names = self.build.names[robot_id]
@@ -576,14 +622,41 @@ class WorldSim:
             for joint in ("lift", "reach", "wrist_yaw", "wrist_roll"):
                 if joint in cmd:
                     self._set_ctrl(names.actuators[joint], cmd[joint])
+            for name, value in (cmd.get("joints") or {}).items():
+                if name not in names.actuators:
+                    raise KeyError(f"robot {robot_id!r} has no actuated joint {name!r}")
+                self._set_ctrl(names.actuators[name], float(value))
             if "gripper" in cmd:
-                if cmd["gripper"] == "close" and not rs.closed:
-                    rs.closed = True
-                    self._try_attach(rs)
-                elif cmd["gripper"] == "open" and rs.closed:
-                    rs.closed = False
-                    self._release(rs)
+                grip = cmd["gripper"]
+                wanted = dict(grip) if isinstance(grip, dict) else {self._sole_gripper(rs): grip}
+                for link_id, action in wanted.items():
+                    g = rs.grippers.get(link_id)
+                    if g is None:
+                        raise KeyError(f"robot {robot_id!r} has no gripper link {link_id!r}")
+                    if action == "close" and not g.closed:
+                        g.closed = True
+                        self._set_fingers(rs, link_id, closed=True)
+                        self._try_attach(rs, g, link_id)
+                    elif action == "open" and g.closed:
+                        g.closed = False
+                        self._set_fingers(rs, link_id, closed=False)
+                        self._release(rs, g)
             return {"ok": True, "t": self.time}
+
+    @staticmethod
+    def _sole_gripper(rs: _RobotState) -> str:
+        if len(rs.grippers) != 1:
+            raise KeyError(f"robot {rs.entity_id!r} has grippers {sorted(rs.grippers)}; address one by link id")
+        return next(iter(rs.grippers))
+
+    def _set_fingers(self, rs: _RobotState, gripper_link: str, closed: bool) -> None:
+        """Drive a gripper's finger joints to their closed or open target (no-op without fingers)."""
+        ent = self.template.entity(rs.entity_id)
+        names = self.build.names[rs.entity_id]
+        for joint_id, shut, open_ in _finger_joints(ent, gripper_link):
+            actuator = names.actuators.get(joint_id)
+            if actuator is not None:
+                self._set_ctrl(actuator, shut if closed else open_)
 
     def _set_ctrl(self, actuator: str, value: float) -> None:
         aid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, actuator)
@@ -597,15 +670,36 @@ class WorldSim:
             raise KeyError(f"unknown robot {robot_id!r}")
         return self.robots[robot_id]
 
-    def gripper_pose(self, robot_id: str) -> dict:
-        bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, self.build.names[robot_id].bodies["gripper"])
+    def gripper_pose(self, robot_id: str, gripper_link: str | None = None) -> dict:
+        rs = self._robot(robot_id)
+        if gripper_link is None:
+            gripper_link = self._sole_gripper(rs)
+        bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY,
+                                self.build.names[robot_id].bodies[gripper_link])
         return {"p": self.data.xpos[bid].tolist(), "q": self.data.xquat[bid].tolist()}
 
-    def _try_attach(self, rs: _RobotState) -> None:
+    def grasp_point(self, robot_id: str, gripper_link: str | None = None) -> dict:
+        """Where a gripper actually pinches: its link pose offset by a declared ``tcp-offset``.
+
+        A visual-only gripper (the mobile kitchen robot) declares none, so the pinch point is the
+        link origin; a real parallel gripper's fingers sit ahead of the wrist link."""
+        rs = self._robot(robot_id)
+        if gripper_link is None:
+            gripper_link = self._sole_gripper(rs)
+        pose = self.gripper_pose(robot_id, gripper_link)
+        ent = self.template.entity(robot_id)
+        link = ent.rigid.link(gripper_link)
+        for affordance in getattr(link, "affordances", []) or []:
+            value = affordance.value
+            if isinstance(value, dict) and "tcp-offset" in value:
+                return pose_compose(pose, value["tcp-offset"])
+        return pose
+
+    def _try_attach(self, rs: _RobotState, g: _GripState, gripper_link: str) -> None:
         """Ideal grasp: attach the nearest free object within capture range that has nothing resting
-        on it (the top of a stack) or is a pourable container (carried with what lies in it), or else grasp the
-        nearest drawer handle."""
-        grip = np.asarray(self.gripper_pose(rs.entity_id)["p"])
+        on or in it (the top of a stack) or is a pourable container (carried with what lies in it), or else
+        grasp the nearest drawer handle."""
+        grip = np.asarray(self.grasp_point(rs.entity_id, gripper_link)["p"])
         supporting = {r.b["entity"] for r in self._relations()
                       if r.type == "supported-by" and self.template.entity(r.a["entity"]).rigid.root.value == "free"}
         best, best_d, best_top = None, self.grasp.capture_radius, -math.inf
@@ -614,7 +708,7 @@ class WorldSim:
                 continue
             if ent.id in supporting and not (_is_pourable(ent) and not self._covered(ent.id)):
                 continue
-            if any(other.attached == ent.id for other in self.robots.values()):
+            if any(other.holding_any(ent.id) for other in self.robots.values()):
                 continue
             obb = entity_obb(self.model, self.data, self.build.names[ent.id])
             d = float(np.linalg.norm(np.asarray(obb.center) - grip))
@@ -628,7 +722,8 @@ class WorldSim:
         if best is None:
             handle = self._nearest_handle(grip)
             if handle is not None:
-                rs.handle = handle
+                handle["gripper"] = gripper_link
+                g.handle = handle
                 self.events.append({"t": self.time, "type": "grasp/handle", "robot": rs.entity_id,
                                     "entity": handle["entity"], "link": handle["link"]})
                 return
@@ -636,19 +731,19 @@ class WorldSim:
             return
         body = self._root_body(best)
         obj_pose = {"p": self.data.xpos[body].tolist(), "q": self.data.xquat[body].tolist()}
-        rs.attached = best
-        rs.rel = pose_compose(pose_inverse(self.gripper_pose(rs.entity_id)), obj_pose)
-        self._suspend_contacts(rs)
+        g.attached = best
+        g.rel = pose_compose(pose_inverse(self.gripper_pose(rs.entity_id, gripper_link)), obj_pose)
+        self._suspend_contacts(rs, g)
         self.events.append({"t": self.time, "type": "grasp/attach", "robot": rs.entity_id, "entity": best})
 
-    def _suspend_contacts(self, rs: _RobotState) -> None:
+    def _suspend_contacts(self, rs: _RobotState, g: _GripState) -> None:
         """A carried object moves with the gripper and stops colliding, so it never snags on what it
         is lifted from; a pourable container keeps colliding, so what lies in it stays in it."""
-        if _is_pourable(self.template.entity(rs.attached)):
+        if g.attached is None or _is_pourable(self.template.entity(g.attached)):
             return
         for gid in range(self.model.ngeom):
-            if self._body_entity.get(int(self.model.geom_bodyid[gid])) == rs.attached:
-                rs.saved_contacts[gid] = (int(self.model.geom_contype[gid]), int(self.model.geom_conaffinity[gid]))
+            if self._body_entity.get(int(self.model.geom_bodyid[gid])) == g.attached:
+                g.saved_contacts[gid] = (int(self.model.geom_contype[gid]), int(self.model.geom_conaffinity[gid]))
                 self.model.geom_contype[gid] = 0
                 self.model.geom_conaffinity[gid] = 0
 
@@ -695,54 +790,58 @@ class WorldSim:
     def _drive_handles(self) -> None:
         """A grasped drawer follows the gripper along its slide axis (PD force on the slide joint)."""
         for rs in self.robots.values():
-            h = rs.handle
-            if h is None:
-                continue
-            grip = np.asarray(self.gripper_pose(rs.entity_id)["p"])
-            target = min(max(h["q0"] + float((grip - np.asarray(h["grip0"])) @ np.asarray(h["axis"])), h["lo"]), h["hi"])
-            q, qd = self.data.qpos[h["qadr"]], self.data.qvel[h["dof"]]
-            self.data.qfrc_applied[h["dof"]] = self.grasp.handle_kp * (target - q) - self.grasp.handle_kd * qd
+            for g in rs.grippers.values():
+                h = g.handle
+                if h is None:
+                    continue
+                grip = np.asarray(self.grasp_point(rs.entity_id, h["gripper"])["p"])
+                target = min(max(h["q0"] + float((grip - np.asarray(h["grip0"])) @ np.asarray(h["axis"])), h["lo"]), h["hi"])
+                q, qd = self.data.qpos[h["qadr"]], self.data.qvel[h["dof"]]
+                self.data.qfrc_applied[h["dof"]] = self.grasp.handle_kp * (target - q) - self.grasp.handle_kd * qd
 
-    def _release_handle(self, rs: _RobotState) -> None:
-        h = rs.handle
+    def _release_handle(self, rs: _RobotState, g: _GripState) -> None:
+        h = g.handle
         self.data.qfrc_applied[h["dof"]] = 0.0
         self.events.append({"t": self.time, "type": "grasp/handle-release", "robot": rs.entity_id,
                             "entity": h["entity"], "link": h["link"]})
-        rs.handle = None
+        g.handle = None
 
-    def _release(self, rs: _RobotState) -> None:
-        if rs.handle is not None:
-            self._release_handle(rs)
-        if rs.attached is None:
+    def _release(self, rs: _RobotState, g: _GripState) -> None:
+        if g.handle is not None:
+            self._release_handle(rs, g)
+        if g.attached is None:
             return
-        for gid, (ct, ca) in rs.saved_contacts.items():
+        for gid, (ct, ca) in g.saved_contacts.items():
             self.model.geom_contype[gid] = ct
             self.model.geom_conaffinity[gid] = ca
-        jadr = self._free_joint_dof(rs.attached)
+        jadr = self._free_joint_dof(g.attached)
         self.data.qvel[jadr : jadr + 6] = 0.0
-        self.events.append({"t": self.time, "type": "grasp/release", "robot": rs.entity_id, "entity": rs.attached})
-        rs.attached, rs.rel, rs.saved_contacts = None, None, {}
+        self.events.append({"t": self.time, "type": "grasp/release", "robot": rs.entity_id, "entity": g.attached})
+        g.attached, g.rel, g.saved_contacts = None, None, {}
 
     def _follow_attached(self) -> None:
         """Move each held object rigidly with its gripper. It also takes the gripper's velocity, so
         contacts carry what lies in a held container instead of letting it pass through."""
         for rs in self.robots.values():
-            if rs.attached is None:
-                continue
-            grip = self.gripper_pose(rs.entity_id)
-            target = pose_compose(grip, rs.rel)
-            jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, self.build.names[rs.attached].root_joints[0])
-            qadr = self.model.jnt_qposadr[jid]
-            self.data.qpos[qadr : qadr + 3] = target["p"]
-            self.data.qpos[qadr + 3 : qadr + 7] = target["q"]
-            dadr = self.model.jnt_dofadr[jid]
-            gid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, self.build.names[rs.entity_id].bodies["gripper"])
-            vel = np.zeros(6)
-            mujoco.mj_objectVelocity(self.model, self.data, mujoco.mjtObj.mjOBJ_BODY, gid, vel, 0)
-            omega, v_grip = vel[:3], vel[3:]
-            arm = np.asarray(target["p"]) - np.asarray(grip["p"])
-            self.data.qvel[dadr : dadr + 3] = v_grip + np.cross(omega, arm)
-            self.data.qvel[dadr + 3 : dadr + 6] = matrix_from_quat(target["q"]).T @ omega
+            for gripper_link, g in rs.grippers.items():
+                if g.attached is None:
+                    continue
+                grip = self.gripper_pose(rs.entity_id, gripper_link)
+                target = pose_compose(grip, g.rel)
+                jid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT,
+                                        self.build.names[g.attached].root_joints[0])
+                qadr = self.model.jnt_qposadr[jid]
+                self.data.qpos[qadr : qadr + 3] = target["p"]
+                self.data.qpos[qadr + 3 : qadr + 7] = target["q"]
+                dadr = self.model.jnt_dofadr[jid]
+                gid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY,
+                                        self.build.names[rs.entity_id].bodies[gripper_link])
+                vel = np.zeros(6)
+                mujoco.mj_objectVelocity(self.model, self.data, mujoco.mjtObj.mjOBJ_BODY, gid, vel, 0)
+                omega, v_grip = vel[:3], vel[3:]
+                arm = np.asarray(target["p"]) - np.asarray(grip["p"])
+                self.data.qvel[dadr : dadr + 3] = v_grip + np.cross(omega, arm)
+                self.data.qvel[dadr + 3 : dadr + 6] = matrix_from_quat(target["q"]).T @ omega
 
     def _root_body(self, entity_id: str) -> int:
         names = self.build.names[entity_id]
@@ -774,7 +873,10 @@ class WorldSim:
                         joint.q = exact([float(self.data.qpos[self.model.jnt_qposadr[jid]])])
                         joint.qd = exact([float(self.data.qvel[self.model.jnt_dofadr[jid]])])
                 if ent.id in self.robots:
-                    ent.state_vars["gripper"] = exact("closed" if self.robots[ent.id].closed else "open")
+                    rs = self.robots[ent.id]
+                    if len(rs.grippers) == 1:
+                        ent.state_vars["gripper"] = exact("closed" if next(iter(rs.grippers.values())).closed else "open")
+                    # multi-gripper robots surface per-gripper state via /sensors instead
             scene.relations = self._relations()
             scene.version = self.step_count
             scene.stamp = self.time
@@ -787,9 +889,10 @@ class WorldSim:
     def _relations(self) -> list[Relation]:
         rels: list[Relation] = []
         for rs in self.robots.values():
-            if rs.attached is not None:
-                rels.append(Relation(type="attached", a={"entity": rs.attached}, b={"entity": rs.entity_id, "link": "gripper"},
-                                     mode="rigid", derived=False))
+            for gripper_link, g in rs.grippers.items():
+                if g.attached is not None:
+                    rels.append(Relation(type="attached", a={"entity": g.attached},
+                                         b={"entity": rs.entity_id, "link": gripper_link}, mode="rigid", derived=False))
         seen = set()
         for c in range(self.data.ncon):
             con = self.data.contact[c]
@@ -837,11 +940,11 @@ class WorldSim:
             sensor_id = cameras[0]["id"]
         for link in ent.rigid.links:
             for sensor in link.sensors:
-                if sensor["id"] == sensor_id:
+                if sensor.get("kind") in ("rgb", "depth", "rgbd") and (sensor_id is None or sensor["id"] == sensor_id):
                     bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, self.build.names[robot_id].bodies[link.id])
                     body_pose = {"p": self.data.xpos[bid].tolist(), "q": self.data.xquat[bid].tolist()}
                     return pose_compose(body_pose, sensor["mount"]), sensor
-        raise KeyError(f"robot {robot_id} has no sensor {sensor_id}")
+        raise KeyError(f"robot {robot_id} has no sensor {sensor_id!r}")
 
     def sensors(self, robot_id: str) -> dict:
         """One sensor frame for a robot: odometry, joint encoders, gripper, its cameras and, without
@@ -850,7 +953,8 @@ class WorldSim:
         with self.lock:
             rs = self._robot(robot_id)
             names = self.build.names[robot_id]
-            x, y, yaw = (self._joint_q(j) for j in names.root_joints)
+            roots = names.root_joints
+            x, y, yaw = ((self._joint_q(j) for j in roots) if roots else (0.0, 0.0, 0.0))
             p = self.perception
             rng = self._sensor_rng(robot_id, "body")
             odom = {
@@ -861,15 +965,19 @@ class WorldSim:
             }
             joints = {jid: self._joint_q(jname) for jid, jname in names.joints.items()}
             cameras = self.robot_cameras(robot_id)
+            grips = {lid: {"state": "closed" if g.closed else "open",
+                           "holding": g.attached is not None or g.handle is not None,
+                           "holdingHandle": g.handle is not None}
+                     for lid, g in rs.grippers.items()}
             frame = {
                 "stamp": self.time,
                 "odometry": odom,
                 "joints": joints,
-                "gripper": {"state": "closed" if rs.closed else "open",
-                            "holding": rs.attached is not None or rs.handle is not None,
-                            "holdingHandle": rs.handle is not None},
+                "grippers": grips,
                 "cameras": [{"id": c["id"], "intrinsics": c["intrinsics"]} for c in cameras],
             }
+            if len(grips) == 1:
+                frame["gripper"] = next(iter(grips.values()))
             if self.perception.mode == "rgbd":
                 frame["imaging"] = "rgbd"
                 frame["masks"] = self.perception.masks
@@ -878,6 +986,30 @@ class WorldSim:
                 frame["detections"] = [det for c in cameras
                                        for det in self._detections(robot_id, *self.camera_pose(robot_id, c["id"]), seen,
                                                                    self._sensor_rng(robot_id, f"detect/{c['id']}"))]
+            return frame
+
+    def proprioception(self, robot_id: str) -> dict:
+        """The robot's own joint encoders and gripper states, with no exteroceptive fields.
+
+        This is what the Ego-State view's self part is built from, so it deliberately does not
+        touch the perception noise stream: a console watching the robot must not change what the
+        robot believes. ``gripper`` summarises both grippers of a dual-arm robot -- ``grippers``
+        carries them per link for anything that needs to tell the arms apart."""
+        with self.lock:
+            rs = self._robot(robot_id)
+            names = self.build.names[robot_id]
+            joints = {jid: self._joint_q(jname) for jid, jname in names.joints.items()}
+            grips = {lid: {"state": "closed" if g.closed else "open",
+                           "holding": g.attached is not None or g.handle is not None,
+                           "holdingHandle": g.handle is not None}
+                     for lid, g in rs.grippers.items()}
+            frame = {"stamp": self.time, "joints": joints, "grippers": grips}
+            if len(grips) == 1:
+                frame["gripper"] = next(iter(grips.values()))
+            else:
+                frame["gripper"] = {"state": "closed" if any(g["state"] == "closed" for g in grips.values()) else "open",
+                                    "holding": any(g["holding"] for g in grips.values()),
+                                    "holdingHandle": any(g["holdingHandle"] for g in grips.values())}
             return frame
 
     def _sensor_rng(self, robot_id: str, channel: str) -> np.random.Generator:
@@ -899,12 +1031,39 @@ class WorldSim:
         return [(ent.id, rest, ent.category.value)] + [(f"{ent.id}/{d}", [d], "drawer") for d in drawers]
 
     def rgbd(self, robot_id: str, sensor_id: str | None = None, timeout: float = 10.0) -> bytes:
+        """One RGB-D frame of a robot camera (``sensor_id`` None: the primary one). With
+        ``STEWARD_SEGMENTER_URL`` set the masks come from the real segmenter worker instead of
+        the synthetic channel (see :mod:`steward.world.realseg`); each frame is long-polled and
+        served exactly once, and the segmenter observes the primary camera. See :meth:`_rgbd_render`
+        for the frame format."""
+        segmenter = self._realseg(robot_id)
+        if segmenter is not None:
+            blob = segmenter.get(timeout - 2.0)
+            if blob is not None:
+                return blob
+        return self._rgbd_render(robot_id, sensor_id, timeout)
+
+    def _realseg(self, robot_id: str):
+        """The robot's real-segmentation worker, or None unless STEWARD_SEGMENTER_URL is set."""
+        import os
+
+        url = os.environ.get("STEWARD_SEGMENTER_URL")
+        if not url:
+            return None
+        if robot_id not in self._realsegs:
+            from steward.world.realseg import RealSegmenter
+
+            self._realsegs[robot_id] = RealSegmenter(self, robot_id, url)
+            self._realsegs[robot_id].start()
+        return self._realsegs[robot_id]
+
+    def _rgbd_render(self, robot_id: str, sensor_id: str | None = None, timeout: float = 10.0) -> bytes:
         """One RGB-D frame of a robot camera (``sensor_id`` None: the primary one) as compressed
         ``npz`` bytes: ``camera`` (its sensor id), ``rgb`` (H, W, 3)
         uint8, ``depth`` (H, W) uint16 millimetres (0 = no reading), ``mask`` (H, W) uint8 anonymous
         instance ids (0 = background; ids are shuffled every frame and carry no World State
         identity; absent when ``PerceptionConfig.masks`` is off), ``fovy`` and ``header`` (JSON:
-        stamp, odometry, joints, gripper).
+        stamp, odometry, joints, gripper(s)).
 
         Rendering runs on the main thread like :meth:`render`."""
         if sensor_id is not None and sensor_id not in {c["id"] for c in self.robot_cameras(robot_id)}:
@@ -1186,7 +1345,10 @@ class WorldSim:
                 "speed": speed_json(self.speed),
                 "freezeIdle": self.freeze_idle,
                 "entities": [{"id": e.id, "category": e.category.value, "role": e.role} for e in self.template.entities],
-                "robots": {rid: {"holding": rs.attached, "gripper": "closed" if rs.closed else "open"}
+                "robots": {rid: {"holding": next((g.attached for g in rs.grippers.values() if g.attached), None),
+                                 "gripper": "closed" if any(g.closed for g in rs.grippers.values()) else "open",
+                                 "grippers": {lid: {"holding": g.attached, "state": "closed" if g.closed else "open"}
+                                              for lid, g in rs.grippers.items()}}
                            for rid, rs in self.robots.items()},
                 "events": self.events[-20:],
             }

@@ -42,6 +42,38 @@ def _find(summary: dict, category: str, min_probability: float = 0.25) -> dict |
     return max(cands, key=lambda o: (o["categories"][category], -o["uncertaintyM"])) if cands else None
 
 
+def _refresh(api: str, obj: dict) -> dict:
+    """The same object, as the ego state knows it now.
+
+    The estimator renumbers a track whenever it merges or rebuilds it, so an id held across a
+    navigation or a prediction can name something that no longer exists. Take over whatever of
+    the same role (or of the same size, for furniture whose label went missing) stands where this
+    one stood."""
+    objects = call("GET", f"{api}/ego/summary")["objects"]
+    found = next((o for o in objects if o["id"] == obj["id"]), None)
+    if found is not None:
+        return found
+    pos = obj.get("position")
+    if pos is not None:
+        role = obj.get("role", obj.get("category"))
+        size = obj.get("sizeM") or [0.0, 0.0]
+        reach = 0.6 if max(size[:2]) >= 0.5 else 0.25
+        same = [o for o in objects if o["existence"] >= 0.5
+                and role in (o.get("role"), o["category"])
+                and math.dist(o["position"][:2], pos[:2]) <= reach]
+        if same:
+            return min(same, key=lambda o: math.dist(o["position"][:2], pos[:2]))
+        if max(size[:2]) >= 0.5:
+            # The label can go missing before the thing does: a table seen only as its top slab
+            # is re-read as "unknown" in the same place with the same footprint.
+            there = [o for o in objects if o["existence"] >= 0.5
+                     and max((o.get("extentM") or o["sizeM"])[:2]) >= 0.4
+                     and math.dist(o["position"][:2], pos[:2]) <= reach]
+            if there:
+                return min(there, key=lambda o: math.dist(o["position"][:2], pos[:2]))
+    raise MissionFailed(f"{obj['id']} ({obj['category']}) is no longer in the ego state")
+
+
 def simtime_sleep(api: str, seconds: float) -> None:
     """Let ``seconds`` of world time pass, e.g. for perception to settle after a motion."""
     call("POST", f"{api}/clock/sleep", {"seconds": seconds}, timeout=3600.0)
@@ -92,6 +124,11 @@ def _safe_receipt(api: str, skill: str, params: dict, observe: dict, log: list) 
     """Predict a skill; when it is above the risk limit or needs a better view, move closer to
     ``observe`` (the object or surface concerned) and predict again until it is safe."""
     first = call("POST", f"{api}/ego/predict", {"skill": skill, "params": params})
+    if not first["feasible"] and params.get("target") and any("unknown target" in i for i in first["issues"]):
+        # The id was renumbered between choosing the object and planning the pick.
+        fresh = _refresh(api, observe)
+        params = {**params, "target": fresh["id"]}
+        first = call("POST", f"{api}/ego/predict", {"skill": skill, "params": params})
     if first["withinRiskLimit"]:
         return first
     if not first["feasible"] and any(b.get("movable") for b in first.get("blockers", [])):
@@ -103,6 +140,10 @@ def _safe_receipt(api: str, skill: str, params: dict, observe: dict, log: list) 
 
 
 def _move(api: str, obj: dict, support: dict, log: list, timeout_s: float) -> None:
+    try:
+        _approach_to_observe(api, obj, distance=0.9)  # look before moving: fresh look needs the distance
+    except MissionFailed:
+        pass
     pick = _safe_receipt(api, "pick", {"target": obj["id"]}, obj, log)
     log.append({"step": "pick", "target": obj["id"], "risk": pick["risk"], "message": _run(api, pick, timeout_s)["message"]})
     place = _safe_receipt(api, "place", {"on": support["id"]}, support, log)

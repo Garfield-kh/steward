@@ -38,6 +38,7 @@ SHAPES: dict[str, dict] = {
     "perfume_bottle": {"dims": (0.065, 0.04, 0.10), "floor": False, "color": "pink"},
 }
 
+FLAT = 0.05  # a region thinner than this that is not on the floor is a top surface, not a height
 UNDER = (0.55, 1.2, 0.55)  # tolerance (log ratio) per axis for measuring less than the prototype; the
 # short side is usually the depth seen from the front, so it may come out much thinner
 OVER = 0.25  # tolerance for measuring more (1 cm voxels, depth noise, overhangs)
@@ -89,9 +90,16 @@ def classify(size: np.ndarray, bottom: float, color: np.ndarray, invalid_frac: f
     scores = {}
     on_floor = bottom < 0.06
     top = bottom + seen[2]
+    # Seen straight down, a tabletop is a thin plate at table height: its legs are underneath it and
+    # its sides are hidden, so the measured height is the top's thickness. For a prototype that
+    # stands on the floor, such a region is compared by the height it reaches instead -- without
+    # this the one camera that can see a whole tabletop calls the table "unknown", and the Ego
+    # State has its tableware resting on nothing.
+    flat = seen[2] < FLAT and not on_floor
     for name, shape in SHAPES.items():
         proto = np.array(shape["dims"], float)
-        obs = seen if bottom_seen or not shape["floor"] else np.array([seen[0], seen[1], max(seen[2], top)])
+        reaches_down = (not bottom_seen or (flat and shape["floor"]))
+        obs = np.array([seen[0], seen[1], max(seen[2], top)]) if reaches_down else seen
         lo, hi = shape.get("scale", (1.0, 1.0))
         # One scale for the whole object, set by the axis that fills the prototype most: a partial
         # view only shrinks the other axes, which costs little, while a flat wide region cannot pass
@@ -101,7 +109,7 @@ def classify(size: np.ndarray, bottom: float, color: np.ndarray, invalid_frac: f
         for k in range(3):
             r = math.log(obs[k] / (proto[k] * scale))
             cost += (r / UNDER[k]) ** 2 if r < 0 else (r / OVER) ** 2
-        if bottom_seen and shape["floor"] != on_floor:
+        if bottom_seen and not reaches_down and shape["floor"] != on_floor:
             cost += 6.0
         if bottom_seen and bottom < shape.get("min_bottom", -1.0):
             cost += 6.0

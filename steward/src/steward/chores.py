@@ -26,6 +26,7 @@ from steward.mission import (
     MissionFailed,
     _approach_to_observe,
     _explore,
+    _refresh,
     _run,
     _safe_receipt,
     _wait_for_control,
@@ -37,6 +38,7 @@ from steward.net import HttpError, call
 TABLEWARE = ("bowl", "wine_glass", "mug", "cup")
 ROW_GAP = 0.06
 FLOOR_LEVEL_M = 0.15  # tableware whose base is lower than this lies on the floor
+FRESH_S = 45.0  # a piece planned into today's row must have been seen this recently
 TABLE_ROW_Y = 0.18
 VIEW_DISTANCE = 1.1
 
@@ -49,6 +51,23 @@ def _objects(summary: dict, category: str) -> list[dict]:
     """Objects whose role is ``category``: the scene-level reading, so that furniture or tableware
     whose own best category is a look-alike (a sideboard read as a counter) is still found."""
     return [o for o in summary["objects"] if o.get("role", o["category"]) == category and o["existence"] >= 0.5]
+
+
+def _fresh_objects(summary: dict, category: str) -> list[dict]:
+    """Objects of a category that were seen recently enough to act on.
+
+    A track outlives the view it came from: last seen a couple of minutes ago, at the pose the
+    robot had then, it still reads as tableware in the ego state. Planning a pick on it spends
+    the attempt on empty space. Everything the next minutes are planned around — the pieces to
+    arrange, the bowls to stack — has just been looked at from close by, so age is a cheap and
+    honest filter."""
+    return [o for o in _objects(summary, category) if o.get("lastSeenAgoS", 0.0) <= FRESH_S]
+
+
+def _supported_first(objects: list[dict]) -> list[dict]:
+    """The objects known to stand on something, or all of them when nothing is."""
+    supported = [o for o in objects if o.get("on") is not None]
+    return supported or objects
 
 
 def _one(summary: dict, category: str) -> dict:
@@ -69,11 +88,17 @@ def _width(obj: dict) -> float:
 
 
 def tableware(summary: dict) -> list[dict]:
-    """Tableware tracks ordered from the smallest to the largest footprint. Anything lying on the
-    floor is left out: a flat thing on the floor read as a bowl or plate (a mat, a marker) would
-    otherwise be picked up and arranged as tableware every round."""
-    items = [o for cat in TABLEWARE for o in _objects(summary, cat) if _bottom(o) >= FLOOR_LEVEL_M]
-    return sorted(items, key=_area)
+    """Tableware tracks ordered from the smallest to the largest footprint.
+
+    Things that cost a pick per round and never yield are left out: what lies on the floor (a flat
+    thing on the floor read as a bowl or plate is a mat or a marker), what has not been seen for a
+    while (a track outlives the view it came from), and what stands on nothing (a cup at table
+    height with no support under it is a corner of a wall or the edge of a leg). When no support
+    surface has been read at all, nothing is supported, and then all of them are kept rather than
+    none."""
+    items = [o for cat in TABLEWARE for o in _fresh_objects(summary, cat) if _bottom(o) >= FLOOR_LEVEL_M]
+    supported = [o for o in items if o.get("on") is not None]
+    return sorted(supported or items, key=_area)
 
 
 def _bottom(obj: dict) -> float:
@@ -118,32 +143,69 @@ def _local(support: dict, xy: list[float]) -> tuple[float, float]:
     return c * dx - s * dy, s * dx + c * dy
 
 
-def _refresh(api: str, obj: dict) -> dict:
-    found = next((o for o in _summary(api)["objects"] if o["id"] == obj["id"]), None)
-    if found is None:
-        raise MissionFailed(f"{obj['id']} ({obj['category']}) is no longer in the ego state")
-    return found
-
-
 def _move(api: str, obj: dict, place: dict, observe: dict, log: list, timeout_s: float, attempts: int = 2) -> dict:
     """Pick ``obj`` (observing it again and retrying after a missed grasp) and place it with
     ``place`` params; return the place job."""
     for attempt in range(attempts):
+        # Look before moving: from here the class-prompted fresh look at pick time sees the
+        # object whole (below ~0.4 m every prompt fails), and the receipt is predicted from the
+        # pose the pick really starts at. A failed approach is not a failed pick — the robot
+        # just looks from where it stands.
+        try:
+            _approach_to_observe(api, obj, distance=0.9)
+        except MissionFailed:
+            pass
+        # The approach takes seconds, and with a real segmenter a track can be renumbered while
+        # the robot drives: the id planned from is not the id that exists now. Adopt whatever of
+        # the same role stands there before asking for a pick of it.
+        obj = _refresh(api, obj)
         pick = _safe_receipt(api, "pick", {"target": obj["id"]}, obj, log)
         try:
             _run(api, pick, timeout_s)
             break
         except MissionFailed as exc:
-            if attempt + 1 == attempts or "missed" not in str(exc) and "not closing" not in str(exc):
+            # A missed grasp is worth a second look and a second try; an infeasible approach or a
+            # blocked path is not, and repeating it only spends the round's time.
+            if attempt + 1 == attempts or not any(w in str(exc) for w in ("missed", "not closing", "re-plan")):
                 raise
             log.append({"step": "pick-retry", "object": obj["id"], "error": str(exc)})
-            _approach_to_observe(api, obj)
             obj = _refresh(api, obj)
     receipt = _safe_receipt(api, "place", place, observe, log)
     job = _run(api, receipt, timeout_s)
     log.append({"step": "place", "object": obj["id"], **place})
     simtime_sleep(api, 0.8)
     return job
+
+
+def _safe_explore(api: str, timeout_s: float) -> str:
+    """One look around for the opening of a round; the state it leaves behind, or the reason
+    it could not be taken. The first task approaches and observes its own target anyway, so a
+    failed opening look must not keep the round from starting."""
+    try:
+        return _explore(api, timeout_s)["state"]
+    except (MissionFailed, HttpError) as exc:
+        return f"failed: {exc}"
+
+
+def _settle(api: str, seconds: float = 45.0, want: int = 2) -> dict:
+    """Wait for the belief to hold a room before planning against it.
+
+    A real segmenter delivers a frame every few seconds, so the ego state right after an
+    exploration contains a corner of the room and little else; a round planned on it fails on its
+    own emptiness ("no table in the ego state", "one piece of tableware"). Nothing is moved here:
+    the robot looks, and the round starts once there is something to plan about."""
+    deadline = time.monotonic() + seconds
+    s: dict = {"objects": [], "relations": []}
+    while time.monotonic() < deadline:
+        try:
+            s = _summary(api)
+        except (HttpError, OSError):
+            time.sleep(2.0)  # the robot is not answering yet; the phases report a dead API themselves
+            continue
+        if _objects(s, "table") and len(tableware(s)) >= want:
+            return s
+        time.sleep(2.0)
+    return s
 
 
 def _view(api: str, furniture: dict, timeout_s: float) -> None:
@@ -216,6 +278,10 @@ class Chores:
     def _clear(self, phase: str, blocker: dict) -> None:
         """Carry a blocking floor object to a parking spot out of the way."""
         obj = _refresh(self.api, {"id": blocker["id"], "category": blocker["category"]})
+        try:
+            _approach_to_observe(self.api, obj, distance=0.9)
+        except MissionFailed:
+            pass
         spots = blocker.get("parkAt") or []
         if not spots:
             raise MissionFailed(f"{blocker['id']} ({blocker['category']}) is in the way and there is no free spot to move it to")
@@ -319,9 +385,15 @@ class Chores:
         # Plan the row only after a close look: a transparent glass is not detected in every frame.
         _approach_to_observe(self.api, table, distance=1.3)
         simtime_sleep(self.api, 2.0)
-        s = _summary(self.api)
+        s = _settle(self.api, seconds=25.0)
         table = _refresh(self.api, table)
         items = tableware(s)
+        # The task is to arrange what stands on the table. When at least two pieces are seen
+        # resting on it, those are the row — a fragment of the tabletop's edge that happens to
+        # read as a bowl has no support and stays out.
+        on_table = [o for o in items if o.get("on") == table["id"]]
+        if len(on_table) >= 2:
+            items = on_table
         if len(items) < 2:
             raise MissionFailed(f"only {len(items)} pieces of tableware are known")
         offsets = row_offsets([_width(o) for o in items])
@@ -342,8 +414,14 @@ class Chores:
     def stack_on_sideboard(self) -> None:
         board = self._confirmed("sideboard")
         s = _summary(self.api)
-        bowls = sorted(_objects(s, "bowl"), key=_area, reverse=True)
-        others = sorted([o for cat in TABLEWARE if cat != "bowl" for o in _objects(s, cat)], key=_area, reverse=True)
+        # A piece standing on nothing is a fragment of a wall corner, not a bowl — but when the
+        # support surface itself has not been read yet, no piece has one, and dropping them all
+        # would leave nothing to stack. Prefer supported pieces; fall back to all of them.
+        bowls = _supported_first(_fresh_objects(s, "bowl"))
+        others = _supported_first([o for cat in TABLEWARE if cat != "bowl"
+                                   for o in _fresh_objects(s, cat)])
+        bowls = sorted(bowls, key=_area, reverse=True)
+        others = sorted(others, key=_area, reverse=True)
         widths = ([_width(bowls[0])] if bowls else []) + [_width(o) for o in others]
         offsets = row_offsets(widths, gap=0.08)
         slot = iter(offsets)
@@ -573,7 +651,8 @@ def chores(api: str, rounds: int, on_step=None, on_phase=None, on_failure=None, 
     """
     runner = Chores(api, timeout_s, on_step)
     runner.publish(current="开局：环顾一周，建立对房间的感知")
-    runner.log.append({"step": "explore", "state": _explore(api, timeout_s)["state"]})
+    runner.log.append({"step": "explore", "state": _safe_explore(api, timeout_s)})
+    _settle(api)  # a slow segmenter needs a few frames before there is a room to plan in
     completed = []
     streak: dict[str, tuple[str, int]] = {}
     failures = 0  # consecutive failed phases, whatever their reasons

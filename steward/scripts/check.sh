@@ -14,7 +14,7 @@ VAR="${STEWARD_DSH_VAR:-$STEWARD/var/dsh}"
 SNAPSHOTS="$STEWARD/compat/snapshots"
 
 echo "== python"
-(cd "$STEWARD" && .venv/bin/pytest -q)
+(cd "$STEWARD" && .venv/bin/python -m pytest -q)
 
 echo "== dsh plugins"
 (cd "$STEWARD/dsh" && pnpm run build && node --test test/*.test.mjs)

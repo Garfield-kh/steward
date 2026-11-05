@@ -94,6 +94,15 @@ def test_the_goal_counts_neighbours_in_place_wherever_and_however_turned_the_pic
     sim.step_seconds(0.3)
     report = evaluate(scenario["goal"], sim._entity_pose)
     assert report["largestGroup"] == 8 and report["satisfied"] == 10 and not report["complete"]
+    # each constraint carries its own error, so a caller sees which seam is off by how much
+    by_pair = {(e["a"], e["b"]): e for e in report["errors"]}
+    assert len(report["errors"]) == len(scenario["goal"]["constraints"])
+    assert all(e["satisfied"] for pair, e in by_pair.items() if "w:piece-22" not in pair)
+    assert all(0.0 <= e["positionErrM"] <= 0.03 and e["yawErrDeg"] <= 15.0
+               for e in by_pair.values() if e["satisfied"])
+    missing = [e for pair, e in by_pair.items() if "w:piece-22" in pair]
+    assert len(missing) == 2 and not any(e["satisfied"] for e in missing)
+    assert all(e["positionErrM"] > 0.03 for e in missing)
 
 
 def test_a_pourable_box_is_grasped_with_its_contents_only_without_its_lid_and_carries_them(kitchen_root):
@@ -183,7 +192,7 @@ def test_a_face_the_camera_cannot_see_is_explained_from_the_camera_geometry():
     est = EgoEstimator(robot_model=steward_bot().to_dict())
     est.odometry = {"x": 0.0, "y": 0.0, "yaw": 0.0, "sigma": {"pos": 0.003, "yaw": 0.003}}
     cam = est.camera_pose()
-    intrinsics = est._camera["intrinsics"]
+    intrinsics = est.camera_intrinsics()
     lowest = math.radians(30.0 + intrinsics["fovy"] / 2)  # the head camera looks 30° down
 
     def hint(dx, dy):

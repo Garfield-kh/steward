@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import collections
 import io
+import contextlib
 import itertools
 import math
 import os
@@ -22,12 +23,13 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from steward.ego.classify import classify
 from steward.ego.perception import (box_of, decode_rgbd, match_face, resample_face, segments, top_face, top_face_array,
                                     world_up_face)
+from steward.ego.kinematics import gripper_pose
 from steward.ego.esim import Esim, EsimConfig
 from steward.ego.estimator import SELF_ID, EgoEstimator
 from steward.ego.roles import RoleConfig, assign_roles
+from steward.ego.segmenter import Segmenter, SegmenterError
 from steward.ego.skills import MotionConfig, SkillExecutor, SkillFailed
 from steward.ego.view import EgoViewRenderer
 from steward.math3d import matrix_from_quat, pose_compose, pose_inverse, quat_rotate, wrap_angle, yaw_from_quat
@@ -47,16 +49,6 @@ class RuntimeConfig:
     appearance_poll_s: float = 1.0  # wall time between camera images fetched for faces with detections
     appearance_min_coverage: float = 0.25  # a view showing less of a face is not kept
     max_risk: float = 0.35
-    # Anonymous mask frontend after RGB-D decode:
-    #   "geo_sam3"  — geometric ∪ SAM3 (kitchen ablation best recall); on failure keep oracle (default)
-    #   "sam3"      — SAM3 PCS only; on failure keep sensor oracle
-    #   "geometric" — depth clustering only
-    #   "keep"      — leave sensor / world mask unchanged
-    # Override with env STEWARD_MASK_SOURCE; SAM3 URL via STEWARD_SAM3_URL.
-    # World still ships oracle masks; Ego upgrades when SAM3 works.
-    mask_source: str = "geo_sam3"
-    sam3_url: str | None = None
-    sam3_threshold: float = 0.28
     # A grasp verifies itself and a miss costs one retreat, so a pick may be tried at a risk that
     # would be reckless for a move through the room or a release over a surface.
     max_pick_risk: float = 0.6
@@ -69,6 +61,35 @@ class RuntimeConfig:
     relocate_max_dz_m: float = 0.12  # an instance this far off in height is a different thing
     fresh_look_every_s: float = 10.0  # a retried pick of the same target reuses the last look
     redock_max_m: float = 0.12  # a correction this small is folded into the plan; larger re-plans
+    # Robot-side segmentation (frames without instance masks): a frame is segmented when the camera
+    # moved or turned this much since the last segmented frame and at least ``keyframe_min_s`` of
+    # world time passed, or after ``keyframe_max_s`` in any case. Other perception periods only
+    # follow the robot's own state; the world waits while a frame is segmented.
+    keyframe_move_m: float = 0.15
+    keyframe_turn_rad: float = 0.1
+    keyframe_arm_turn_rad: float = 0.3
+    keyframe_min_s: float = 0.0
+    keyframe_max_s: float = 4.0
+    keyframe_still_s: float = 0.4
+    """Segment again after the base has been still this long, when the pose has changed at all
+    since the last segmented frame. A look-around stops on a heading the fast turn did not sample."""
+    # Arm motion also makes the near camera's frame a keyframe, while the base stands still: a
+    # prismatic joint moved ``keyframe_arm_m``, a revolute joint turned ``keyframe_arm_turn_rad``, or
+    # the gripper opened, closed, took or let go of something.
+    keyframe_arm_m: float = 0.05
+    hold_renew_s: float = 0.5  # below the world's hold lease (HOLD_LEASE_S)
+    # Cameras perception uses (sensor ids of the robot model); None: every camera the model has.
+    # A frame from each is fused every perception period, so each camera adds its rendering (and,
+    # with robot-side segmentation, its segmentation requests) to the period's cost.
+    cameras: tuple[str, ...] | None = None
+    # Division of labour between the frames of one instant: the near camera (None: the camera with
+    # the widest vertical field of view when perception uses several) is in charge of regions
+    # nearer than ``near_range_m``, the other cameras of the farther ones. A region is fused from a
+    # camera not in charge of its range only when no camera in charge has it in view (inside its
+    # image by ``handoff_margin`` of the image size), so each object is one observation per instant.
+    near_camera: str | None = None
+    near_range_m: float = 1.5  # from the head at 1.5 m: a table top up to ~1.3 m ahead
+    handoff_margin: float = 0.05
     esim: EsimConfig = field(default_factory=EsimConfig)
     motion: MotionConfig = field(default_factory=MotionConfig)
     roles: RoleConfig = field(default_factory=RoleConfig)
@@ -121,10 +142,9 @@ class RobotLink:
         return call("GET", f"{self.url}/sensors/proprioception")
 
     def rgbd(self, camera: str | None = None) -> bytes:
-        """One RGB-D frame (``npz``) when the world provides raw imaging instead of detections;
-        ``camera`` picks one of the robot's cameras (the first by default)."""
-        query = f"?camera={camera}" if camera else ""
-        return call("GET", f"{self.url}/sensors/rgbd{query}")
+        """One RGB-D frame (``npz``) of ``camera`` (None: the primary one) when the world provides
+        raw imaging instead of detections."""
+        return call("GET", f"{self.url}/sensors/rgbd" + ("" if camera is None else f"?camera={camera}"))
 
     def command(self, cmd: dict) -> None:
         call("POST", f"{self.url}/command", cmd)
@@ -132,8 +152,37 @@ class RobotLink:
     def telemetry(self, scene: dict) -> None:
         call("POST", f"{self.url}/telemetry", scene)
 
-    def camera_png(self, width: int = 320, height: int = 240) -> bytes:
-        return call("GET", f"{self.url}/camera/rgb?width={width}&height={height}")
+    def camera_png(self, width: int = 320, height: int = 240, camera: str | None = None) -> bytes:
+        return call("GET", f"{self.url}/camera/rgb?width={width}&height={height}" + ("" if camera is None else f"&camera={camera}"))
+
+    def cameras(self) -> dict:
+        """Synchronized three-camera RGB with relative rig calibration."""
+        return call("GET", f"{self.url}/sensors/cameras")
+
+    def kinematics(self) -> dict:
+        """Joint encoders and relative camera calibration from one sensor timestamp."""
+        return call("GET", f"{self.url}/sensors/kinematics")
+
+    def camera_calibration(self) -> dict:
+        """Fixed RGB intrinsics and camera-to-middle-RGB extrinsics, without image capture."""
+        return call("GET", f"{self.url}/sensors/cameras/calibration")
+
+    def rgb_recording_start(self, body: dict) -> dict:
+        return call("POST", f"{self.url}/sensors/rgb/record/start", body)
+
+    def rgb_recording_status(self, id: str) -> dict:
+        from urllib.parse import urlencode
+        return call("GET", f"{self.url}/sensors/rgb/record/status?{urlencode({'recording_id': id})}")
+
+    def rgb_recording_stop(self, id: str, cancel: bool) -> dict:
+        return call("POST", f"{self.url}/sensors/rgb/record/stop", {"recording_id": id, "cancel": cancel}, timeout=25)
+
+    def rgb_recording_result(self, id: str) -> dict:
+        from urllib.parse import urlencode
+        return call("GET", f"{self.url}/sensors/rgb/record/result?{urlencode({'recording_id': id})}")
+
+    def rgb_pose(self) -> dict:
+        return call("GET", f"{self.url}/sensors/rgb/pose")
 
     def wait_until(self, t: float | None = None, hold: str | None = None, rank: int = 0, pulls: bool = True) -> float:
         """Wait until the world clock reaches ``t`` (``None``: now) and, with ``hold``, the world lets
@@ -162,6 +211,9 @@ class RobotLink:
 
     def release(self, hold: str) -> None:
         call("POST", f"{self.url}/clock/release", {"hold": hold})
+
+    def renew(self, hold: str) -> None:
+        call("POST", f"{self.url}/clock/renew", {"hold": hold})
 
 
 ALERT_TEXT_MAX = 1500
@@ -200,12 +252,41 @@ def view_hint(cam: dict, intrinsics: dict, centre: np.ndarray, top: float, range
         return f"{distance:.2f} m from the camera, farther than {range_m:.2f} m: move closer"
     return "in view but hidden by something nearer or cut off at the image edge: look from another side"
 
+
+def in_view(cam: dict, intrinsics: dict, point: np.ndarray, margin: float) -> bool:
+    """Whether ``point`` projects into the image of the pinhole camera at ``cam`` (looking along
+    its +x), at least ``margin`` of the image width and height inside its edges."""
+    x, y, z = pose_compose(pose_inverse(cam), {"p": [float(v) for v in point], "q": [1.0, 0.0, 0.0, 0.0]})["p"]
+    if x <= 0.05:
+        return False
+    w, h = intrinsics["width"], intrinsics["height"]
+    f = (h / 2.0) / math.tan(math.radians(intrinsics["fovy"]) / 2.0)
+    u, v = w / 2.0 - y * f / x, h / 2.0 - z * f / x
+    return margin * w <= u <= (1.0 - margin) * w and margin * h <= v <= (1.0 - margin) * h
+
+
 class EgoRuntime:
     def __init__(self, link: RobotLink, robot_model: dict, config: RuntimeConfig | None = None,
-                 out_dir: Path | None = None):
+                 out_dir: Path | None = None, segmenter: Segmenter | None = None):
         self.link = link
         self.config = config or RuntimeConfig()
         self.estimator = EgoEstimator(robot_model=robot_model)
+        unknown = [c for c in self.config.cameras or () if c not in self.estimator.cameras]
+        if unknown:
+            raise ValueError(f"RuntimeConfig.cameras {unknown} are not cameras of the robot model "
+                             f"({', '.join(self.estimator.cameras)})")
+        self.near_camera = self._resolve_near_camera()
+        self._arm_joints = {j["id"]: j["type"]["value"] for j in robot_model["body"]["joints"]
+                            if j["type"]["value"] in ("prismatic", "revolute")}
+        self.segmenter = segmenter
+        if segmenter is not None:
+            self.estimator.config.semantic_shape_weight = segmenter.config.shape_weight
+            self.estimator.config.semantic_label_floor = segmenter.config.label_floor
+        self._keyframe: dict[str, dict] = {}  # camera → sensor header of its last segmented frame
+        self._pose_sample: tuple[float, float, float] | None = None
+        self._still_since: float | None = None
+        self._missing_cameras: frozenset[str] = frozenset()
+        self.segmentation = {"frames": 0, "cached": 0, "failures": 0, "lastSeconds": None, "lastError": None}
         self.esim = Esim(robot_model, self.config.esim)
         self.out_dir = out_dir
         self._lock = threading.RLock()
@@ -256,7 +337,14 @@ class EgoRuntime:
 
     def _poll_once(self) -> None:
         frame = self.link.sensors()
-        mode = "rgbd" if frame.get("imaging") == "rgbd" else "detections"
+        if frame.get("imaging") != "rgbd":
+            mode = "detections"
+        else:
+            mode = "rgbd" if frame.get("masks", True) else "rgbd-segmenter"
+        # A fast look-around steps farther than the heading window in which a long table is fully
+        # inside the head camera, and a border-truncated region does not start a track. Slow the
+        # turn only while perception keeps keyframes; fusing every frame already samples that window.
+        self.executor._keyframed = mode == "rgbd-segmenter"
         if mode != self.perception_mode:
             with self._lock:
                 if self.perception_mode is not None:
@@ -264,30 +352,181 @@ class EgoRuntime:
                     # the new pipeline; what the gripper holds and the running skill are kept.
                     self.estimator.forget_objects()
                 self.perception_mode = mode
-        if mode == "rgbd":
-            rgbd = decode_rgbd(self.link.rgbd())
-            from steward.ego.providers.fused_rgbd import env_mask_source, prepare_rgbd_frame
-            mask_source = env_mask_source(self.config.mask_source)
-            if mask_source in ("geometric", "sam3", "geo_sam3"):
-                rgbd = prepare_rgbd_frame(
-                    rgbd,
-                    mask_source=mask_source,  # type: ignore[arg-type]
-                    sam3_url=self.config.sam3_url,
-                    sam3_threshold=self.config.sam3_threshold,
-                    fallback_on_error=True,
-                )
+                self._keyframe = {}
+                self._pose_sample = None
+                self._still_since = None
+        cameras = self._cameras(frame)
+        if mode in ("rgbd", "rgbd-segmenter"):
+            due = [c for c in cameras if mode == "rgbd" or self._keyframe_due(frame, c)]
+            frames = []
+            for camera in due:
+                rgbd = decode_rgbd(self.link.rgbd(camera))
+                if rgbd["mask"] is not None or self._segment(rgbd):
+                    frames.append(rgbd)
             with self._lock:
-                if rgbd["header"]["stamp"] < self.estimator.stamp - 1e-6:
+                if frame["stamp"] < self.estimator.stamp - 1e-6:
                     self._restart()
-                self.estimator.update_rgbd(rgbd)
-                self._look_at_faces(rgbd)
+                if not frames:
+                    self.estimator.update_body(frame)
+                for rgbd in frames:
+                    self.estimator.update_rgbd(rgbd, defer=self._handoff(rgbd, frames))
+                    self._look_at_faces(rgbd)
                 self._publish_view_scene()
             return
+        frame = {**frame, "cameras": [c for c in frame.get("cameras", []) if c["id"] in cameras],
+                 "detections": [d for d in frame.get("detections", []) if d.get("camera") in cameras]}
         with self._lock:
             if frame["stamp"] < self.estimator.stamp - 1e-6:
                 self._restart()
             self.estimator.update(frame)
             self._publish_view_scene()
+
+    def _cameras(self, frame: dict) -> list[str]:
+        """The cameras to perceive with: those of the robot model (or ``RuntimeConfig.cameras``) that
+        the world's robot provides, primary first. A camera the world lacks (its scene was built
+        with an older robot model) is reported once as an operator alert."""
+        wanted = [c for c in self.estimator.cameras if self.config.cameras is None or c in self.config.cameras]
+        provided = {c["id"] for c in frame.get("cameras", [])}
+        missing = frozenset(c for c in wanted if c not in provided)
+        if missing and missing != self._missing_cameras:
+            self.alert(f"世界中的机器人没有相机 {', '.join(sorted(missing))}：场景可能按旧的机器人模型构建，"
+                       "运行 steward build-kitchen 重建", "runtime")
+        self._missing_cameras = missing
+        return [c for c in wanted if c in provided]
+
+    def _resolve_near_camera(self) -> str | None:
+        """The camera in charge of near regions (:attr:`RuntimeConfig.near_camera`); None when
+        perception uses a single camera. Raises ``ValueError`` for a camera perception does not use."""
+        used = [c for c in self.estimator.cameras if self.config.cameras is None or c in self.config.cameras]
+        if self.config.near_camera is not None:
+            if self.config.near_camera not in used:
+                raise ValueError(f"RuntimeConfig.near_camera {self.config.near_camera!r} is not a camera perception "
+                                 f"uses ({', '.join(used)})")
+            return self.config.near_camera
+        if len(used) < 2:
+            return None
+        return max(used, key=lambda c: self.estimator.camera_intrinsics(c)["fovy"])
+
+    def _note_pose(self, frame: dict) -> None:
+        """Remember whether the base has stayed still since the previous polled pose."""
+        odo = frame["odometry"]
+        pose = (float(odo["x"]), float(odo["y"]), float(odo["yaw"]))
+        prev, stamp = self._pose_sample, float(frame["stamp"])
+        self._pose_sample = pose
+        if prev is None or stamp < (self._still_since or stamp):
+            self._still_since = stamp
+            return
+        shifted = math.hypot(pose[0] - prev[0], pose[1] - prev[1]) >= 0.01 \
+            or abs(wrap_angle(pose[2] - prev[2])) >= 0.02
+        if shifted:
+            self._still_since = stamp
+
+    def _keyframe_due(self, frame: dict, camera: str) -> bool:
+        cfg, last = self.config, self._keyframe.get(camera)
+        self._note_pose(frame)
+        if last is None:
+            return True
+        odo, was = frame["odometry"], last["odometry"]
+        elapsed = float(frame["stamp"]) - float(last["stamp"])
+        if elapsed < 0 or elapsed >= cfg.keyframe_max_s:
+            return True
+        moved = math.hypot(odo["x"] - was["x"], odo["y"] - was["y"]) >= cfg.keyframe_move_m
+        turned = abs(wrap_angle(odo["yaw"] - was["yaw"])) >= cfg.keyframe_turn_rad
+        handled = camera == self.near_camera and self._arm_moved(last, frame)
+        changed = math.hypot(odo["x"] - was["x"], odo["y"] - was["y"]) >= 0.02 \
+            or abs(wrap_angle(odo["yaw"] - was["yaw"])) >= 0.02
+        settled = self._still_since is not None and float(frame["stamp"]) - self._still_since >= cfg.keyframe_still_s \
+            and changed
+        return elapsed >= cfg.keyframe_min_s and (moved or turned or handled or settled)
+
+    def _arm_moved(self, last: dict, frame: dict) -> bool:
+        """Whether the arm or gripper changed enough since ``last`` for a new near-camera keyframe."""
+        grip, was = frame["gripper"], last["gripper"]
+        if grip.get("state") != was.get("state") or bool(grip.get("holding")) != bool(was.get("holding")):
+            return True
+        for jid, kind in self._arm_joints.items():
+            if jid not in frame["joints"] or jid not in last["joints"]:
+                continue
+            dq = frame["joints"][jid] - last["joints"][jid]
+            if (abs(dq) >= self.config.keyframe_arm_m if kind == "prismatic"
+                    else abs(wrap_angle(dq)) >= self.config.keyframe_arm_turn_rad):
+                return True
+        return False
+
+    def _handoff(self, rgbd: dict, batch: list[dict]):
+        """The regions of ``rgbd`` that a camera in charge of their range fuses instead
+        (:attr:`RuntimeConfig.near_camera`): a predicate on the corners of a region's box, true
+        when a camera in charge has the whole box in view; or None to fuse all. A camera in charge
+        that sees only part of the box (a long table up close) leaves the region to this one."""
+        others = [f for f in batch if f is not rgbd]
+        if self.near_camera is None or not others:
+            return None
+        cfg, est = self.config, self.estimator
+        near = rgbd["camera"] == self.near_camera
+        cam_p = np.asarray(est.camera_pose(rgbd["header"]["odometry"], rgbd["camera"])["p"], float)
+        views = [(f["camera"] == self.near_camera, est.camera_pose(f["header"]["odometry"], f["camera"]),
+                  est.camera_intrinsics(f["camera"])) for f in others]
+
+        def defer(corners: np.ndarray) -> bool:
+            near_region = float(np.linalg.norm(corners.mean(axis=0) - cam_p)) < cfg.near_range_m
+            if near_region == near:
+                return False
+            return any(all(in_view(pose, intrinsics, c, cfg.handoff_margin) for c in corners)
+                       for is_near, pose, intrinsics in views if is_near == near_region)
+        return defer
+
+    def _segment(self, rgbd: dict) -> bool:
+        """Fill ``rgbd["mask"]`` and ``rgbd["labels"]`` from the robot's segmenter; False (and an
+        operator alert on the first failure in a row) when the frame could not be segmented."""
+        header = rgbd["header"]
+        self._keyframe[rgbd["camera"]] = header
+        stats = self.segmentation
+        if self.segmenter is None:
+            error = "this phase level sends no instance masks and the robot has no segmenter (steward ego --segmentation-config)"
+        else:
+            try:
+                with self._holding("perception"):
+                    result = self.segmenter.segment(rgbd["rgb"])
+                with self._lock:
+                    cam = self.estimator.camera_pose(header["odometry"], rgbd["camera"])
+                up_cam = matrix_from_quat(cam["q"]).T @ np.array([0.0, 0.0, 1.0])
+                result = self.segmenter.fill(result, rgbd["depth"], rgbd["fovy"], up_cam)
+            except SegmenterError as exc:
+                error = str(exc)
+            else:
+                rgbd["mask"], rgbd["labels"] = result.mask, result.labels
+                stats["frames"] += 1
+                stats["cached"] += int(result.cached)
+                if not result.cached:
+                    stats["lastSeconds"] = round(result.seconds, 2)
+                stats["lastError"] = None
+                return True
+        stats["failures"] += 1
+        if stats["lastError"] is None:
+            self.alert(f"图像分割失败，本帧只更新机器人自身状态：{error}", "runtime")
+        stats["lastError"] = error
+        return False
+
+    @contextlib.contextmanager
+    def _holding(self, hold: str):
+        """Renew ``hold`` every ``hold_renew_s`` wall seconds while the block runs, so the world
+        stays stopped for a woken loop that works longer than its hold lease."""
+        done = threading.Event()
+
+        def renew() -> None:
+            while not done.wait(self.config.hold_renew_s):
+                try:
+                    self.link.renew(hold)
+                except (HttpError, OSError):
+                    pass  # the world is gone or restarting; the next wait reports it
+
+        thread = threading.Thread(target=renew, name=f"renew-{hold}", daemon=True)
+        thread.start()
+        try:
+            yield
+        finally:
+            done.set()
+            thread.join()
 
     def _face_loop(self) -> None:
         """With detections, which carry no colours, fetch a camera image every ``appearance_poll_s``
@@ -305,13 +544,18 @@ class EgoRuntime:
             if not due:
                 continue
             try:
-                rgbd = decode_rgbd(self.link.rgbd())
+                frames = self._camera_frames()
             except (HttpError, OSError) as exc:
                 self.face_error = f"camera image for faces unavailable: {exc}"
                 continue
             with self._lock:
-                self._look_at_faces(rgbd)
+                for rgbd in frames:
+                    self._look_at_faces(rgbd)
             self.face_error = None
+
+    def _camera_frames(self) -> list[dict]:
+        """One fresh decoded RGB-D frame from each camera perception uses, primary first."""
+        return [decode_rgbd(self.link.rgbd(c)) for c in self._cameras(self.link.sensors())]
 
     def _telemetry_scene(self) -> dict:
         """The Ego-State sent as telemetry, each object carrying its scene-level role as the state
@@ -492,6 +736,7 @@ class EgoRuntime:
             "dropped": dropped,
             "currentSkill": job,
             "perception": self.perception_mode,
+            **({"segmentation": dict(self.segmentation)} if self.perception_mode == "rgbd-segmenter" else {}),
             "runtimeError": self.last_error,
             "faceCaptureError": self.face_error,
         }
@@ -539,6 +784,36 @@ class EgoRuntime:
             objs = [o for o in objs if o["id"] != near and math.dist(o["position"][:2], anchor["position"][:2]) <= r]
         return objs
 
+    def capture_cameras(self) -> dict:
+        """Capture the existing robot RGB views without moving or changing the perception loop.
+
+        The packet contains sensor images, intrinsics, fixed camera-to-reference calibration
+        and gripper kinematics computed from the same encoder sample. It does not provide an
+        absolute camera pose.
+        """
+        packet = self.link.cameras()
+        pose = gripper_pose(self.estimator.robot_model, packet)
+        return {key: value for key, value in packet.items() if key != "joint_encoders"} | {"gripper_pose": pose}
+
+    def gripper_pose(self) -> dict:
+        """Current gripper-link pose relative to the base and the robot cameras, without imaging."""
+        return gripper_pose(self.estimator.robot_model, self.link.kinematics())
+
+    def camera_calibration(self) -> dict:
+        """Read fixed camera calibration through the robot sensor port, with no absolute poses."""
+        return self.link.camera_calibration()
+
+    def prepare_novelanything(self, id: str, source_count: int | None = None) -> dict:
+        """Export measured evidence and a current gripper target; no motion or inference is performed."""
+        from steward.ego.novelanything_scene import prepare_gripper_scene
+        return prepare_gripper_scene(self.estimator.robot_model, self.link.rgb_recording_result(id),
+                                     self.link.rgb_pose(), source_count)
+
+    def recording_evidence(self, id: str) -> dict:
+        """Export all measured RGB evidence and a synchronized current gripper target frame."""
+        from steward.ego.recording_evidence import recording_evidence
+        return recording_evidence(self.estimator.robot_model, self.link.rgb_recording_result(id), self.link.rgb_pose())
+
     def inspect(self, entity: str, px: int = 24) -> dict:
         """The top face of an Ego-State object as the head camera sees it now, resampled to a
         ``px`` × ``px`` grid in the object's own frame: column = local +x to the right, row 0 = local
@@ -559,20 +834,32 @@ class EgoRuntime:
             if track is None:
                 raise KeyError(f"unknown object {entity!r}")
             centre, size, yaw, top = track.pos.copy(), track.size.copy(), float(track.yaw), track.top()
-        frame = decode_rgbd(self.link.rgbd())
+        frames = self._camera_frames()
+        best = None
         with self._lock:
-            cam = self.estimator.camera_pose(odometry=frame["header"]["odometry"])
-            self._look_at_faces(frame, [entity])
-        rows = top_face(frame, cam, centre, size, yaw, top, px)
-        coverage = sum(cell is not None for row in rows for cell in row) / (px * px)
+            for frame in frames:
+                self._look_at_faces(frame, [entity])
+        for frame in frames:
+            cam = self.estimator.camera_pose(frame["header"]["odometry"], frame["camera"])
+            rows = top_face(frame, cam, centre, size, yaw, top, px)
+            coverage = sum(cell is not None for row in rows for cell in row) / (px * px)
+            if best is None or coverage > best[0]:
+                best = (coverage, rows, frame)
+        coverage, rows, frame = best
         world_rows, turn = world_up_face(rows, yaw)
-        hint = {} if coverage >= VIEW_HINT_COVERAGE else {"hint": self._view_hint(cam, centre, top)}
-        return {"entity": entity, "px": px, "yawDeg": round(math.degrees(yaw), 2),
+        hint = {} if coverage >= VIEW_HINT_COVERAGE else {"hint": self._view_hint(frame["header"]["odometry"], centre, top)}
+        return {"entity": entity, "px": px, "camera": frame["camera"], "yawDeg": round(math.degrees(yaw), 2),
                 "sizeM": [round(float(v), 3) for v in size], "coverage": round(coverage, 3), **hint,
                 "rows": rows, "worldRows": world_rows, "worldTurnDeg": turn, "stamp": frame["header"]["stamp"]}
 
-    def _view_hint(self, cam: dict, centre: np.ndarray, top: float) -> str:
-        return view_hint(cam, self.estimator._camera["intrinsics"], centre, top, self.config.appearance_range_m)
+    def _view_hint(self, odometry: dict, centre: np.ndarray, top: float) -> str:
+        """:func:`view_hint` for every camera perception uses at ``odometry``, one clause each."""
+        est = self.estimator
+        cameras = [c for c in est.cameras if c not in self._missing_cameras
+                   and (self.config.cameras is None or c in self.config.cameras)]
+        hints = [(c, view_hint(est.camera_pose(odometry, c), est.camera_intrinsics(c), centre, top,
+                               self.config.appearance_range_m)) for c in cameras]
+        return hints[0][1] if len(hints) == 1 else "; ".join(f"{c}: {h}" for c, h in hints)
 
     def _look_at_faces(self, frame: dict, ids: list[str] | None = None) -> None:
         """Remember the top faces one decoded RGB-D frame shows (the caller holds the lock): of
@@ -581,7 +868,7 @@ class EgoRuntime:
         looked at (a distant view would overwrite a sharp one), and a view showing less than
         ``appearance_min_coverage`` of a face is not kept."""
         cfg, est = self.config, self.estimator
-        cam = est.camera_pose(odometry=frame["header"]["odometry"])
+        cam = est.camera_pose(frame["header"]["odometry"], frame["camera"])
         cam_p = np.asarray(cam["p"], float)
         stamp = float(frame["header"]["stamp"])
         for track in list(est.tracks.values()) if ids is None else [est.tracks[i] for i in ids if i in est.tracks]:
@@ -630,17 +917,19 @@ class EgoRuntime:
             raise ValueError("entities must be a non-empty list of object ids")
         if not 4 <= px <= 16:
             raise ValueError("px must be between 4 and 16")
-        frame = decode_rgbd(self.link.rgbd())
+        frames = self._camera_frames()
+        frame = frames[0]
         with self._lock:
             est = self.estimator
             missing = [eid for eid in [*entities, reference] if eid not in est.tracks]
             if missing:
                 raise KeyError(f"unknown object {missing[0]!r}")
-            self._look_at_faces(frame, [*entities, reference])
-            cam = est.camera_pose(odometry=frame["header"]["odometry"])
+            for each in frames:
+                self._look_at_faces(each, [*entities, reference])
+            odometry = frame["header"]["odometry"]
 
             def why(track) -> str:
-                return self._view_hint(cam, track.pos, track.top())
+                return self._view_hint(odometry, track.pos, track.top())
 
             ref_track = est.tracks[reference]
             ref = ref_track.appearance
@@ -689,24 +978,33 @@ class EgoRuntime:
 
     def observe(self) -> dict:
         frame = self.link.sensors()
+        cameras = self._cameras(frame)
         if frame.get("imaging") == "rgbd":
-            rgbd = decode_rgbd(self.link.rgbd())
-            with self._lock:
-                cam = self.estimator.camera_pose()
             visible = []
-            for seg in segments(rgbd, cam):
-                centre, size, _ = box_of(seg.points)
-                probs = classify(size, centre[2] - size[2] / 2, seg.color, seg.invalid_frac)
-                best = max(probs, key=probs.get)
-                visible.append({"category": best, "confidence": round(probs[best], 2), "rangeM": round(seg.range, 2)})
+            for camera in cameras:
+                rgbd = decode_rgbd(self.link.rgbd(camera))
+                if rgbd["mask"] is None and not self._segment(rgbd):
+                    raise RuntimeError(f"the {camera} image could not be segmented: {self.segmentation['lastError']}")
+                with self._lock:
+                    cam = self.estimator.camera_pose(rgbd["header"]["odometry"], camera)
+                for seg in segments(rgbd, cam):
+                    centre, size, _ = box_of(seg.points)
+                    probs = self.estimator.category_probs(size, centre[2] - size[2] / 2, seg.color, seg.invalid_frac,
+                                                          True, seg.semantics)
+                    best = max(probs, key=probs.get)
+                    visible.append({"category": best, "confidence": round(probs[best], 2), "rangeM": round(seg.range, 2),
+                                    "camera": camera})
         else:
-            visible = [{"category": d["category"], "rangeM": round(d["range"], 2)} for d in frame["detections"]]
+            visible = [{"category": d["category"], "rangeM": round(d["range"], 2), "camera": d.get("camera")}
+                       for d in frame["detections"] if d.get("camera") in cameras]
         out = {"t": frame["stamp"], "visible": visible}
         if self.out_dir is not None:
             self.out_dir.mkdir(parents=True, exist_ok=True)
-            path = self.out_dir / f"observe-{frame['stamp']:.2f}.png"
-            path.write_bytes(self.link.camera_png())
-            out["imagePath"] = str(path)
+            out["imagePaths"] = {}
+            for camera in cameras:
+                path = self.out_dir / f"observe-{frame['stamp']:.2f}-{camera}.png"
+                path.write_bytes(self.link.camera_png(camera=camera))
+                out["imagePaths"][camera] = str(path)
         return out
 
     def predict(self, skill: str, params: dict) -> dict:

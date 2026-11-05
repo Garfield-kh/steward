@@ -89,7 +89,7 @@ def test_loading_a_scenario_of_another_body_builds_it_and_switches_the_console(k
         encoders = call("GET", f"{robot}/sensors/proprioception")
         assert {"stamp", "joints", "grippers"} <= set(encoders) and "detections" not in encoders
         frame = _pump_while(host, lambda: decode_rgbd(call("GET", f"{robot}/sensors/rgbd?camera=top_camera")))
-        assert frame["header"]["camera"]["id"] == "top_camera"
+        assert frame["camera"] == "top_camera"
     finally:
         host.stop()
 

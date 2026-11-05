@@ -29,6 +29,7 @@ import mujoco
 import numpy as np
 
 from steward.math3d import quat_from_matrix, quat_mul, yaw_from_quat
+from steward.scene.finish import finish_kind, finish_png
 from steward.scene.schema import Entity, RigidTree, SceneState
 
 _MOUNT_TO_CAMERA = quat_from_matrix(np.array([[0.0, 0.0, -1.0], [-1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]))
@@ -56,6 +57,8 @@ class MjcfBuild:
     initial_qpos: dict[str, list[float]]
     assets: dict[str, bytes] = field(default_factory=dict)
     """In-memory files the XML references (texture images)."""
+    shadows: bool = False
+    """Whether the renderer should cast the key light. Flat appearance leaves this off."""
 
     def compile(self) -> mujoco.MjModel:
         return mujoco.MjModel.from_xml_string(self.xml, self.assets or None)
@@ -94,15 +97,31 @@ def build_mjcf(
     extra_cameras: list[dict] | None = None,
     offscreen: tuple[int, int] = (1280, 960),
     model_name: str = "steward",
+    appearance: str = "flat",
 ) -> MjcfBuild:
+    """Compile ``scene``. ``appearance`` ``flat`` is uniform colour and a fill light; ``textured``
+    dresses listed asset colours with a procedural finish and a key light that casts shadows."""
+    if appearance not in ("flat", "textured"):
+        raise ValueError(f"appearance must be 'flat' or 'textured', not {appearance!r}")
     root = ET.Element("mujoco", model=model_name)
     ET.SubElement(root, "compiler", angle="radian", autolimits="true")
     ET.SubElement(root, "option", timestep=f"{timestep}", integrator="implicitfast")
     visual = ET.SubElement(root, "visual")
     ET.SubElement(visual, "global", offwidth=str(offscreen[0]), offheight=str(offscreen[1]))
-    ET.SubElement(visual, "headlight", ambient="0.35 0.35 0.35", diffuse="0.5 0.5 0.5")
     world = ET.SubElement(root, "worldbody")
-    ET.SubElement(world, "light", name="sun", directional="true", pos="0 0 6", dir="0.3 0.2 -1", diffuse="0.6 0.6 0.6")
+    if appearance == "textured":
+        # Ambient stays high so the key light's shadow is a shade, not a black wedge that splits a
+        # surface into a region the segmenter no longer names. The counter face stays as bright as
+        # the flat render; the wall finish is what separates them.
+        ET.SubElement(visual, "headlight", ambient="0.72 0.72 0.72", diffuse="0.40 0.40 0.40")
+        ET.SubElement(world, "light", name="sun", directional="true", castshadow="true", pos="0 0 5",
+                      dir="0.45 0.28 -1", diffuse="0.58 0.55 0.48")
+        ET.SubElement(world, "light", name="fill", directional="true", castshadow="false", pos="0 0 3",
+                      dir="-0.55 -0.2 -1", diffuse="0.36 0.38 0.42")
+    else:
+        ET.SubElement(visual, "headlight", ambient="0.35 0.35 0.35", diffuse="0.5 0.5 0.5")
+        ET.SubElement(world, "light", name="sun", directional="true", pos="0 0 6", dir="0.3 0.2 -1",
+                      diffuse="0.6 0.6 0.6")
     for cam in extra_cameras or []:
         ET.SubElement(
             world, "camera", name=cam["name"], pos=_fmt(cam["pos"]), xyaxes=camera_xyaxes(cam["pos"], cam["target"]),
@@ -115,14 +134,14 @@ def build_mjcf(
     for ent in scene.entities:
         if not isinstance(ent.body, RigidTree):
             raise NotImplementedError(f"entity {ent.id}: deformable bodies are not simulated in Phase 0")
-        names[ent.id] = _emit_entity(world, actuators, ent, initial, textures)
+        names[ent.id] = _emit_entity(world, actuators, ent, initial, textures, appearance)
     if len(actuators) == 0:
         root.remove(actuators)
     if len(textures.element):
         root.insert(list(root).index(world), textures.element)
     ET.indent(root)
     return MjcfBuild(xml=ET.tostring(root, encoding="unicode"), names=names, initial_qpos=initial,
-                     assets=textures.files)
+                     assets=textures.files, shadows=appearance == "textured")
 
 
 @dataclass
@@ -133,6 +152,25 @@ class _Textures:
     element: ET.Element
     files: dict[str, bytes] = field(default_factory=dict)
     materials: dict[tuple[str, tuple[float, ...]], str] = field(default_factory=dict)
+
+    def finish(self, rgba: list[float]) -> str | None:
+        """Material name for a procedural finish of ``rgba``, or ``None`` when it stays flat."""
+        kind = finish_kind(rgba)
+        if kind is None:
+            return None
+        colour = tuple(round(float(c), 4) for c in rgba[:3])
+        key = (f"finish-{kind}", colour)
+        if key in self.materials:
+            return self.materials[key]
+        name = f"m{len(self.materials)}"
+        filename = f"{name}.png"
+        self.files[filename] = finish_png(kind, rgba)
+        ET.SubElement(self.element, "texture", name=name, type="cube", fileup=filename, filedown=filename,
+                      fileleft=filename, fileright=filename, filefront=filename, fileback=filename)
+        ET.SubElement(self.element, "material", name=name, texture=name, rgba="1 1 1 1", specular="0.06",
+                      shininess="0.15")
+        self.materials[key] = name
+        return name
 
     def material(self, png_b64: str, rgba: list[float]) -> str:
         colour = tuple(round(float(c), 4) for c in rgba[:3])
@@ -165,7 +203,7 @@ def _solid_png(colour: tuple[float, ...], width: int, height: int) -> bytes:
 
 
 def _emit_entity(world: ET.Element, actuators: ET.Element, ent: Entity, initial: dict,
-                 textures: _Textures) -> EntityNames:
+                 textures: _Textures, appearance: str) -> EntityNames:
     tree = ent.rigid
     names = EntityNames()
     pose = ent.pose.value
@@ -199,13 +237,13 @@ def _emit_entity(world: ET.Element, actuators: ET.Element, ent: Entity, initial:
             ET.SubElement(body, "freejoint", name=jname)
             names.root_joints.append(jname)
     names.bodies[root_link.id] = body_name
-    _emit_link(body, ent, root_link.id, names, textures)
-    _emit_children(body, actuators, ent, root_link.id, names, initial, textures)
+    _emit_link(body, ent, root_link.id, names, textures, appearance)
+    _emit_children(body, actuators, ent, root_link.id, names, initial, textures, appearance)
     return names
 
 
 def _emit_children(parent_el: ET.Element, actuators: ET.Element, ent: Entity, parent_id: str, names: EntityNames,
-                   initial: dict, textures: _Textures) -> None:
+                   initial: dict, textures: _Textures, appearance: str) -> None:
     tree = ent.rigid
     for joint in tree.joints:
         if joint.parent != parent_id:
@@ -238,8 +276,8 @@ def _emit_children(parent_el: ET.Element, actuators: ET.Element, ent: Entity, pa
                 lim = joint.limits.value if joint.limits else None
                 names.actuators[joint.id] = _emit_actuator(actuators, jname, jname, joint.actuator, lim)
                 names.actuator_joints[joint.id] = jname
-        _emit_link(body, ent, joint.child, names, textures)
-        _emit_children(body, actuators, ent, joint.child, names, initial, textures)
+        _emit_link(body, ent, joint.child, names, textures, appearance)
+        _emit_children(body, actuators, ent, joint.child, names, initial, textures, appearance)
 
 
 def _emit_actuator(actuators: ET.Element, name: str, joint: str, act: dict, limits: dict | None) -> str:
@@ -269,7 +307,8 @@ def _emit_actuator(actuators: ET.Element, name: str, joint: str, act: dict, limi
     return name
 
 
-def _emit_link(body: ET.Element, ent: Entity, link_id: str, names: EntityNames, textures: _Textures) -> None:
+def _emit_link(body: ET.Element, ent: Entity, link_id: str, names: EntityNames, textures: _Textures,
+               appearance: str) -> None:
     link = ent.rigid.link(link_id)
     material = link.material.value if link.material else {}
     collision = link.geometry.get("collision", [])
@@ -279,7 +318,7 @@ def _emit_link(body: ET.Element, ent: Entity, link_id: str, names: EntityNames, 
     total_volume = sum(volumes) or 1.0
     body_name = body.get("name")
     for k, g in enumerate(collision):
-        attrs = _geom_attrs(g, textures)
+        attrs = _geom_attrs(g, textures, appearance)
         attrs["name"] = f"{body_name}::c{k}"
         if "friction" in material:
             attrs["friction"] = f"{material['friction']} 0.005 0.0001"
@@ -297,7 +336,7 @@ def _emit_link(body: ET.Element, ent: Entity, link_id: str, names: EntityNames, 
         ET.SubElement(body, "geom", **attrs)
         names.collision_geoms.append(attrs["name"])
     for k, g in enumerate(visual):
-        attrs = _geom_attrs(g, textures)
+        attrs = _geom_attrs(g, textures, appearance)
         attrs.update(name=f"{body_name}::v{k}", contype="0", conaffinity="0", group="1", density="0")
         ET.SubElement(body, "geom", **attrs)
     if not collision and mass is not None:
@@ -313,7 +352,7 @@ def _emit_link(body: ET.Element, ent: Entity, link_id: str, names: EntityNames, 
             names.cameras[sensor["id"]] = cam_name
 
 
-def _geom_attrs(g: dict, textures: _Textures) -> dict:
+def _geom_attrs(g: dict, textures: _Textures, appearance: str) -> dict:
     if g["kind"] != "primitive":
         raise NotImplementedError(f"{g['kind']} geometry is not simulated in Phase 0")
     shape, size = g["shape"], g["size"]
@@ -332,6 +371,11 @@ def _geom_attrs(g: dict, textures: _Textures) -> dict:
     if "texture" in g:
         attrs["material"] = textures.material(g["texture"], g.get("rgba", [0.7, 0.7, 0.7, 1.0]))
         attrs.pop("rgba", None)
+    elif appearance == "textured" and "rgba" in g:
+        finish = textures.finish(g["rgba"])
+        if finish is not None:
+            attrs["material"] = finish
+            attrs.pop("rgba", None)
     return attrs
 
 

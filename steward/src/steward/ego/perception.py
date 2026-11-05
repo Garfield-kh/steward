@@ -28,7 +28,8 @@ class PerceptionConfig:
     max_points: int = 400
     floor_cut: float = 0.012
     occluder_gap: float = 0.15  # something this much nearer right below a region hides its base
-    occluded_share: float = 0.3  # share of the lower edge hidden that leaves the base unseen
+    overhang_gap: float = 0.15  # something this much farther right below a region: its lower edge overhangs
+    occluded_share: float = 0.3  # share of the lower edge hidden or overhanging that leaves the base unseen
 
 
 @dataclass
@@ -42,21 +43,31 @@ class Segment:
     border: bool  # the region touches the image border (truncated view)
     range: float  # median distance from the camera
     bottom_seen: bool = True  # the lowest points are the object's base, not an image edge or an occluder
+    semantics: dict[str, float] | None = None  # category → segmenter score, when the robot segmented the image
+    span: np.ndarray | None = None  # eight corners of the box around every valid pixel, before the point sample
 
 
 def decode_rgbd(blob: bytes) -> dict:
-    """Unpack the robot port's ``/sensors/rgbd`` payload."""
+    """Unpack the robot port's ``/sensors/rgbd`` payload; ``camera`` is the sensor id it was taken
+    with, ``mask`` is None when the world sends no instance masks and the robot segments the image
+    itself."""
     z = np.load(io.BytesIO(blob))
-    return {"rgb": z["rgb"], "depth": z["depth"].astype(np.float32) / 1000.0, "mask": z["mask"],
+    return {"camera": str(z["camera"]) if "camera" in z.files else None, "rgb": z["rgb"], "depth": z["depth"].astype(np.float32) / 1000.0,
+            "mask": z["mask"] if "mask" in z.files else None,
             "fovy": float(z["fovy"]), "header": json.loads(str(z["header"]))}
 
 
 def segments(frame: dict, cam_pose: dict, config: PerceptionConfig | None = None,
              rng: np.random.Generator | None = None) -> list[Segment]:
-    """Back-project every masked region of an RGB-D frame into map-frame points."""
+    """Back-project every masked region of an RGB-D frame into map-frame points. With
+    ``frame["labels"]`` (instance id → category scores, from the robot's segmenter) each segment
+    carries its scores as :attr:`Segment.semantics`."""
     cfg = config or PerceptionConfig()
     rng = rng or np.random.default_rng(0)
     depth, mask, rgb = frame["depth"], frame["mask"], frame["rgb"]
+    if mask is None:
+        raise ValueError("the frame carries no instance masks: segment it first (steward.ego.segmenter)")
+    labels = frame.get("labels")
     h, w = depth.shape
     f = (h / 2.0) / math.tan(math.radians(frame["fovy"]) / 2.0)
     cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
@@ -72,31 +83,159 @@ def segments(frame: dict, cam_pose: dict, config: PerceptionConfig | None = None
         if int(valid.sum()) < cfg.min_points:
             continue
         u, v, dv = xs[valid].astype(np.float64), ys[valid].astype(np.float64), d[valid].astype(np.float64)
-        if len(dv) > cfg.max_points:
-            keep = rng.choice(len(dv), cfg.max_points, replace=False)
-            u, v, dv = u[keep], v[keep], dv[keep]
         local = np.stack([dv, -(u - cx) * dv / f, -(v - cy) * dv / f], axis=1)
-        points = local @ rot.T + origin
-        points = points[points[:, 2] > cfg.floor_cut]
-        if len(points) < cfg.min_points:
+        measured = local @ rot.T + origin
+        above = measured[:, 2] > cfg.floor_cut
+        measured = measured[above]
+        if len(measured) < cfg.min_points:
             continue
-        out.append(Segment(
-            points=points,
-            color=rgb[ys, xs].reshape(-1, 3).mean(axis=0) / 255.0,
-            pixels=len(ys),
-            invalid_frac=float(1.0 - valid.mean()),
-            border=bool(xs.min() == 0 or ys.min() == 0 or xs.max() == w - 1 or ys.max() == h - 1),
-            range=float(np.median(dv)),
-            bottom_seen=_bottom_seen(mask, depth, instance, ys, xs, cfg),
-        ))
+        semantics = None if labels is None else dict(labels.get(int(instance), {})) or None
+        border = bool(xs.min() == 0 or ys.min() == 0 or xs.max() == w - 1 or ys.max() == h - 1)
+        bottom = _bottom_seen(mask, depth, instance, ys, xs, cfg)
+        color = rgb[ys, xs].reshape(-1, 3).mean(axis=0) / 255.0
+        invalid = float(1.0 - valid.mean())
+        # A segmenter mask sometimes covers two things standing side by side. Anonymous world masks
+        # stay whole: splitting them would cut a single object whose points happen to have a gap.
+        split = _raised_cluster_indices(measured, cfg.min_points) if labels is not None else None
+        if split is None:
+            # The stored cloud stays a sample, unchanged from before. The corners are the box of every
+            # valid pixel: a wide top's far edge is too few of them to survive the sample.
+            span = box_corners(*box_of(measured))
+            if len(dv) > cfg.max_points:
+                keep = rng.choice(len(dv), cfg.max_points, replace=False)
+                u, v, dv = u[keep], v[keep], dv[keep]
+            local = np.stack([dv, -(u - cx) * dv / f, -(v - cy) * dv / f], axis=1)
+            points = local @ rot.T + origin
+            points = points[points[:, 2] > cfg.floor_cut]
+            if len(points) < cfg.min_points:
+                continue
+            out.append(Segment(
+                points=points, color=color, pixels=len(ys), invalid_frac=invalid, border=border,
+                range=float(np.median(dv)), bottom_seen=bottom, semantics=semantics, span=span,
+            ))
+            continue
+        for idx in split:
+            cluster = measured[idx]
+            if len(cluster) < cfg.min_points:
+                continue
+            span = box_corners(*box_of(cluster))
+            points = cluster
+            if len(points) > cfg.max_points:
+                points = points[rng.choice(len(points), cfg.max_points, replace=False)]
+            out.append(Segment(
+                points=points, color=color, pixels=len(idx), invalid_frac=invalid, border=border,
+                range=float(np.median(np.linalg.norm(cluster - origin, axis=1))),
+                bottom_seen=bottom, semantics=semantics, span=span,
+            ))
+    if labels is not None:
+        for seg in list(out):
+            if not seg.semantics or "picture" not in seg.semantics:
+                continue
+            body = _box_below_picture(depth, mask, cam_pose, frame["fovy"], seg.points, cfg.min_points)
+            if body is None:
+                continue
+            out.append(Segment(
+                points=body, color=seg.color, pixels=len(body), invalid_frac=0.0, border=False,
+                range=seg.range, bottom_seen=True, semantics={"box": 0.7},
+                span=box_corners(*box_of(body)),
+            ))
     return out
+
+
+def _box_below_picture(depth: np.ndarray, mask: np.ndarray, cam_pose: dict, fovy: float,
+                       picture: np.ndarray, min_points: int) -> np.ndarray | None:
+    """Points of a shallow box standing under a printed lid.
+
+    The segmenter names the printed top ``picture`` and does not return the walls. Unlabelled
+    depth inside the lid's footprint, between 1.2 cm and 9 cm below the lid and spread over
+    2.5–8 cm of height, is that wall. The returned cloud uses the lid's outline down to the
+    wall, because the lid hides the floor of the box. A flat surface or a tall body is not a box.
+
+    :param depth: (H, W) metres.
+    :param mask: instance ids; 0 is unlabelled.
+    :param picture: map-frame points of the lid.
+    :returns: map-frame points, or ``None`` when no such wall is visible."""
+    if len(picture) < min_points:
+        return None
+    z_lid = float(np.percentile(picture[:, 2], 20))
+    xy = picture[:, :2]
+    h, w = depth.shape
+    f = (h / 2.0) / math.tan(math.radians(fovy) / 2.0)
+    cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
+    rot = matrix_from_quat(cam_pose["q"])
+    origin = np.asarray(cam_pose["p"], float)
+    free = (depth > 0.05) & (depth < 6.0) & (mask == 0)
+    ys, xs = np.nonzero(free)
+    if len(ys) == 0:
+        return None
+    d = depth[ys, xs].astype(np.float64)
+    local = np.stack([d, -(xs.astype(np.float64) - cx) * d / f, -(ys.astype(np.float64) - cy) * d / f], axis=1)
+    world = local @ rot.T + origin
+    x0, y0 = xy.min(axis=0) - 0.02
+    x1, y1 = xy.max(axis=0) + 0.02
+    inside = (world[:, 0] >= x0) & (world[:, 0] <= x1) & (world[:, 1] >= y0) & (world[:, 1] <= y1)
+    band = inside & (world[:, 2] < z_lid - 0.012) & (world[:, 2] > z_lid - 0.09)
+    wall = world[band]
+    if len(wall) < min_points:
+        return None
+    z_span = float(wall[:, 2].max() - wall[:, 2].min())
+    if not 0.025 <= z_span <= 0.08:
+        return None
+    z0 = float(wall[:, 2].min())
+    z1 = z_lid - 0.03  # a voxel below the lid, so the box and the lid do not share a surface
+    wall = wall[wall[:, 2] <= z1]
+    if len(wall) < min_points or float(wall[:, 2].max() - wall[:, 2].min()) < 0.02:
+        return None
+    corners = [[x, y, z] for x in (float(xy[:, 0].min()), float(xy[:, 0].max()))
+               for y in (float(xy[:, 1].min()), float(xy[:, 1].max())) for z in (z0, z1)]
+    return np.vstack([wall, np.asarray(corners, float)])
+
+
+def _raised_cluster_indices(points: np.ndarray, min_points: int) -> list[np.ndarray] | None:
+    """Two index arrays into ``points`` when a raised region is two compact objects with a gap.
+
+    Furniture and anything standing on the floor stay one region. The gap is measured along the
+    longer horizontal direction and has to be at least 5 cm, with each side smaller than a bowl
+    is wide: a handle or a thin stem does not qualify.
+
+    :param points: map-frame points of one mask, already above the floor cut.
+    :param min_points: fewest points each side must keep.
+    :returns: ``None`` when the region is one object."""
+    if len(points) < 2 * min_points:
+        return None
+    if float(np.percentile(points[:, 2], 10)) <= 0.2:
+        return None
+    span = points.max(axis=0) - points.min(axis=0)
+    if max(float(span[0]), float(span[1])) > 0.55 or float(span[2]) > 0.3:
+        return None
+    centred = points[:, :2] - points[:, :2].mean(axis=0)
+    axis = np.linalg.eigh(centred.T @ centred / len(points))[1][:, 1]
+    order = np.argsort(centred @ axis)
+    gaps = np.diff((centred @ axis)[order])
+    if len(gaps) < 8:
+        return None
+    lo, hi = len(gaps) // 5, len(gaps) - len(gaps) // 5
+    if hi <= lo:
+        return None
+    k = lo + int(np.argmax(gaps[lo:hi]))
+    if float(gaps[k]) < 0.05:
+        return None
+    left, right = order[:k + 1], order[k + 1:]
+    if len(left) < min_points or len(right) < min_points:
+        return None
+    for idx in (left, right):
+        extent = points[idx].max(axis=0) - points[idx].min(axis=0)
+        if max(float(extent[0]), float(extent[1])) > 0.25 or float(extent[2]) > 0.22:
+            return None
+    return [left, right]
 
 
 def _bottom_seen(mask: np.ndarray, depth: np.ndarray, instance: int, ys: np.ndarray, xs: np.ndarray,
                  cfg: PerceptionConfig) -> bool:
     """Whether a region's lowest pixels show the object's base: not when the region reaches the
     lower image edge (the base is out of view), nor when much of its lower edge has something
-    clearly nearer right below it (the base is hidden, for example a wall behind a counter). A
+    clearly nearer right below it (the base is hidden, for example a wall behind a counter) or
+    clearly farther (the edge overhangs, for example a table top segmented without its legs). A
     base on the floor has floor right below it, at nearly the same distance."""
     h = mask.shape[0]
     if ys.max() >= h - 1:
@@ -112,7 +251,7 @@ def _bottom_seen(mask: np.ndarray, depth: np.ndarray, instance: int, ys: np.ndar
     measured = (here > 0.05) & other
     if not measured.any():
         return True
-    hidden = measured & (below > 0.05) & (below < here - cfg.occluder_gap)
+    hidden = measured & (below > 0.05) & ((below < here - cfg.occluder_gap) | (below > here + cfg.overhang_gap))
     return float(hidden.sum()) / float(measured.sum()) < cfg.occluded_share
 
 
@@ -173,6 +312,22 @@ def box_of(points: np.ndarray, trim: float = 0.0) -> tuple[np.ndarray, np.ndarra
     z_lo, z_hi = points[:, 2].min(), points[:, 2].max()
     yaw = (yaw + math.pi / 2) % math.pi - math.pi / 2
     return np.array([centre_xy[0], centre_xy[1], (z_lo + z_hi) / 2]), np.array([ex, ey, z_hi - z_lo]), yaw
+
+
+def box_corners(centre: np.ndarray, size: np.ndarray, yaw: float) -> np.ndarray:
+    """Eight corners of an oriented box.
+
+    :param centre: box centre, metres.
+    :param size: full extents, x along ``yaw``.
+    :param yaw: heading of the box x axis, radians.
+    :returns: ``(8, 3)`` corner positions.
+    """
+    c, s = math.cos(float(yaw)), math.sin(float(yaw))
+    ax, ay = np.array([c, s, 0.0]), np.array([-s, c, 0.0])
+    hx, hy, hz = (float(v) / 2 for v in size)
+    up = np.array([0.0, 0.0, 1.0])
+    return np.array([centre + sx * hx * ax + sy * hy * ay + sz * hz * up
+                     for sx in (-1.0, 1.0) for sy in (-1.0, 1.0) for sz in (-1.0, 1.0)])
 
 
 def box_at_yaw(points: np.ndarray, yaw: float) -> tuple[np.ndarray, np.ndarray, float]:

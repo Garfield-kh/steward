@@ -1,0 +1,63 @@
+# Robot-side image segmentation for the `phase1-sam` level (steward.md §13.7.4). Loaded by
+# steward.ego.segmenter; the service itself is the `sam3` entry of perception-services.toml.
+
+[segmenter]
+service = "sam3"
+# Score threshold sent with every request; detections scoring lower are discarded here too.
+threshold = 0.4
+# Detections of the same object under two prompts (a bowl also scored as a plate) overlapping by
+# at least this IoU become one instance carrying both labels.
+merge_iou = 0.6
+# Instances with fewer visible pixels after overlaps are resolved are dropped.
+min_pixels = 25
+# A cup found in the enlarged crop maps back to a few dozen original pixels, under min_pixels.
+crop_min_pixels = 8
+# Second pass: regions of these categories (support surfaces) are cropped, enlarged and segmented
+# again with `crop_prompts`, so small objects standing on them are found. 0 disables the pass.
+crop_categories = ["table", "counter", "sideboard", "cabinet"]
+crop_target_px = 480  # long side of each enlarged crop
+crop_max_scale = 4.0
+crop_up = 0.3  # share of the region's height added above it, where objects on its top appear
+crop_depth = 0.5  # share of the region's height kept below its top edge: the top surface, not the legs
+max_crops = 2  # crops per frame, largest first; each costs one request (about 1.5 s)
+crop_prompts = ["bowl", "cup", "mug", "plate", "wine glass", "teddy bear", "scissors", "toy airplane",
+                "bottle", "box", "puzzle piece", "photo", "picture"]
+# Semantic evidence and shape priors are combined as  p(c) ∝ L(c) · P_shape(c)^shape_weight,
+# where L is the mean SAM score of category c (or `label_floor` for categories SAM did not name).
+shape_weight = 0.5
+label_floor = 0.03
+# Depth clusters (steward.ego.providers.geometric_masks) of which at least this share SAM left
+# unlabelled become unnamed instances, classified by the shape priors alone. Off: the wide camera
+# also sees the robot's own arm and mast, which depth clustering, unlike world masks, does not
+# leave out (steward.md 13.7.7).
+geometric_fill = false
+fill_free_share = 0.7
+
+# Prompt text → Ego-State category. Categories outside the shape priors are allowed: such an object
+# is named by its prompt and gets no prior-size completion.
+[vocabulary]
+"wall" = "wall"
+"table" = "table"
+"chair" = "chair"
+"cabinet" = "cabinet"
+"sideboard" = "sideboard"
+"kitchen counter" = "counter"
+# The kitchen's untextured counter is not found as a counter at all; as a desk it scores about 0.6.
+"desk" = "counter"
+"drawer" = "drawer"
+"bowl" = "bowl"
+"cup" = "cup"
+"mug" = "mug"
+"plate" = "plate"
+"wine glass" = "wine_glass"
+"teddy bear" = "teddy_bear"
+"scissors" = "scissors"
+"toy airplane" = "toy_airplane"
+"bottle" = "bottle"
+"plant" = "plant"
+"box" = "box"
+"puzzle piece" = "puzzle_piece"
+# A printed top (a puzzle box lid, a picture book) scores about 0.8 as a photo and not at all as a
+# box or lid: the robot sees the print, and the agent names what carries it.
+"photo" = "picture"
+"picture" = "picture"

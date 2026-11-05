@@ -23,6 +23,12 @@ importers:
       '@steward/dsh-ego-runtime-client':
         specifier: workspace:*
         version: link:packages/dsh-ego-runtime-client
+      '@steward/dsh-novelanything-client':
+        specifier: workspace:*
+        version: link:packages/dsh-novelanything-client
+      '@steward/dsh-rgbd-video-gen-client':
+        specifier: workspace:*
+        version: link:packages/dsh-rgbd-video-gen-client
       '@steward/dsh-robot-safety':
         specifier: workspace:*
         version: link:packages/dsh-robot-safety
@@ -32,6 +38,12 @@ importers:
       '@steward/dsh-tool-ego-capabilities':
         specifier: workspace:*
         version: link:packages/dsh-tool-ego-capabilities
+      '@steward/dsh-tool-novelanything':
+        specifier: workspace:*
+        version: link:packages/dsh-tool-novelanything
+      '@steward/dsh-tool-rgbd-video-gen':
+        specifier: workspace:*
+        version: link:packages/dsh-tool-rgbd-video-gen
       '@steward/dsh-tool-world':
         specifier: workspace:*
         version: link:packages/dsh-tool-world
@@ -57,6 +69,30 @@ importers:
         specifier: workspace:*
         version: link:../dsh-tool-ego-capabilities
 
+  packages/dsh-bundle-novelanything:
+    dependencies:
+      '@deepseek-ai/dsh-skill-filesystem':
+        specifier: 0.2.1-rc.3
+        version: 0.2.1-rc.3(@deepseek-ai/cordis@4.0.5)(@deepseek-ai/dsh-fs@0.2.1-rc.3(@deepseek-ai/cordis@4.0.5)(@deepseek-ai/dsh-brand@0.2.1-rc.3(@deepseek-ai/cordis@4.0.5))(@deepseek-ai/dsh-llm@0.2.1-rc.3(@deepseek-ai/cordis@4.0.5))(@deepseek-ai/dsh-sandbox@0.2.1-rc.3(@deepseek-ai/cordis@4.0.5)(@deepseek-ai/dsh-llm@0.2.1-rc.3(@deepseek-ai/cordis@4.0.5))(@deepseek-ai/dsh-session@0.2.1-rc.3(@deepseek-ai/cordis@4.0.5)(@deepseek-ai/dsh-scope@0.2.1-rc.3(@deepseek-ai/cordis@4.0.5)))))(@deepseek-ai/dsh-home-paths@0.2.1-rc.3(@deepseek-ai/cordis@4.0.5))(@deepseek-ai/dsh-skill@0.2.1-rc.3(@deepseek-ai/cordis@4.0.5)(@deepseek-ai/dsh-llm@0.2.1-rc.3(@deepseek-ai/cordis@4.0.5))(@deepseek-ai/dsh-scope@0.2.1-rc.3(@deepseek-ai/cordis@4.0.5)))
+      '@steward/dsh-novelanything-client':
+        specifier: workspace:*
+        version: link:../dsh-novelanything-client
+      '@steward/dsh-tool-novelanything':
+        specifier: workspace:*
+        version: link:../dsh-tool-novelanything
+
+  packages/dsh-bundle-rgbd-video-gen:
+    dependencies:
+      '@deepseek-ai/dsh-skill-filesystem':
+        specifier: 0.2.1-rc.3
+        version: 0.2.1-rc.3(@deepseek-ai/cordis@4.0.5)(@deepseek-ai/dsh-fs@0.2.1-rc.3(@deepseek-ai/cordis@4.0.5)(@deepseek-ai/dsh-brand@0.2.1-rc.3(@deepseek-ai/cordis@4.0.5))(@deepseek-ai/dsh-llm@0.2.1-rc.3(@deepseek-ai/cordis@4.0.5))(@deepseek-ai/dsh-sandbox@0.2.1-rc.3(@deepseek-ai/cordis@4.0.5)(@deepseek-ai/dsh-llm@0.2.1-rc.3(@deepseek-ai/cordis@4.0.5))(@deepseek-ai/dsh-session@0.2.1-rc.3(@deepseek-ai/cordis@4.0.5)(@deepseek-ai/dsh-scope@0.2.1-rc.3(@deepseek-ai/cordis@4.0.5)))))(@deepseek-ai/dsh-home-paths@0.2.1-rc.3(@deepseek-ai/cordis@4.0.5))(@deepseek-ai/dsh-skill@0.2.1-rc.3(@deepseek-ai/cordis@4.0.5)(@deepseek-ai/dsh-llm@0.2.1-rc.3(@deepseek-ai/cordis@4.0.5))(@deepseek-ai/dsh-scope@0.2.1-rc.3(@deepseek-ai/cordis@4.0.5)))
+      '@steward/dsh-rgbd-video-gen-client':
+        specifier: workspace:*
+        version: link:../dsh-rgbd-video-gen-client
+      '@steward/dsh-tool-rgbd-video-gen':
+        specifier: workspace:*
+        version: link:../dsh-tool-rgbd-video-gen
+
   packages/dsh-bundle-world:
     dependencies:
       '@steward/dsh-tool-world':
@@ -67,6 +103,10 @@ importers:
         version: link:../dsh-world-client
 
   packages/dsh-ego:
+    dependencies:
+      '@deepseek-ai/dsh-brand':
+        specifier: 0.2.1-rc.3
+        version: 0.2.1-rc.3(@deepseek-ai/cordis@4.0.5)
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: 4.0.5
@@ -80,6 +120,70 @@ importers:
       '@steward/http-json':
         specifier: workspace:*
         version: link:../http-json
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: 4.0.5
+        version: 4.0.5(@deepseek-ai/cordis-plugin-include@1.0.10)(@deepseek-ai/cordis-plugin-loader@1.0.6)
+      '@deepseek-ai/schemastery':
+        specifier: 3.18.5
+        version: 3.18.5
+
+  packages/dsh-novelanything:
+    dependencies:
+      '@deepseek-ai/dsh-brand':
+        specifier: 0.2.1-rc.3
+        version: 0.2.1-rc.3(@deepseek-ai/cordis@4.0.5)
+      '@steward/dsh-ego':
+        specifier: workspace:*
+        version: link:../dsh-ego
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: 4.0.5
+        version: 4.0.5(@deepseek-ai/cordis-plugin-include@1.0.10)(@deepseek-ai/cordis-plugin-loader@1.0.6)
+
+  packages/dsh-novelanything-client:
+    dependencies:
+      '@steward/dsh-ego':
+        specifier: workspace:*
+        version: link:../dsh-ego
+      '@steward/dsh-novelanything':
+        specifier: workspace:*
+        version: link:../dsh-novelanything
+      zod:
+        specifier: ^4.4.3
+        version: 4.6.7
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: 4.0.5
+        version: 4.0.5(@deepseek-ai/cordis-plugin-include@1.0.10)(@deepseek-ai/cordis-plugin-loader@1.0.6)
+      '@deepseek-ai/schemastery':
+        specifier: 3.18.5
+        version: 3.18.5
+
+  packages/dsh-rgbd-video-gen:
+    dependencies:
+      '@deepseek-ai/dsh-brand':
+        specifier: 0.2.1-rc.3
+        version: 0.2.1-rc.3(@deepseek-ai/cordis@4.0.5)
+      '@steward/dsh-ego':
+        specifier: workspace:*
+        version: link:../dsh-ego
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: 4.0.5
+        version: 4.0.5(@deepseek-ai/cordis-plugin-include@1.0.10)(@deepseek-ai/cordis-plugin-loader@1.0.6)
+
+  packages/dsh-rgbd-video-gen-client:
+    dependencies:
+      '@steward/dsh-ego':
+        specifier: workspace:*
+        version: link:../dsh-ego
+      '@steward/dsh-rgbd-video-gen':
+        specifier: workspace:*
+        version: link:../dsh-rgbd-video-gen
+      zod:
+        specifier: ^4.4.3
+        version: 4.6.7
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: 4.0.5
@@ -134,6 +238,38 @@ importers:
       '@types/node':
         specifier: ^24.0.0
         version: 24.19.2
+
+  packages/dsh-tool-novelanything:
+    dependencies:
+      '@steward/dsh-ego':
+        specifier: workspace:*
+        version: link:../dsh-ego
+      '@steward/dsh-novelanything':
+        specifier: workspace:*
+        version: link:../dsh-novelanything
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: 4.0.5
+        version: 4.0.5(@deepseek-ai/cordis-plugin-include@1.0.10)(@deepseek-ai/cordis-plugin-loader@1.0.6)
+      '@deepseek-ai/dsh-tools':
+        specifier: 0.2.1-rc.3
+        version: 0.2.1-rc.3(216a232736cc22d421973382c4e97320)
+
+  packages/dsh-tool-rgbd-video-gen:
+    dependencies:
+      '@steward/dsh-ego':
+        specifier: workspace:*
+        version: link:../dsh-ego
+      '@steward/dsh-rgbd-video-gen':
+        specifier: workspace:*
+        version: link:../dsh-rgbd-video-gen
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: 4.0.5
+        version: 4.0.5(@deepseek-ai/cordis-plugin-include@1.0.10)(@deepseek-ai/cordis-plugin-loader@1.0.6)
+      '@deepseek-ai/dsh-tools':
+        specifier: 0.2.1-rc.3
+        version: 0.2.1-rc.3(216a232736cc22d421973382c4e97320)
 
   packages/dsh-tool-world:
     dependencies:

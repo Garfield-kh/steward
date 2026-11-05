@@ -15,18 +15,20 @@ from __future__ import annotations
 
 import collections
 import copy
+import dataclasses
 import itertools
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 import numpy as np
 
-from steward.ego.classify import SHAPES, classify, prototype
+from steward.ego.classify import SHAPES, classify, fuse_semantics, prototype
 from steward.ego.perception import box_at_yaw, box_of, segments
 from steward.ego.planner import Box2D, front_box, protrusion, room_centre
 from steward.ego.priors import compatible, prior
-from steward.math3d import (pose_compose, pose_inverse, quat_from_axis_angle, quat_from_yaw, quat_mul,
-                            quat_rotate, wrap_angle, yaw_from_quat)
+from steward.math3d import (matrix_from_quat, pose_compose, pose_inverse, quat_from_axis_angle, quat_from_yaw,
+                            quat_mul, quat_rotate, wrap_angle, yaw_from_quat)
 from steward.scene.schema import Entity, Est, Link, Relation, RigidTree, SceneState, primitive
 
 SELF_ID = "e:self"
@@ -71,6 +73,7 @@ class Track:
     held_offset: np.ndarray | None = None
     color_counts: dict[str, float] = field(default_factory=dict)
     voxels: np.ndarray | None = None  # 1 cm voxels of every surface seen of this object (RGB-D mode)
+    span: np.ndarray | None = None  # corners of each view's full-resolution box; the voxel cloud is only a sample
     completion: float = 0.0  # how far the box was extended beyond what was seen (shape prior)
     settled: bool = True  # False right after the robot put it down, until it is seen again
     mean_rgb: np.ndarray | None = None  # running mean colour of its regions (RGB-D mode)
@@ -86,6 +89,9 @@ class Track:
     recent: collections.deque = field(default_factory=lambda: collections.deque(maxlen=RECENT_VIEWS))
     # (centre, size) of its latest single-view measurements, for the robust box of small objects
     appearance: Appearance | None = None
+    semantic_counts: dict[str, float] = field(default_factory=dict)
+    # summed segmenter scores per category over the views that named it (robot-side segmentation)
+    semantic_views: int = 0  # views whose region the segmenter named
 
     @property
     def category(self) -> str:
@@ -162,6 +168,18 @@ class EstimatorConfig:
     wall_like_top: float = 1.25
     """Robot knowledge of the home: nothing but walls reaches this high, so a region topping it is
     part of a wall whatever its own classification says, and a non-wall track this tall is not real."""
+    semantic_shape_weight: float = 0.5
+    """With robot-side segmentation: exponent of the shape-prior probability (:func:`fuse_semantics`)."""
+    semantic_label_floor: float = 0.03
+    """With robot-side segmentation: semantic likelihood of a category the segmenter did not name."""
+    semantic_named_score: float = 0.6
+    """With robot-side segmentation: mean segmenter score of a non-wall category, over at least
+    NAMED_VIEWS views, from which a track counts as a real object however hollow it looks."""
+    body_margin_m: float = 0.04
+    """Margin around the robot's own links (:meth:`EgoEstimator.body_boxes`) within which depth
+    points are the robot itself; world masks leave the robot out, robot-side segmentation does not."""
+    body_share: float = 0.5
+    """Share of a region's points on the robot's own links that makes the whole region the robot."""
 
 
 @dataclass
@@ -185,7 +203,8 @@ class EgoEstimator:
         self.held_gripper: str | None = None
         self._rng = np.random.default_rng(0)
         self._self_template = self._make_self_template()
-        self._camera_link_id, self._camera = self._camera_model()
+        self.cameras = self._camera_models()
+        self.primary_camera = next(iter(self.cameras))
 
     # ------------------------------------------------------------- body model
     def _make_self_template(self) -> dict:
@@ -194,14 +213,19 @@ class EgoEstimator:
         data.pop("asset", None)
         return data
 
-    def _camera_model(self) -> tuple[str, dict]:
-        """The robot's active camera: ``(link id, sensor)``; the link pose comes from the tree walk."""
+    def _camera_models(self) -> dict[str, tuple[str, dict]]:
+        """Sensor id → (id of the link carrying it, sensor description) of every camera, in model
+        order; the first is the primary camera. The link's pose comes from the tree walk, so a camera
+        on a lift or an arm follows the joint encoders."""
         tree = self.robot_model["body"]
+        cameras = {}
         for link in tree["links"]:
             for sensor in link.get("sensors", []):
                 if sensor["kind"] in ("rgb", "depth", "rgbd"):
-                    return link["id"], sensor
-        raise ValueError("robot model has no camera")
+                    cameras[sensor["id"]] = (link["id"], sensor)
+        if not cameras:
+            raise ValueError("robot model has no camera")
+        return cameras
 
     # ------------------------------------------------------- generic kinematics
     def _tree(self) -> tuple[dict[str, list[tuple[dict, str]]], str]:
@@ -258,37 +282,73 @@ class EgoEstimator:
 
     def camera_poses(self) -> dict[str, dict]:
         """World pose of every camera the robot carries, keyed by sensor id."""
-        out = {}
-        tree = self.robot_model["body"]
-        for link in tree["links"]:
-            for sensor in link.get("sensors", []):
-                if sensor["kind"] in ("rgb", "depth", "rgbd"):
-                    out[sensor["id"]] = pose_compose(self.link_pose(link["id"]), sensor["mount"])
-        return out
+        return {camera: self.camera_pose(camera=camera) for camera in self.cameras}
 
     def base_pose(self) -> dict:
         o = self.odometry
         return {"p": [o["x"], o["y"], 0.0], "q": quat_from_yaw(o["yaw"])}
 
-    def camera_pose(self, sensor_id: str | None = None, odometry: dict | None = None) -> dict:
-        """World pose of a camera: the one a frame came from, or the head camera at an odometry.
+    def camera_pose(self, odometry: dict | None = None, camera: str | None = None) -> dict:
+        """World pose of a camera mount (looks along +x; ``camera`` None: the primary one), at the
+        current odometry or a given one. Raises ``KeyError`` for a camera the robot model lacks.
 
-        The body's own kinematics place every sensor, which is what a body whose cameras ride on
-        its arms (the twin) needs; a body with a fixed head can also ask where that head would be
-        at another odometry."""
-        if sensor_id is not None:
-            return self.camera_poses()[sensor_id]
-        pose = pose_compose(self.link_pose(self._camera_link_id), self._camera["mount"])
+        The body's own kinematics place every sensor, which is what a body whose cameras ride on a
+        lift or its arms (the twin) needs. With ``odometry`` the same camera is carried to a robot
+        standing there, keeping the current joint state."""
+        link_id, sensor = self.cameras[camera or self.primary_camera]
+        pose = pose_compose(self.link_pose(link_id), sensor["mount"])
         if odometry is None:
             return pose
-        # The same camera on a robot standing at another odometry: its pose in the base frame
-        # (from the current joint state), carried to that base pose.
         base = {"p": [odometry["x"], odometry["y"], 0.0], "q": quat_from_yaw(odometry["yaw"])}
         in_base = pose_compose(pose_inverse(self.base_pose()), pose)
         return pose_compose(base, in_base)
 
+    def camera_intrinsics(self, camera: str | None = None) -> dict:
+        """``width``, ``height`` and ``fovy`` (degrees) of a camera (None: the primary one)."""
+        return self.cameras[camera or self.primary_camera][1]["intrinsics"]
+
+    def on_body(self, points: np.ndarray) -> np.ndarray:
+        """Which of ``points`` (N×3, map frame) lie on the robot's own links (within
+        ``body_margin_m``); while the gripper holds something, none near the gripper, which are the load."""
+        inside = _in_boxes(points, self.body_boxes(), self.config.body_margin_m)
+        if self.gripper.get("holding"):
+            held = self.tracks.get(self.held_id) if self.held_id else None
+            reach = max(HELD_FALLBACK_M, held.footprint if held is not None else 0.0)
+            inside &= np.linalg.norm(points - self.gripper_position(self.held_gripper), axis=1) > reach
+        return inside
+
+    def body_boxes(self) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """``(centre, half extents, rotation matrix)`` in the map frame of every visual primitive of
+        the robot's own links, from odometry and joint encoders."""
+        tree = self.robot_model["body"]
+        children = {j["child"] for j in tree["joints"]}
+        poses = {link["id"]: self.base_pose() for link in tree["links"] if link["id"] not in children}
+        pending = list(tree["joints"])
+        while pending:
+            joint = next((j for j in pending if j["parent"] in poses), None)
+            if joint is None:
+                raise ValueError(f"robot model joints {[j['id'] for j in pending]} hang from no reachable link")
+            pending.remove(joint)
+            kind = joint["type"]["value"]
+            q = float(self.joints.get(joint["id"], (joint["q"]["value"] or [0.0])[0]))
+            axis = joint.get("axis", {}).get("value", [0.0, 0.0, 1.0])
+            motion = {"p": [a * q for a in axis], "q": [1.0, 0.0, 0.0, 0.0]} if kind == "prismatic" else \
+                {"p": [0.0, 0.0, 0.0], "q": quat_from_axis_angle(axis, q) if kind == "revolute" else [1.0, 0.0, 0.0, 0.0]}
+            poses[joint["child"]] = pose_compose(pose_compose(poses[joint["parent"]], joint["origin"]["value"]), motion)
+        boxes = []
+        for link in tree["links"]:
+            for geom in link.get("geometry", {}).get("visual", []):
+                size = geom.get("size", [])
+                half = {"box": lambda s: [s[0] / 2, s[1] / 2, s[2] / 2], "cylinder": lambda s: [s[0], s[0], s[1] / 2],
+                        "capsule": lambda s: [s[0], s[0], s[1] / 2 + s[0]], "sphere": lambda s: [s[0]] * 3}.get(geom.get("shape"))
+                if half is None:
+                    continue
+                world = pose_compose(poses[link["id"]], geom.get("pose") or {"p": [0, 0, 0], "q": [1, 0, 0, 0]})
+                boxes.append((np.asarray(world["p"], float), np.asarray(half(size), float), matrix_from_quat(world["q"])))
+        return boxes
+
     def _camera_link(self) -> str:
-        return self._camera_link_id
+        return self.cameras[self.primary_camera][0]
 
     def gripper_position(self, gripper_link: str | None = None, joints: dict | None = None) -> np.ndarray:
         """Pinch point of a gripper, from the robot's own kinematics."""
@@ -316,10 +376,13 @@ class EgoEstimator:
         # A held object moves with this frame's body pose; update it before association so a
         # turning robot does not see its own load as a new object.
         self._follow_held()
-        cam = self.camera_pose(self._frame_camera(frame))
+        cameras = [c["id"] for c in frame.get("cameras", []) if c["id"] in self.cameras] or [self.primary_camera]
+        cams = {c: self.camera_pose(camera=c) for c in cameras}
         measurements = []
         for det in frame.get("detections", []):
-            world = pose_compose(cam, det["pose"])
+            if det.get("camera", self.primary_camera) not in cams:
+                continue
+            world = pose_compose(cams[det.get("camera", self.primary_camera)], det["pose"])
             rng = float(det.get("range", np.linalg.norm(det["pose"]["p"])))
             sigma = self.config.pos_sigma_base + self.config.pos_sigma_per_m * rng
             measurements.append((det, np.asarray(world["p"]), yaw_from_quat(world["q"]), sigma))
@@ -340,26 +403,44 @@ class EgoEstimator:
                 self._fuse(self.tracks[assigned[k]], det, pos, yaw, sigma)
             else:
                 matched.add(self._new_track(det, pos, yaw, sigma).id)
-        self._decay_unseen(cam, matched)
+        self._decay_unseen(cams, matched)
         self._merge_duplicates()
         self._follow_held()
         self.version += 1
 
-    # ------------------------------------------------------------- RGB-D path
-    @staticmethod
-    def _frame_camera(frame: dict, header: dict | None = None) -> str | None:
-        """The sensor a frame came from; a robot with several cameras reports it per frame."""
-        for source in (frame, header):
-            if isinstance(source, dict):
-                camera = source.get("camera")
-                if isinstance(camera, dict) and camera.get("id"):
-                    return str(camera["id"])
-        return None
+    def update_body(self, header: dict) -> None:
+        """Follow the robot's own state (stamp, odometry, joints, gripper) from a sensor header
+        without imaging: between two segmented frames, what the gripper holds moves with it."""
+        self.stamp = float(header["stamp"])
+        self.odometry = header["odometry"]
+        self.joints = header["joints"]
+        self.gripper = header["gripper"]
+        if not self.gripper.get("holding"):
+            self._clear_held()
+        self._follow_held()
+        self.version += 1
 
-    def update_rgbd(self, frame: dict) -> None:
+    def category_probs(self, size: np.ndarray, bottom: float, color: np.ndarray, invalid_frac: float,
+                       bottom_seen: bool, semantics: dict[str, float] | None) -> dict[str, float]:
+        """Category probabilities of a measured box: the shape priors alone, or fused with the
+        segmenter's category scores when it named the region."""
+        if not semantics:
+            return classify(size, bottom, color, invalid_frac, bottom_seen=bottom_seen)
+        shape = classify(size, bottom, color, invalid_frac, bottom_seen=bottom_seen, min_prob=0.0)
+        cfg = self.config
+        return fuse_semantics(semantics, shape, cfg.semantic_shape_weight, cfg.semantic_label_floor)
+
+    # ------------------------------------------------------------- RGB-D path
+    def update_rgbd(self, frame: dict, defer: Callable[[np.ndarray], bool] | None = None) -> None:
         """Fuse one decoded RGB-D frame: segment it, measure every region, associate regions with
         tracks by position, size and category, and rebuild each matched track's box from the
-        points it has accumulated over recent views."""
+        points it has accumulated over recent views.
+
+        :param frame: decoded RGB-D frame with its sensor header and instance mask.
+        :param defer: true for the eight corners of the box of a region that another frame of the
+            same instant fuses: such a region keeps its track from fading as unseen but adds no
+            points, votes or new track.
+        """
         header = frame["header"]
         self.stamp = float(header["stamp"])
         self.odometry = header["odometry"]
@@ -368,15 +449,22 @@ class EgoEstimator:
         if not self.gripper.get("holding"):
             self._clear_held()
         self._follow_held()
-        cam = self.camera_pose(self._frame_camera(frame, header))
+        cam = self.camera_pose(camera=frame.get("camera"))
         cam_p = np.asarray(cam["p"])
         measurements = []
         for seg in segments(frame, cam, rng=self._rng):
+            on_body = self.on_body(seg.points)
+            if on_body.mean() >= self.config.body_share:
+                continue  # the robot's own arm, mast or base, which robot-side segmentation also names
+            if on_body.any():
+                seg = dataclasses.replace(seg, points=seg.points[~on_body])
             centre, size, yaw = box_of(seg.points)
-            probs = classify(size, centre[2] - size[2] / 2, seg.color, seg.invalid_frac, bottom_seen=seg.bottom_seen)
+            probs = self.category_probs(size, centre[2] - size[2] / 2, seg.color, seg.invalid_frac,
+                                        seg.bottom_seen, seg.semantics)
             footprint = float(max(size[0], size[1]))
             measurements.append({"seg": seg, "centre": centre, "size": size, "yaw": yaw, "probs": probs,
-                                 "footprint": footprint, "concave": _concave(seg.points, centre, footprint, cam_p)})
+                                 "footprint": footprint, "concave": _concave(seg.points, centre, footprint, cam_p),
+                                 "deferred": defer is not None and defer(_box_corners(centre, size, yaw))})
         pairs = []
         held = self.tracks.get(self.held_id) if self.held_id else None
         for i, m in enumerate(measurements):
@@ -431,13 +519,18 @@ class EgoEstimator:
                 continue
             used.add(i)
             matched.add(tid)
-            self._fuse_cloud(self.tracks[tid], measurements[i], cam_p)
+            if not measurements[i]["deferred"]:
+                self._fuse_cloud(self.tracks[tid], measurements[i], cam_p)
         for i, m in enumerate(measurements):
+            if m["deferred"]:
+                continue
             # A region cut by the image border is only part of something and waits for a full view,
             # except a wall: a near wall always fills the image edge to edge.
             is_wall = m["probs"].get("wall", 0.0) >= 0.5
             if m["concave"] and not is_wall:
                 continue  # the inside of a corner is room, not a solid object
+            if _mixed_ranges(m["seg"].points, cam_p, m["size"]) and m["probs"].get("wall", 0.0) < 0.5:
+                continue  # near surface and far background in one mask: a wide thick blob, not an object
             if i not in used and (not m["seg"].border or is_wall):
                 track = self._new_cloud_track(m, cam_p)
                 matched.add(track.id)
@@ -446,6 +539,7 @@ class EgoEstimator:
         self._merge_parts(cam_p)
         self._dedupe_furniture(cam_p)
         self._merge_rim_fragments()
+        self._fold_furniture_slices(cam_p)
         self._merge_same_surface(cam_p)
         self._merge_walls(cam_p)
         self._drop_impossible(cam_p)
@@ -456,9 +550,9 @@ class EgoEstimator:
     def _drop_impossible(self, cam_p: np.ndarray) -> None:
         """Remove tracks that cannot be solid objects: one whose surfaces lie behind its own box
         centre as seen from the camera (a concave corner of the room boxed as if it were a convex
-        block), one whose footprint holds the robot's base (the robot stands there), and a non-wall
-        track as tall as a wall (wall pieces swept into it). Such boxes would otherwise fill the
-        room's corners, hide the objects in them and block every path."""
+        block), one whose footprint holds the robot's base (the robot stands there), a non-wall
+        track as tall as a wall (wall pieces swept into it), and a ``box`` wider than 0.9 m.
+        Such boxes would otherwise fill the room's corners, hide the objects in them and block every path."""
         base = np.array([self.odometry["x"], self.odometry["y"], 0.0])
         for track in list(self.tracks.values()):
             if track.held or track.category == "wall":
@@ -466,12 +560,17 @@ class EgoEstimator:
             holds_robot = _inside(track, base, -0.05) and track.bottom() < 1.0
             wall_tall = track.top() >= self.config.wall_like_top and track.footprint >= 0.5
             # A table (open beneath its top) or an open drawer can look hollow from some viewpoints;
-            # an object seen many times and identified with confidence is not a boxed room corner.
-            hollow = not _identified(track) and track.voxels is not None \
+            # an object seen many times and identified with confidence, or one the segmenter keeps
+            # naming as something other than a wall, is not a boxed room corner.
+            hollow = not _identified(track) and not _named(track, self.config.semantic_named_score) \
+                and track.voxels is not None \
                 and _concave(_points(track.voxels), track.pos, track.footprint, cam_p)
-            if holds_robot or wall_tall or hollow:
+            oversized_box = track.category == "box" and track.footprint > 0.9
+            if holds_robot or wall_tall or hollow or oversized_box:
                 self._drop(track, "holds the robot's base" if holds_robot else
-                           "as tall as a wall" if wall_tall else "hollow: its surfaces lie behind its centre")
+                           "as tall as a wall" if wall_tall else
+                           "hollow: its surfaces lie behind its centre" if hollow else
+                           "box wider than any object the segmenter names box")
 
     def _drop_orphan_parts(self) -> None:
         """A drawer is a part of a piece of furniture; one standing on its own is a misread edge.
@@ -697,8 +796,10 @@ class EgoEstimator:
                 else:
                     keep, drop = (a, b) if a.observations >= b.observations else (b, a)
                 keep.voxels = self._union(keep.voxels, drop.voxels)
+                _absorb_span(keep, drop)
                 for cat, n in drop.category_counts.items():
                     keep.category_counts[cat] = keep.category_counts.get(cat, 0.0) + n
+                _absorb_semantics(keep, drop)
                 for col, n in drop.color_counts.items():
                     keep.color_counts[col] = keep.color_counts.get(col, 0.0) + n
                 keep.observations += drop.observations
@@ -729,8 +830,10 @@ class EgoEstimator:
                 else:
                     keep, drop = (a, b) if a.observations >= b.observations else (b, a)
                 keep.voxels = self._union(keep.voxels, drop.voxels)
+                _absorb_span(keep, drop)
                 for cat, n in drop.category_counts.items():
                     keep.category_counts[cat] = keep.category_counts.get(cat, 0.0) + n
+                _absorb_semantics(keep, drop)
                 keep.observations += drop.observations
                 keep.existence = max(keep.existence, drop.existence)
                 self._drop(drop, "merged: one wall", into=keep)
@@ -768,8 +871,10 @@ class EgoEstimator:
                     # in front of a wall piece misread as furniture)
                 if small.voxels is not None:
                     big.voxels = self._union(big.voxels, small.voxels)
+                _absorb_span(big, small)
                 for cat, n in small.category_counts.items():
                     big.category_counts[cat] = big.category_counts.get(cat, 0.0) + n
+                _absorb_semantics(big, small)
                 big_views = big.observations
                 big.observations += small.observations
                 big.existence = max(big.existence, small.existence)
@@ -780,6 +885,40 @@ class EgoEstimator:
                     self._rename(big, small.id)
                 if big.voxels is not None:
                     self._rebuild_geometry(big, cam_p, 2.0)
+
+    def _fold_furniture_slices(self, cam_p: np.ndarray) -> None:
+        """Fold a ``box`` that is the upper half of a cabinet, sideboard or counter back into it.
+
+        The segmenter names that half ``box`` while the furniture keeps its own name. The slice's
+        centre lies in the furniture's footprint and it does not rise above the furniture; a box
+        standing on the top does, and stays a separate track. The ``box`` votes are not copied, so
+        they cannot relabel the furniture."""
+        hosts = ("cabinet", "sideboard", "counter", "table", "drawer")
+        for small in list(self.tracks.values()):
+            if small.id not in self.tracks or small.held or small.carried or small.perceived_category != "box":
+                continue
+            host = None
+            for big in self.tracks.values():
+                if big.id == small.id or big.held or big.category not in hosts or big.footprint < 0.4:
+                    continue
+                if small.footprint < 0.45 * big.footprint or not _inside(big, small.pos, 0.08):
+                    continue
+                if small.top() > big.top() + 0.06 or small.bottom() > big.top() + 0.05:
+                    continue  # it stands on the top, or floats clear of it
+                if small.top() < big.bottom() + 0.1:
+                    continue
+                if host is None or big.footprint > host.footprint:
+                    host = big
+            if host is None:
+                continue
+            if small.voxels is not None:
+                host.voxels = self._union(host.voxels, small.voxels)
+            _absorb_span(host, small)
+            host.observations += small.observations
+            host.existence = max(host.existence, small.existence)
+            self._drop(small, "merged: slice of the furniture", into=host)
+            if host.voxels is not None:
+                self._rebuild_geometry(host, cam_p, 2.0)
 
     def _new_cloud_track(self, m: dict, cam_p: np.ndarray) -> Track:
         track = Track(id=f"e:{next(self._ids)}", category_counts=dict(m["probs"]), pos=m["centre"].copy(),
@@ -797,6 +936,10 @@ class EgoEstimator:
             # partly hidden and may mix with what lies around, so they do not relabel it.
             for cat, prob in m["probs"].items():
                 track.category_counts[cat] = track.category_counts.get(cat, 0.0) + prob
+            if seg.semantics:
+                for cat, score in seg.semantics.items():
+                    track.semantic_counts[cat] = track.semantic_counts.get(cat, 0.0) + score
+                track.semantic_views += 1
             name = color_name(seg.color, seg.invalid_frac)
             track.color_counts[name] = track.color_counts.get(name, 0.0) + 1.0
         track.observations += 1
@@ -826,6 +969,8 @@ class EgoEstimator:
         if len(points) > self.config.points_per_cloud:
             points = points[self._rng.choice(len(points), self.config.points_per_cloud, replace=False)]
         track.voxels = self._union(track.voxels, _voxelize(points))
+        if seg.span is not None:
+            track.span = _larger_span(track.span, seg.span)
         self._rebuild_geometry(track, cam_p, seg.range)
 
     def _furniture_of(self, drawer: Track) -> Track | None:
@@ -889,6 +1034,21 @@ class EgoEstimator:
             if not low.all() and int(low.sum()) >= 10:
                 track.voxels = _voxelize(pts[low])
         centre, size, yaw = box_of(_points(track.voxels), trim=0.01)
+        if track.span is not None:
+            # The sample keeps the surfaces that hold most of the points. A wide top's far edge is
+            # real but only a few percent of the pixels, so the sampled box loses decimetres of
+            # depth and its centre moves toward the camera. A sideways fringe is left trimmed.
+            full_centre, full_size, full_yaw = box_of(track.span)
+            missing = float(np.max(np.sort(full_size) - np.sort(size)))
+            view = full_centre[:2] - cam_p[:2]
+            norm = float(np.linalg.norm(view))
+            deeper = float((full_centre[:2] - centre[:2]) @ (view / norm)) if norm > 1e-6 else 0.0
+            # The long face is dense, so the sample already has it. Only the far edge, a few
+            # percent of the pixels, is missing — and it lies further from the camera.
+            long_seen = float(np.max(size[:2])) > 0.85 * float(np.max(full_size[:2]))
+            wide = track.category in ("counter", "sideboard", "table", "cabinet")
+            if wide and missing > 0.08 and deeper > 0.04 and long_seen:
+                centre, size, yaw = full_centre, full_size, full_yaw
         if max(size[0], size[1]) < SMALL_M and len(track.recent) >= 3:
             centre = np.median([c for c, _ in track.recent], axis=0)
             size = np.median([z for _, z in track.recent], axis=0)
@@ -902,8 +1062,9 @@ class EgoEstimator:
         if track.mean_rgb is not None:
             # The accumulated box is the best evidence of what the object is: classify it again,
             # with confidence growing with the number of views behind it.
-            probs = classify(size, centre[2] - size[2] / 2, track.mean_rgb, track.mean_invalid,
-                             bottom_seen=track.bottom_seen)
+            mean = {k: v / track.semantic_views for k, v in track.semantic_counts.items()} if track.semantic_views else None
+            probs = self.category_probs(size, centre[2] - size[2] / 2, track.mean_rgb, track.mean_invalid,
+                                        track.bottom_seen, mean)
             weight = float(min(track.observations, 20))
             track.category_counts = {k: v * weight for k, v in probs.items()}
         proto = prototype(track.category) if track.category_counts else None
@@ -1028,6 +1189,7 @@ class EgoEstimator:
                 keep.var = 1.0 / (w_keep + w_drop)
                 for cat, n in drop.category_counts.items():
                     keep.category_counts[cat] = keep.category_counts.get(cat, 0.0) + n
+                _absorb_semantics(keep, drop)
                 for col, n in drop.color_counts.items():
                     keep.color_counts[col] = keep.color_counts.get(col, 0.0) + n
                 keep.observations += drop.observations
@@ -1084,20 +1246,30 @@ class EgoEstimator:
         n = track.observations
         track.size = track.size + (np.asarray(det["size"], float) - track.size) / n
 
-    def _decay_unseen(self, cam: dict, matched: set[str]) -> None:
-        fovy = math.radians(self._camera["intrinsics"]["fovy"])
-        aspect = self._camera["intrinsics"]["width"] / self._camera["intrinsics"]["height"]
-        half_v = fovy / 2 * 0.8
-        half_h = math.atan(math.tan(fovy / 2) * aspect) * 0.8
-        inv = pose_inverse(cam)
+    def _decay_unseen(self, cams: dict[str, dict], matched: set[str]) -> None:
+        """Fade every unmatched track that lies well inside the view of at least one of ``cams``
+        (camera id → pose): once per frame, however many cameras should have seen it."""
+        views = []
+        for camera, cam in cams.items():
+            intrinsics = self.camera_intrinsics(camera)
+            fovy = math.radians(intrinsics["fovy"])
+            half_v = fovy / 2 * 0.8
+            half_h = math.atan(math.tan(fovy / 2) * intrinsics["width"] / intrinsics["height"]) * 0.8
+            views.append((pose_inverse(cam), half_h, half_v))
+
+        def in_view(pos: np.ndarray) -> bool:
+            for inv, half_h, half_v in views:
+                local = pose_compose(inv, {"p": pos.tolist(), "q": [1, 0, 0, 0]})["p"]
+                if (0.3 < local[0] < self.config.max_range * 0.8 and abs(math.atan2(local[1], local[0])) <= half_h
+                        and abs(math.atan2(local[2], local[0])) <= half_v):
+                    return True
+            return False
+
         for tid in list(self.tracks):
             track = self.tracks[tid]
             if tid in matched or track.held or track.carried or self._in_closed_drawer(track):
                 continue
-            local = pose_compose(inv, {"p": track.pos.tolist(), "q": [1, 0, 0, 0]})["p"]
-            if not (0.3 < local[0] < self.config.max_range * 0.8):
-                continue
-            if abs(math.atan2(local[1], local[0])) > half_h or abs(math.atan2(local[2], local[0])) > half_v:
+            if not in_view(track.pos):
                 continue
             track.existence *= self.config.missed_decay
             if track.existence < self.config.drop_below:
@@ -1160,6 +1332,7 @@ class EgoEstimator:
             if other is not track and not other.held and self.support_of(other) is track:
                 other.carried_offset = other.pos - track.pos
                 other.voxels = None
+                other.span = None
         self.held_since = max(self.stamp, float(since) if since is not None else self.stamp)
         self.held_gripper = gripper
         closed_at = self.gripper_position(gripper) if at is None else np.asarray(at, dtype=float)
@@ -1197,6 +1370,7 @@ class EgoEstimator:
         track.held = False
         track.held_offset = None
         track.voxels = None
+        track.span = None
         track.settled = False  # it settles where it was put down; the next view places it
         track.var = np.maximum(track.var, 0.02**2)
         track.yaw_var = max(track.yaw_var, YAW_MOVED**2)
@@ -1229,26 +1403,6 @@ class EgoEstimator:
             return known.rgb.shape[1], known.rgb.shape[0]
         return max(1, round(float(track.size[0]) / cell)), max(1, round(float(track.size[1]) / cell))
 
-    def _clear_held(self) -> None:
-        if self.stamp < self.held_since - 1e-6:
-            return  # this frame was rendered while the gripper was still open
-        track = self.tracks.get(self.held_id) if self.held_id else None
-        # It is where the hand let go of it, not where it was picked up: the arm carried it
-        # across the table, and a look taken after the release must recognise it there rather
-        # than find a second bowl at the old place.
-        if track is not None and track.held_offset is not None:
-            track.pos = self.gripper_position(self.held_gripper) + track.held_offset
-        self._unmark_held(track)
-        self.held_id = None
-        self.held_gripper = None
-        if track is None:
-            return
-        track.held = False
-        track.held_offset = None
-        track.voxels = None
-        track.settled = False  # it settles where it was put down; the next view places it
-        track.var = np.maximum(track.var, 0.02**2)
-
     def _read_grippers(self, frame: dict) -> None:
         """The gripper state this frame reports, for a single gripper or for one per arm.
 
@@ -1278,9 +1432,6 @@ class EgoEstimator:
             track.pos = self.gripper_position(self.held_gripper) + track.held_offset
         self._unmark_held(track)
 
-    def _follow_held(self) -> None:
-        if self.held_id and self.held_id in self.tracks:
-            track = self.tracks[self.held_id]
     def _follow_held(self) -> None:
         if not (self.held_id and self.held_id in self.tracks):
             return
@@ -1397,6 +1548,8 @@ class EgoEstimator:
             moved.pos = moved.pos + np.asarray(delta, float)
             if moved.voxels is not None:
                 moved.voxels = _voxelize(_points(moved.voxels) + np.asarray(delta, float))
+            if moved.span is not None:
+                moved.span = moved.span + np.asarray(delta, float)
         self.version += 1
         return carried
 
@@ -1544,6 +1697,7 @@ HELD_FALLBACK_M = 0.1
 YAW_MOVED = 0.3  # a detected heading this far off a track's means the object was turned
 STACK_TOL = 0.005  # a region this little below another's top face still rests on it
 IDENTIFIED_SHARE = 0.6
+NAMED_VIEWS = 2  # a name from a single view may be a phantom of one mask
 HELD_LARGER = 2.0  # a region with a footprint this many times the held object's is not the held object
 CONVEX_CHECK_M = 0.8  # boxes longer than this are checked for being filled rather than an outline
 MIN_FOOTPRINT_FILL = 0.2
@@ -1551,6 +1705,24 @@ SMALL_M = 0.3
 RECENT_VIEWS = 12
 APPEARANCE_SIZE_CHANGE = 0.2  # an extent this much off the one a face grid was laid out for starts a new grid
 SQUARE_SIDES = 0.9  # a footprint whose shorter side is at least this share of the longer is square
+
+
+def _in_boxes(points: np.ndarray, boxes: list[tuple[np.ndarray, np.ndarray, np.ndarray]], margin: float) -> np.ndarray:
+    """Which of ``points`` (N×3) lie within ``margin`` of any of the oriented ``boxes``."""
+    inside = np.zeros(len(points), dtype=bool)
+    for centre, half, rot in boxes:
+        local = (points - centre) @ rot
+        inside |= np.all(np.abs(local) <= half + margin, axis=1)
+    return inside
+
+
+def _box_corners(centre: np.ndarray, size: np.ndarray, yaw: float) -> np.ndarray:
+    """The eight corners (8×3) of a box turned by ``yaw`` about the vertical."""
+    c, s = math.cos(yaw), math.sin(yaw)
+    signs = np.array([[x, y, z] for x in (-0.5, 0.5) for y in (-0.5, 0.5) for z in (-0.5, 0.5)])
+    local = signs * np.asarray(size, float)
+    return np.asarray(centre, float) + np.stack([c * local[:, 0] - s * local[:, 1], s * local[:, 0] + c * local[:, 1],
+                                                 local[:, 2]], axis=1)
 
 
 def _voxelize(points: np.ndarray) -> np.ndarray:
@@ -1615,6 +1787,60 @@ def _identified(track: Track) -> bool:
     category = track.category
     return track.observations >= ESTABLISHED_VIEWS and category != "unknown" and total > 0 \
         and track.category_counts[category] / total >= IDENTIFIED_SHARE
+
+
+def _named(track: Track, min_score: float) -> bool:
+    """Named by the robot's segmenter in at least :data:`NAMED_VIEWS` views, with a mean score of
+    at least ``min_score`` for some category other than a wall."""
+    if track.semantic_views < NAMED_VIEWS:
+        return False
+    return any(score / track.semantic_views >= min_score
+               for cat, score in track.semantic_counts.items() if cat != "wall")
+
+
+def _mixed_ranges(points: np.ndarray, cam_p: np.ndarray, size: np.ndarray) -> bool:
+    """Whether a region mixes a near surface with far background.
+
+    The camera distance between the near and far tenths of its points exceeds 0.9 m, little of the
+    cloud sits between them, and the box is wide and thick. A table seen along its length also
+    spans that distance, but its points fill the interval. A wall is thin along its normal."""
+    if min(float(size[0]), float(size[1])) <= 0.25 or max(float(size[0]), float(size[1])) <= 1.0:
+        return False
+    dist = np.linalg.norm(points - cam_p, axis=1)
+    lo, hi = float(np.percentile(dist, 10)), float(np.percentile(dist, 90))
+    if hi - lo <= 0.9:
+        return False
+    span = hi - lo
+    mid = (dist > lo + 0.3 * span) & (dist < hi - 0.3 * span)
+    return float(mid.mean()) < 0.15
+
+
+def _larger_span(old: np.ndarray | None, new: np.ndarray) -> np.ndarray:
+    """The full-resolution box that covers more floor, unless the new one is a different object.
+
+    Corners from several views are not unioned: a few centimetres of disagreement between views
+    would swell the box the same way a merged duplicate does."""
+    if old is None:
+        return new
+    old_s, new_s = box_of(old)[1], box_of(new)[1]
+    old_area, new_area = float(old_s[0] * old_s[1]), float(new_s[0] * new_s[1])
+    if old_area * 1.05 < new_area < old_area * 1.5:
+        return new
+    return old
+
+
+def _absorb_span(keep: Track, drop: Track) -> None:
+    """Keep the fuller of two merged tracks' full-resolution boxes."""
+    if drop.span is None:
+        return
+    keep.span = _larger_span(keep.span, drop.span)
+
+
+def _absorb_semantics(keep: Track, drop: Track) -> None:
+    """Add the segmenter evidence of a track merged away to the track that keeps it."""
+    for cat, n in drop.semantic_counts.items():
+        keep.semantic_counts[cat] = keep.semantic_counts.get(cat, 0.0) + n
+    keep.semantic_views += drop.semantic_views
 
 
 def _concave(points: np.ndarray, centre: np.ndarray, footprint: float, cam_p: np.ndarray) -> bool:

@@ -45,6 +45,12 @@ ROBOT_BRIEF = (
     "category 只是单个视角下最像的类别，局部视角下家具和相似餐具容易混淆。"
     "每个动作先用 ego_predict 得到收据，风险超限就先靠近观察再预测，然后用 skill_run 执行；"
     "执行后用 ego_state 自查结果。完成或无法完成时，用一两句中文向操作员汇报。\n"
+    "新视角生成通过 rgbd-video-gen 或 novelanything skill 及其工具调用；明确指定模型时不得替换。"
+    "模型输入输出保存在机器人工作空间 inputs/outputs；使用工具返回的真实路径和 local_manifest_path，勿猜文件名。"
+    "运动过程取证先用 ego_rgb_recording_start 按要求fps录制 head_camera RGB，运动结束后用 ego_rgb_recording_stop；"
+    "录制按仿真时钟采样，不用重复快照模拟帧率。成功后用 rgbd_video_gen_prepare_recording 或"
+    " novelanything_prepare_gripper_view 准备输入，位姿来自机器人里程计、编码器和标定。"
+    "机器人现有 head_camera 与 wide_camera 的布局和感知分工保持原样；生成的 RGBD 是预测，不是真实传感器观测。\n"
     "不要反复试错：ego_predict 的 issues 里给出建议时（例如「原地放下」的参数）先照做；同一个目标连续 3 次预测都不可行，"
     "或同一个技能失败 2 次，就停止尝试并调用 report_problem，然后向操作员说明。遇到工具报错或异常且无法绕过时，同样调用 report_problem。"
     "报告前先回看你自己这一轮的工具调用记录做诊断：哪个技能或预测失败、报错原文、重复了几次、失败时你在哪里、"
@@ -123,6 +129,7 @@ class _Agent:
     session_id: str | None = None
     busy: bool = False
     proc: subprocess.Popen | None = None
+    cancelled: bool = False
 
 
 @dataclass
@@ -233,6 +240,7 @@ class HarnessChat:
         proc = agent.proc
         if not agent.busy or proc is None or proc.poll() is not None:
             return {"stopped": False}
+        agent.cancelled = True
         _terminate(proc)
         with self._lock:
             self._add(key, "system", f"已停止 {agent.label} 的本轮任务")
@@ -341,7 +349,15 @@ class HarnessChat:
             proc.stdin.close()
             err_reader = threading.Thread(target=lambda: stderr_tail.extend(proc.stderr), daemon=True)
             err_reader.start()
-            timer = threading.Timer(cfg.timeout_s, lambda: _terminate(proc))
+            agent.cancelled = False
+            timed_out = False
+
+            def _on_timeout() -> None:
+                nonlocal timed_out
+                timed_out = True
+                _terminate(proc)
+
+            timer = threading.Timer(cfg.timeout_s, _on_timeout)
             timer.start()
             last_text: str | None = None
             for line in proc.stdout:
@@ -349,7 +365,11 @@ class HarnessChat:
             code = proc.wait()
             timer.cancel()
             err_reader.join(2)
-            if code != 0 and code != -15:
+            if timed_out:
+                with self._lock:
+                    self._add(agent.key, "system",
+                              f"{agent.label} 回合预算（{cfg.timeout_s:.0f} 秒）到时，本轮已按设计结束，非异常")
+            elif code != 0 and code != -15 and not agent.cancelled:
                 detail = "".join(stderr_tail[-6:]).strip() or f"exit code {code}"
                 self._report(agent, f"{agent.label} 运行失败：{detail}")
                 if agent.on_failure is not None:

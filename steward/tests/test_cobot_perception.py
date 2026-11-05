@@ -45,11 +45,11 @@ def test_every_camera_matches_the_simulation(rig) -> None:
 def test_wrist_camera_follows_the_arm(rig) -> None:
     sim, est = rig
     _sync(est, sim)
-    before = est.camera_pose("L_wrist_camera")["p"]
+    before = est.camera_pose(camera="L_wrist_camera")["p"]
     sim.command("w:cobot", {"joints": {"L_joint1": 1.0, "L_joint2": 0.4, "L_joint5": 0.5}})
     sim.step(400)
     _sync(est, sim)
-    after = est.camera_pose("L_wrist_camera")["p"]
+    after = est.camera_pose(camera="L_wrist_camera")["p"]
     moved = np.linalg.norm(np.subtract(after, before))
     assert moved > 0.15, f"the wrist camera barely moved ({moved:.3f} m)"
     truth, _ = sim.camera_pose("w:cobot", "L_wrist_camera")
@@ -115,12 +115,8 @@ def test_the_ego_scene_uses_the_joints_it_is_given(rig) -> None:
 
 def test_proprioception_leaves_the_perception_noise_stream_alone(rig) -> None:
     """A console watching the twin must not change what the twin perceives."""
-    import copy
-
     sim, _ = rig
-    before = copy.deepcopy(sim.rng.bit_generator.state)
     baseline = sim.sensors("w:cobot")["odometry"]
-    sim.rng.bit_generator.state = before
     for _ in range(5):
         sim.proprioception("w:cobot")
     assert sim.sensors("w:cobot")["odometry"] == baseline

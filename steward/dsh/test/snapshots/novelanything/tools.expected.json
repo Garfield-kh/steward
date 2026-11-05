@@ -1,0 +1,165 @@
+[
+  {
+    "skill": "<skill_content name=\"novelanything\">\n<skill_resources>\nBase directory for this skill: {{dshWorkspace}}/packages/dsh-bundle-novelanything/skills/novelanything\nResolve relative paths mentioned by this skill against the base directory before using them. Load referenced resources only as needed.\n</skill_resources>\n\n<skill_instructions>\n# NovelAnything\n\nUse the `novelanything_*` tools; model weights and accelerator dependencies stay on the remote server. This skill is installed only in the robot Ego Harness. Check `novelanything_health`: submit only when the model is ready; loading needs another health check, and an error needs diagnosis.\n\nWhen the operator names NovelAnything, use NovelAnything for inference and downloads. Never substitute `rgbd_video_gen`, even if its gripper-view helper is available. If a required tool fails or is absent, report the missing capability and stop the affected generation flow; do not mark it completed with a different model.\n\nFor evidence recorded during motion, call `ego_rgb_recording_start` with the requested FPS (for example 2) and a stable `request_key` before starting motion. This recorder samples in simulation time independently of model response latency and captures only middle-camera RGB, synchronized odometry and encoders. Navigation remains a separate agent decision: use the existing `ego_predict` receipt and `skill_run` with `wait=false`, query `skill_status`, then call `ego_rgb_recording_stop` to finalize evidence. Inspect `ego_rgb_recording_status` until `succeeded`; any missed sample, reset, overflow or timeout is a recording failure. Do not emulate a fixed FPS with repeated `ego_capture_cameras` calls. If the frame bound was reached before motion finished, report incomplete route evidence. Stopping recording does not stop robot motion; explicit recording cancellation uses `cancel=true`.\n\nFor the current gripper view, call `novelanything_prepare_gripper_view` with the successful `recording_id`. It writes a portable ZIP containing all recorded evidence and a NovelAnything scene with up to 16 evenly spaced middle-camera contexts. It omits all depth files and depth_path fields, derives shared-frame `w2c` from robot odometry and body-model kinematics, and sets one target at the current gripper link origin: forward +X, image-up +Z, middle-camera intrinsics. No simulator absolute pose, general file tools, navigation or remote inference is used in preparation. Upload its exact `archive_path` with `novelanything_upload` (use `dataset=scannetpp` for these metric robot scenes), then submit the returned `upload_id` with the preparation's `context` and `target` arrays, usually `metrics=false` because the gripper target has no ground truth. Download only through `novelanything_download` and label the result `gripper_view_prediction`. Preserve the preparation's `local_manifest_path` for evidence lineage. Live recording handles are process-local and subject to bounded retention; prepare and save the ZIP before restarting the host or starting enough later recordings to evict it.\n\nInputs are strictly RGB only. Use exactly one physical RGB camera: the primary `head_camera`. Exclude `wide_camera` and other physical cameras. Multiple context frames mean different timestamps/poses of this same camera, never left/middle/right views from one snapshot. Omit `depth_path` from every scene frame, including target ground truth; do not capture, estimate, synthesize, register or upload depth. If supplied evidence includes depth, request an RGB-only scene or use the specialized preparation tool to export only recorded RGB. If evidence uses side cameras, stop before upload or inference and request middle-camera RGB evidence. Generated depth remains a model output.\n\nFor robot evidence, upload a compliant scene ZIP beneath the robot workspace. It must contain root `scene.json`, `scene_name`, and `frames`. Context frames need relative `image_path`, `w2c` (4×4 OpenCV world-to-camera, `Xc = R Xw + t`, translation in metres), and pixel intrinsics `fxfycxcy = [fx,fy,cx,cy]`, with no depth input. All poses share one coordinate frame. Do not manually normalize cameras: the server makes the first selected input the reference. Complete context frames come first; `n_input` (default 2) and `n_target` set default selection. ZIP limits are 256 MiB compressed and 1 GiB expanded; the server validates contents.\n\nTargets need only `w2c`; RGB ground truth is optional and depth ground truth is excluded by this skill. Missing target intrinsics inherit the first selected context's effective calibration. Explicit intrinsics use `image_size: [width,height]`, otherwise native RGB size, then 518×336. Predictions are cropped/resized to 518×336, and `pred_depth.npy` contains float32 predicted depth in metres. These values are predictions without measured depth conditioning, not sensor evidence or guaranteed metric accuracy. API 1.3.0 and later supports RGB-only inputs: missing depth skips depth conditioning without inserting a depth estimator, and the internal scene scale is 1. If a deployment rejects missing depth, report that API incompatibility; do not supply depth as a workaround.\n\nThe robot has no general shell or filesystem tools. Use the specialized preparation tool for recorded evidence; do not delegate ZIP authoring, probe repository/simulator files or request wider permissions. `ego_camera_calibration` supplies RGB pixel intrinsics and fixed relative rig transforms without imaging. `ego_capture_cameras` saves RGB images; only `views.head_camera.image_path` is supported by this skill. A single snapshot is insufficient for two distinct posed contexts and is not a NovelAnything scene ZIP. Neither SLARM archives nor rgbd_video_gen scenes match this format. For manually supplied scenes, report missing RGB or poses instead of inventing them. A server sample is not a substitute for the robot's surroundings. Use `novelanything_samples` only for an explicitly requested demo/evaluation whose selected input frames contain RGB without depth.\n\nSubmit the returned `upload_id` or an explicitly selected `sample_id` with `novelanything_submit`, using a stable `request_key`. Choose exactly one source. Either omit both frame overrides for scene defaults, or provide both `context` (2–16) and `target` (1–6): zero-based, unique, disjoint frame indices. Only frames with complete RGB/calibration may be context. Metrics default to true and score only targets with GT of that modality. Missing scores are absent, not zero. `metrics=false` disables scoring without changing predicted outputs.\n\nPreserve the job `id` and poll `novelanything_status`. `queued` and `running` are pending. `failed`, `cancelled` and `interrupted` stop synthesis; inspect `novelanything_log`. Only `succeeded` permits `novelanything_result`, then `novelanything_download` with exact `result.artifacts[].path` values. Downloads preserve subdirectories under `outputs/novelanything/<job_id>/`; return the absolute `local_manifest_path` and useful file paths. Inputs are archived under `inputs/novelanything/`. The local manifest retains input association, result targets/calibration, metrics, file sizes and SHA256. Report remote inference and local downloads separately; server checksum verification exists only when the server supplied a checksum. No UI visualization is required.\n\nThe API provides neither idempotent POST nor cancellation. Accepted local replies can be recovered with the same key and inputs; an uncertain POST returns `UNKNOWN_OUTCOME` and blocks repetition. Stop and ask the operator to reconcile server work; do not switch keys or silently retry. Local timeout, stopped polling or tool cancellation does not cancel remote inference.\n\nTreat all generated RGB/depth as model predictions. They do not update Ego-State, establish free space or grasp feasibility, or replace `ego_predict` and `skill_run` with actual observations. The remote NovelAnything model is licensed CC BY-NC-SA 4.0 for non-commercial use; see [LICENSE.md](LICENSE.md).\n</skill_instructions>\n</skill_content>"
+  },
+  {
+    "status": "ready",
+    "model": "NovelAnything",
+    "raster": [
+      518,
+      336
+    ]
+  },
+  {
+    "upload_id": "upload_one",
+    "frame_count": 3,
+    "local_input": {
+      "archive_path": "{{cwd}}/inputs/novelanything/04c3b17db5cab0247172ef2cfa410a4a9b123fad893fdc65f407b2e3aa26f13c.zip",
+      "sha256": "04c3b17db5cab0247172ef2cfa410a4a9b123fad893fdc65f407b2e3aa26f13c",
+      "bytes": 26,
+      "dataset": "scannetpp"
+    }
+  },
+  {
+    "id": "job_one",
+    "status": "succeeded",
+    "progress": 100,
+    "error": null,
+    "result": {
+      "targets": [
+        {
+          "frame_index": 2,
+          "fxfycxcy": [
+            400,
+            400,
+            259,
+            168
+          ],
+          "calibration_source": "first_context"
+        }
+      ],
+      "metrics": {},
+      "artifacts": [
+        {
+          "path": "output/pred_rgb.npy",
+          "url": "api/jobs/job_one/artifacts/output/pred_rgb.npy"
+        },
+        {
+          "path": "output/pred_depth.npy",
+          "url": "api/jobs/job_one/artifacts/output/pred_depth.npy"
+        },
+        {
+          "path": "output/pred_0.png",
+          "url": "api/jobs/job_one/artifacts/output/pred_0.png"
+        }
+      ]
+    },
+    "local_input": {
+      "archive_path": "{{cwd}}/inputs/novelanything/04c3b17db5cab0247172ef2cfa410a4a9b123fad893fdc65f407b2e3aa26f13c.zip",
+      "sha256": "04c3b17db5cab0247172ef2cfa410a4a9b123fad893fdc65f407b2e3aa26f13c",
+      "bytes": 26,
+      "dataset": "scannetpp"
+    },
+    "next_action": "novelanything_status"
+  },
+  {
+    "id": "job_one",
+    "status": "succeeded",
+    "progress": 100,
+    "error": null,
+    "result": {
+      "targets": [
+        {
+          "frame_index": 2,
+          "fxfycxcy": [
+            400,
+            400,
+            259,
+            168
+          ],
+          "calibration_source": "first_context"
+        }
+      ],
+      "metrics": {},
+      "artifacts": [
+        {
+          "path": "output/pred_rgb.npy",
+          "url": "api/jobs/job_one/artifacts/output/pred_rgb.npy"
+        },
+        {
+          "path": "output/pred_depth.npy",
+          "url": "api/jobs/job_one/artifacts/output/pred_depth.npy"
+        },
+        {
+          "path": "output/pred_0.png",
+          "url": "api/jobs/job_one/artifacts/output/pred_0.png"
+        }
+      ]
+    },
+    "next_action": "novelanything_result"
+  },
+  {
+    "id": "job_one",
+    "status": "succeeded",
+    "progress": 100,
+    "error": null,
+    "result": {
+      "targets": [
+        {
+          "frame_index": 2,
+          "fxfycxcy": [
+            400,
+            400,
+            259,
+            168
+          ],
+          "calibration_source": "first_context"
+        }
+      ],
+      "metrics": {},
+      "artifacts": [
+        {
+          "path": "output/pred_rgb.npy",
+          "url": "api/jobs/job_one/artifacts/output/pred_rgb.npy"
+        },
+        {
+          "path": "output/pred_depth.npy",
+          "url": "api/jobs/job_one/artifacts/output/pred_depth.npy"
+        },
+        {
+          "path": "output/pred_0.png",
+          "url": "api/jobs/job_one/artifacts/output/pred_0.png"
+        }
+      ]
+    },
+    "next_action": "novelanything_download"
+  },
+  {
+    "id": "job_one",
+    "remote_succeeded": true,
+    "files": [
+      {
+        "artifact_path": "output/pred_rgb.npy",
+        "path": "{{cwd}}/outputs/novelanything/job_one/output/pred_rgb.npy",
+        "bytes": 30,
+        "sha256": "17bcdcb369d92e29871ca0a3f772ed5ec7760cf976022d1edd9d176c78eccd90",
+        "server_checksum_verified": false
+      },
+      {
+        "artifact_path": "output/pred_depth.npy",
+        "path": "{{cwd}}/outputs/novelanything/job_one/output/pred_depth.npy",
+        "bytes": 30,
+        "sha256": "17bcdcb369d92e29871ca0a3f772ed5ec7760cf976022d1edd9d176c78eccd90",
+        "server_checksum_verified": false
+      },
+      {
+        "artifact_path": "output/pred_0.png",
+        "path": "{{cwd}}/outputs/novelanything/job_one/output/pred_0.png",
+        "bytes": 30,
+        "sha256": "17bcdcb369d92e29871ca0a3f772ed5ec7760cf976022d1edd9d176c78eccd90",
+        "server_checksum_verified": false
+      }
+    ],
+    "local_manifest_path": "{{cwd}}/outputs/novelanything/job_one/manifest.json"
+  }
+]

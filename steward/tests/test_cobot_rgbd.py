@@ -24,7 +24,7 @@ def rig():
     skills = CobotSkills(command=lambda cmd: sim.command("w:cobot", cmd),
                          state=lambda: sim.sensors("w:cobot"), config=MotionConfig(tick_s=0.01))
     est = EgoEstimator(robot_model=cobot_magic().to_dict())
-    frame = lambda: decode_rgbd(sim.rgbd("w:cobot", camera="top_camera"))  # noqa: E731
+    frame = lambda: decode_rgbd(sim.rgbd("w:cobot", "top_camera"))  # noqa: E731
     try:
         yield sim, est, skills, frame
     finally:

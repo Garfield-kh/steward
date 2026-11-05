@@ -109,6 +109,24 @@ def test_a_woken_control_loop_holds_the_clock_until_it_waits_again(kitchen_scene
         sim.stop()
 
 
+def test_a_woken_loop_that_renews_its_hold_keeps_the_clock_past_the_lease(kitchen_scene, monkeypatch):
+    from steward.world import sim as sim_module
+
+    monkeypatch.setattr(sim_module, "HOLD_LEASE_S", 0.3)
+    sim = WorldSim(kitchen_scene, speed=math.inf)
+    sim.start()
+    try:
+        woke = sim.wait_until(0.5, hold="perception")
+        for _ in range(6):  # a remote segmentation request of 0.6 s
+            time.sleep(0.1)
+            sim.renew("perception")
+        assert sim.time == woke, "renewed, the hold outlives its lease"
+        time.sleep(0.5)
+        assert sim.time > woke, "not renewed, the lease runs out and the world runs on"
+    finally:
+        sim.stop()
+
+
 def test_with_freeze_idle_the_world_steps_only_while_a_caller_waits_for_time_to_pass(kitchen_scene):
     sim = WorldSim(kitchen_scene, speed=math.inf, freeze_idle=True)
     sim.start()
@@ -126,3 +144,18 @@ def test_with_freeze_idle_the_world_steps_only_while_a_caller_waits_for_time_to_
         assert sim.time == t, "then it stands still again"
     finally:
         sim.stop()
+
+
+def test_console_box_says_whether_an_object_lies_upright():
+    """A face-down object's yaw reads as the mirrored heading, so the console GT summary also says
+    whether the entity's +z axis still points up - same threshold as the relative-poses goal."""
+    from types import SimpleNamespace
+
+    from steward.math3d import quat_mul
+    from steward.world.console import _box
+
+    c, s = math.cos(math.pi / 4), math.sin(math.pi / 4)
+    up = SimpleNamespace(center=[0.1, 0.2, 0.77], size=[0.115, 0.115, 0.006], quat=[c, 0.0, 0.0, s])
+    down = SimpleNamespace(center=[0.1, 0.2, 0.77], size=[0.115, 0.115, 0.006], quat=quat_mul([0.0, 1.0, 0.0, 0.0], [c, 0.0, 0.0, s]))
+    assert _box("w:x", "puzzle_piece", "object", up)["upright"] is True
+    assert _box("w:y", "puzzle_piece", "object", down)["upright"] is False

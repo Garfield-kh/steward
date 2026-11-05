@@ -87,7 +87,7 @@ def test_the_twin_stacks_the_three_bowls_largest_first(rig) -> None:
     from steward.ego.perception import decode_rgbd
 
     sim, robot, skills, est = rig
-    frame = lambda: decode_rgbd(sim.rgbd(robot, camera="top_camera"))
+    frame = lambda: decode_rgbd(sim.rgbd(robot, "top_camera"))
     result = nest_bowls(est, skills, frame, retries=1, rgbd=True)
     assert result["ok"], "\n".join(result["log"])
     sim.step(120)

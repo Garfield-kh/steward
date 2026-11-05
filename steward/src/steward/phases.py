@@ -16,11 +16,15 @@ PHASES: dict[str, dict] = {
     },
     "phase1": {
         "label": "Phase 1 · RGB-D 感知链路",
-        "description": "WSim 只给 RGB、深度与匿名实例掩码；ER 自行反投影、分类、多视角积累与形状补全。"
-                       "ER 默认 mask_source=geo_sam3（几何∪SAM3，厨房消融召回最高）；"
-                       "SAM3 失败或空结果则回退世界侧 oracle。可用 STEWARD_MASK_SOURCE 覆盖。"
-                       "WSim 仍默认 oracle。NVS / SLARM / NovelAnything 仅作门控辅助。",
+        "description": "WSim 只给 RGB、深度与匿名实例掩码；ER 自行反投影、分类、多视角积累与形状补全",
         "perception": "rgbd",
+        "masks": True,
+    },
+    "phase1-sam": {
+        "label": "Phase 1 · SAM 3.1 分割",
+        "description": "WSim 只给 RGB 与深度；ER 在关键帧调用 SAM 3.1 做开放词汇实例分割，类别以分割词为主、形状先验为辅；可选用深度几何聚类补上 SAM 漏掉的区域",
+        "perception": "rgbd",
+        "masks": False,
     },
 }
 DEFAULT_PHASE = "phase0"

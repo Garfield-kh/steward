@@ -9,6 +9,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool, type InferValue, type ToolDefinition } from '@deepseek-ai/dsh-tools'
+import { recordingId } from '@steward/dsh-ego'
 import type { EgoService, JsonObject, PredictionReceipt, SkillJob } from '@steward/dsh-ego'
 
 export const name = 'steward-tool-ego'
@@ -82,12 +83,75 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
     }),
     defineTool({
       name: 'ego_observe',
-      description: 'Report what your camera detects right now (categories and distances). Your world model also '
+      description: 'Report what your two cameras detect right now (categories, distances and which camera). Your world model also '
         + 'updates continuously; use ego_state for the accumulated picture.',
       parameters: {},
       output: { schema: JSON_OUTPUT, render: (_a, v) => text(v) },
       async execute(_args, exec) {
         return json(await ego.observe(exec.signal))
+      },
+    }),
+    defineTool({
+      name: 'ego_capture_cameras',
+      description: 'Capture your left, original and right RGB cameras at one sensor timestamp without moving. '
+        + 'Saves three JPEG images and a manifest in your workspace and returns their paths, pixel intrinsics K, '
+        + 'and fixed camera_to_reference calibration in OpenCV axes, metres, relative to the original head camera. '
+        + 'Includes gripper_pose from the same encoder timestamp, with gripper_to_camera transforms for all three views. '
+        + 'Works independently of the console camera display mode. No absolute camera poses or synthesized views are provided.',
+      parameters: {},
+      output: { schema: JSON_OUTPUT, render: (_a, v) => text(v) },
+      async execute(_args, exec) {
+        return json(await ego.captureCameras(exec.signal))
+      },
+    }),
+    defineTool({
+      name: 'ego_rgb_recording_start',
+      description: 'Start background RGB recording at a simulation-clock FPS. Records only head_camera. '
+        + 'with same-timestamp measured odometry, encoders and calibration. Does not move the robot. Start before issuing navigation '
+        + 'with skill_run wait=false; let this recorder sample independently of model/tool latency, then stop after navigation completes. '
+        + 'Do not approximate 2 FPS by repeatedly calling ego_capture_cameras. Recording stops at max_frames or fails visibly on missed samples.',
+      parameters: { fps: { type: 'number', description: 'Simulation-time FPS, default 2.' },
+        max_frames: { type: 'number', description: 'Recording frame bound, default 256; provider bounds apply.' },
+        request_key: { type: 'string', required: true, description: 'Stable 8–128 character recording-start key; reuse after lost responses.' } },
+      output: { schema: JSON_OUTPUT, render: (_a, v) => text(v) },
+      execute: async (args, exec) => json(await ego.startRgbRecording(args.fps ?? 2, args.max_frames ?? 256, args.request_key, exec.signal)),
+    }),
+    defineTool({
+      name: 'ego_rgb_recording_status', description: 'Inspect recording status, actual sensor counts, simulation timestamps and errors. Does not command motion.',
+      parameters: { recording_id: { type: 'string', required: true, description: 'Actual rgb_ recording identity.' } },
+      output: { schema: JSON_OUTPUT, render: (_a, v) => text(v) },
+      execute: async (args, exec) => json(await ego.rgbRecordingStatus(recordingId(args.recording_id), exec.signal)),
+    }),
+    defineTool({
+      name: 'ego_rgb_recording_stop', description: 'Stop sampling and finalize all queued RGB evidence from the selected recording cameras; '
+        + 'cancel=true explicitly discards the recording. If status is finalizing, query status until terminal. Does not stop or start robot motion.',
+      parameters: { recording_id: { type: 'string', required: true, description: 'Actual recording identity.' },
+        cancel: { type: 'boolean', description: 'Default false: preserve evidence. True cancels recording.' } },
+      output: { schema: JSON_OUTPUT, render: (_a, v) => text(v) },
+      execute: async (args, exec) => json(await ego.stopRgbRecording(recordingId(args.recording_id), args.cancel ?? false, exec.signal)),
+    }),
+    defineTool({
+      name: 'ego_camera_calibration',
+      description: 'Read fixed RGB camera intrinsics and camera_to_reference transforms into the middle head_camera frame '
+        + '(OpenCV x right, y down, z forward; translation in metres) without images or motion. '
+        + 'Each camera has pixel K and dimensions. No absolute camera pose is provided.',
+      parameters: {},
+      output: { schema: JSON_OUTPUT, render: (_a, v) => text(v) },
+      async execute(_args, exec) {
+        return json(await ego.cameraCalibration(exec.signal))
+      },
+    }),
+    defineTool({
+      name: 'ego_gripper_pose',
+      description: 'Read your gripper-link pose relative to your base and the robot cameras from current joint encoders, '
+        + 'your body model and fixed camera calibration. No motion or image capture. gripper_to_camera maps gripper-local '
+        + 'points (x forward, y left, z up) into each OpenCV camera frame (x right, y down, z forward), translations in metres. '
+        + 'The gripper frame is the gripper link origin. Includes sensor timestamp, measured lift/reach and gripper_to_base. '
+        + 'For a pose synchronized to images, use ego_capture_cameras and its embedded gripper_pose instead of combining separate calls.',
+      parameters: {},
+      output: { schema: JSON_OUTPUT, render: (_a, v) => text(v) },
+      async execute(_args, exec) {
+        return json(await ego.gripperPose(exec.signal))
       },
     }),
     defineTool({
@@ -117,7 +181,7 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
         + '"close" (needs target: a drawer; the robot pulls or pushes its handle and ends standing back so the inside '
         + 'is in view). Objects lying on the floor, such as chairs or a dropped flat piece, are picked from '
         + 'beside them; look at one first from where it is in view (ego_inspect\'s hint says how far back), since '
-        + 'docked beside it the camera no longer sees it. Small ones are lifted clear and carried like objects taken '
+        + 'docked beside it the cameras no longer see it. Small ones are lifted clear and carried like objects taken '
         + 'off a table; large ones are carried a few centimetres above the floor in front of the robot, and put down '
         + 'with at; '
         + 'while carrying them the robot needs more room to turn. Objects inside a drawer are only seen while it is '
@@ -149,15 +213,16 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
     }),
     defineTool({
       name: 'ego_inspect',
-      description: 'Look closely at the top face of an object with one fresh camera frame: its colours on a px x px '
+      description: 'Look closely at the top face of an object with one fresh frame of each camera, read from the camera that sees most of it: its colours on a px x px '
         + 'grid. rows is in the object\'s own frame (row 0 is its +y edge, column 0 its -x edge, as seen from above '
         + 'with its heading yawDeg). worldRows is the same face as seen from above with the map\'s +y up and +x to the '
         + 'right: rows turned worldTurnDeg counter-clockwise (yawDeg rounded to a quarter turn), so faces of objects '
         + 'lying at different headings compare directly in worldRows. Putting an object down with place yaw = its '
         + 'current yawDeg + k x 90 degrees (given in radians) turns its face k quarter turns counter-clockwise as seen '
         + 'from above. Each cell is [r, g, b] or null where the face is out of view or hidden. Stand within about '
-        + 'a metre with the object in front of you. The head camera sees a surface only from some way ahead of it, so '
-        + 'the strip of a table next to the edge you stand at lies below its view. When part of the face is unseen, hint says '
+        + 'a metre with the object in front of you. You have two cameras on your head: head_camera looks ahead and sees a '
+        + 'surface only from some way ahead of it; wide_camera, a short-focal-length camera tilted further down, also sees '
+        + 'the strip of a table next to the edge you stand at and the gripper at work, in less detail. When part of the face is unseen, hint says '
         + 'why (too close below the view, beside or behind it, too far, hidden) and how to move. Use it to compare '
         + 'printed or patterned faces, read which side of a flat object is up, or tell similar objects apart. A '
         + 'printed flat object lying with its plain back up shows an almost uniform face: turn it over (place with '

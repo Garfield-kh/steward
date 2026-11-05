@@ -393,9 +393,16 @@ def chair(seat: float = 0.46, seat_height: float = 0.46, back_height: float = 0.
     return _entity("chair", "object", "free", [link])
 
 
-def steward_bot(camera_pitch_deg: float = 30.0, camera_fovy_deg: float = 60.0) -> Entity:
+def steward_bot(camera_pitch_deg: float = 30.0, camera_fovy_deg: float = 60.0, wide_camera: bool = True,
+                wide_pitch_deg: float = 45.0, wide_fovy_deg: float = 100.0, wide_size: tuple[int, int] = (480, 360)) -> Entity:
     """Phase 0 mobile manipulator: planar base, vertical lift, horizontal reach, a two-axis wrist
     (yaw about the vertical, roll about the arm) and an ideal gripper.
+
+    The head carries two RGB-D cameras: ``head_camera`` (60° vertical field of view, pitched 30°
+    down) sees the room ahead; ``wide_camera``, a short-focal-length camera just below it (100°,
+    pitched 45° down), also sees the gripper's whole workspace down to the robot's own front, which
+    the head camera loses when the gripper works close to the base. Both render as ideal pinholes
+    (no lens distortion).
 
     The base collides with the world. The lift carriage, arm and gripper are visual-only links,
     so an approaching gripper never pushes the target: Phase 0 grasping is an ideal attach
@@ -429,7 +436,11 @@ def steward_bot(camera_pitch_deg: float = 30.0, camera_fovy_deg: float = 60.0) -
         sensors=[{
             "id": "head_camera", "kind": "rgbd", "mount": pose([0.05, 0, 0], quat_from_axis_angle([0, 1, 0], pitch)),
             "intrinsics": {"width": 320, "height": 240, "fovy": camera_fovy_deg}, "rateHz": 10,
-        }],
+        }] + ([{
+            "id": "wide_camera", "kind": "rgbd",
+            "mount": pose([0.05, 0, -0.05], quat_from_axis_angle([0, 1, 0], math.radians(wide_pitch_deg))),
+            "intrinsics": {"width": wide_size[0], "height": wide_size[1], "fovy": wide_fovy_deg}, "rateHz": 10,
+        }] if wide_camera else []),
     )
     carriage = Link(id="carriage", name="carriage",
                     geometry={"visual": [primitive("box", [0.08, 0.16, 0.05], None, STEEL)]},

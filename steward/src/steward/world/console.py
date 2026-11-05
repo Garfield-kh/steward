@@ -10,15 +10,22 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from steward.math3d import yaw_from_quat
+from steward.math3d import quat_rotate, yaw_from_quat
 from steward.world.thinking import thinking_state
 
 CONSOLE_HTML = Path(__file__).with_name("console.html")
 
+UPRIGHT_COS = math.cos(math.radians(20.0))  # same threshold the relative-poses goal uses
+
 
 def _box(entity_id: str, category: str, role: str, obb) -> dict:
+    """One ground-truth box for the console. ``yaw`` is the heading of the entity's frame; for an
+    object lying face-down (its top face against the support) that heading reads as the mirrored
+    one, so ``upright`` says whether the entity's +z axis still points up and the yaw can be read
+    as a heading at all."""
     return {"id": entity_id, "category": category, "role": role, "center": [round(v, 4) for v in obb.center],
-            "size": [round(v, 4) for v in obb.size], "yaw": round(yaw_from_quat(obb.quat), 4)}
+            "size": [round(v, 4) for v in obb.size], "yaw": round(yaw_from_quat(obb.quat), 4),
+            "upright": quat_rotate(obb.quat, [0.0, 0.0, 1.0])[2] > UPRIGHT_COS}
 
 
 def console_state(host) -> dict:

@@ -77,13 +77,14 @@ def _color_score(rule: str | None, color: np.ndarray, invalid_frac: float) -> fl
 
 
 def classify(size: np.ndarray, bottom: float, color: np.ndarray, invalid_frac: float = 0.0,
-             temperature: float = 1.0, bottom_seen: bool = True) -> dict[str, float]:
+             temperature: float = 1.0, bottom_seen: bool = True, min_prob: float = 0.01) -> dict[str, float]:
     """Probability per category for a measured box (full extents, long side first) whose lowest
     point is ``bottom`` metres above the floor; :data:`UNKNOWN` takes the mass when no prototype fits.
 
     With ``bottom_seen`` false the lowest point is an image edge or an occluder, not the base: it is
     no evidence of standing on the floor or not, and a floor-standing prototype is compared with
-    the visible top instead of the visible height (a table seen from close shows only its top)."""
+    the visible top instead of the visible height (a table seen from close shows only its top).
+    Categories below ``min_prob`` are dropped."""
     seen = np.array([max(size[0], size[1]), min(size[0], size[1]), size[2]], float)
     seen = np.maximum(seen, 0.004)
     scores = {}
@@ -120,7 +121,26 @@ def classify(size: np.ndarray, bottom: float, color: np.ndarray, invalid_frac: f
     top = max(scores.values())
     weights = {k: math.exp(v - top) for k, v in scores.items()}
     total = sum(weights.values())
-    return {k: v / total for k, v in weights.items() if v / total > 0.01}
+    return {k: v / total for k, v in weights.items() if v / total > min_prob}
+
+
+def fuse_semantics(semantic: dict[str, float], shape: dict[str, float], weight: float, floor: float,
+                   unknown: str = UNKNOWN) -> dict[str, float]:
+    """Category probabilities from SAM scores and shape-prior probabilities:
+    ``p(c) ∝ L(c) · P_shape(c)^weight`` with ``L(c)`` the score of ``c`` (``floor`` when SAM did not
+    name it) and, for a category without a shape template (:data:`SHAPES`),
+    ``P_shape(c) = P_shape(unknown)``: shape has no opinion on what it has no template for.
+
+    :param semantic: category → score in (0, 1] for the names SAM gave the region.
+    :param shape: category → probability from :func:`classify` with ``min_prob=0``, so that a
+        template that does not fit at all (a two-metre bowl) keeps its tiny probability.
+    :returns: category → probability, entries below 0.01 dropped."""
+    tiny = 1e-6
+    neutral = max(shape.get(unknown, 0.0), tiny)
+    scores = {c: semantic.get(c, floor) * max(shape.get(c, tiny if c in SHAPES else neutral), tiny) ** weight
+              for c in set(semantic) | set(shape)}
+    total = sum(scores.values())
+    return {c: v / total for c, v in scores.items() if v / total > 0.01}
 
 
 def prototype(category: str) -> tuple[float, float, float] | None:

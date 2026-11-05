@@ -57,7 +57,7 @@ def test_the_twin_puts_the_bowl_on_the_plate(rig) -> None:
     from steward.ego.perception import decode_rgbd
 
     sim, robot, skills, est = rig
-    frame = lambda: decode_rgbd(sim.rgbd(robot, camera="top_camera"))
+    frame = lambda: decode_rgbd(sim.rgbd(robot, "top_camera"))
     result = bowl_onto_plate(est, skills, frame, retries=1, rgbd=True)
     assert result["ok"], "\n".join(result["log"])
     sim.step(120)

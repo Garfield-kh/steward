@@ -1,8 +1,16 @@
 # Steward
 
-Steward 是基于 DeepSeek Harness 的具身智能机器人系统。设计见仓库根目录的 [steward.md](../steward.md)，当前实现进度与运行命令见其中的「13. Implementation Progress」；Phase 1 感知如何从 RGB-D 得到几何与类别、以及泛化路线见 [13.7](../steward.md#137-phase-1-感知方法与泛化)。
+English | [中文](README.zh.md)
 
-## 快速开始
+The robot Ego Harness can use the `rgbd_video_gen` and `NovelAnything` skills for remote novel-view synthesis. On Windows, install them with `scripts/setup-rgbd-video-gen.ps1` and `scripts/setup-novelanything.ps1`; `scripts/setup-dsh-profiles.sh` installs both into the robot profile on Linux/macOS. See the [rgbd_video_gen guide](dsh/packages/dsh-bundle-rgbd-video-gen/README.md) and [NovelAnything guide](dsh/packages/dsh-bundle-novelanything/README.md).
+
+Model evidence uses the existing `head_camera`. Continuous recording samples in simulation time with measured robot odometry and encoders; target gripper views use robot-owned forward kinematics. Snapshots retain the head/wide cameras and their individual calibration, layout, field of view and perception responsibilities. These capabilities do not install SLARM or extra cameras.
+
+See the [perception model skills guide](docs/novel-view-generation/README.md) for copyable robot prompts, camera conventions and package responsibilities.
+
+Steward is an embodied robotics system built on DeepSeek Harness. See [steward.md](../steward.md) for the design, its “13. Implementation Progress” section for progress and launch commands, and [13.7](../steward.md#137-phase-1-感知方法与泛化) for Phase 1 RGB-D geometry, classification and generalization.
+
+## Quick start
 
 ```sh
 uv sync
@@ -11,33 +19,40 @@ uv sync
 open http://127.0.0.1:7400/console   # 浏览器控制台：斜视主视图、相机、地图、指标、控制
 .venv/bin/steward shuttle --api http://127.0.0.1:7420 --steps 0   # 在餐桌、柜子、餐边柜之间循环搬运
 ./scripts/check.sh              # Python 测试、DSH 插件编译与测试、组合配置快照比对
+.venv/bin/steward build-kitchen # 机器人模型改动后（如头部加装的广角相机）重建默认场景
 ```
 
-## 与 DeepSeek Harness 一起运行
+The robot has two head RGB-D cameras: `head_camera` looks ahead; the short-focal-length `wide_camera` sees the nearby worktop and gripper. Both contribute to perception; see [steward.md 13.8](../steward.md#138-机器人本体的双相机).
+
+## Run with DeepSeek Harness
 
 ```sh
 echo 'DEEPSEEK_API_KEY=sk-...' > .env     # 已被 Git 忽略，运行脚本自动加载
 .venv/bin/steward up                      # WCA :7400，机器人端口 :7410，Ego API :7420
+.venv/bin/steward up --phase phase1-sam   # 机器人用 SAM 3.1 自行分割 RGB-D（设置在 config/segmentation.toml）
 ./scripts/setup-dsh-profiles.sh           # 构建插件，创建 ego、world、world-task profile
 ./scripts/run-ego.sh "把杯子放到桌上"       # 机器人智能体
 ./scripts/run-world.sh "按描述构建一间厨房……"  # World Harness 一次性任务
 ./scripts/run-world.sh --port 3091        # World Harness 浏览器界面
 ./scripts/install-desktop-app.sh          # 在桌面安装 Steward.app：选场景后启动世界、Ego Harness 并打开控制台
+.venv/bin/steward services                # 检查远程感知服务（SAM 3.1、NovelAnything、NVS、SLARM）是否可达
 ```
 
-`ego` profile 是机器人的 Ego Harness，只能经 Ego API 感知与行动，shell、文件、网页等通用工具已禁用；`world` 与 `world-task` profile 是 World Harness，经世界控制接口构建资产、组合场景、控制 Episode。机器人与世界使用不同的 `DSH_HOME`。
+The robot `ego` profile observes and acts through the Ego API; general shell, file and web tools are disabled. The `world` and `world-task` profiles use the World Control API for assets, scenes and episodes. Robot and World Harnesses use separate `DSH_HOME` directories.
 
-## 目录
+## Layout
 
-| 路径 | 内容 |
+| Path | Contents |
 |---|---|
-| `src/steward/scene` | WS 与 ES 共用的 SceneState、校验器、MJCF 转换 |
-| `src/steward/assets`、`authoring` | 资产生成、校验、预览、资产库；场景与 Scenario |
-| `src/steward/world` | WSim 与 Steward 主机（WCA、机器人端口） |
-| `src/steward/ego` | Ego Runtime：估计器、ESim、技能、Ego API |
-| `src/steward/observer` | ES 与 World State 的对比评估 |
-| `dsh/` | DeepSeek Harness 插件与 bundle（锁定 `@deepseek-ai/dsh@0.2.1-rc.3`） |
-| `scripts/` | profile 创建、检查、多种子回归 |
-| `compat/snapshots` | 组合配置快照 |
+| `src/steward/scene` | Shared SceneState, validation and MJCF conversion |
+| `src/steward/assets`, `authoring` | Asset generation, validation, previews and catalog; scenes and scenarios |
+| `src/steward/world` | WSim and Steward host, WCA and robot ports |
+| `src/steward/ego` | Ego Runtime: estimation, ESim, skills and Ego API |
+| `src/steward/observer` | Ego-State evaluation against World State |
+| `dsh/` | DeepSeek Harness plugins and bundles pinned to `@deepseek-ai/dsh@0.2.1-rc.3` |
+| `scripts/` | Profile setup, checks and multi-seed regressions |
+| `config/perception-services.toml` | Remote perception service endpoints, health checks and APIs; steward.md 13.7.6 |
+| `config/segmentation.toml` | Robot segmentation vocabulary, thresholds, cropping and geometry fusion for `phase1-sam`; steward.md 13.7.7 |
+| `compat/snapshots` | Composed configuration snapshots |
 
-运行数据写入 `var/`，不纳入版本管理。
+Runtime data is written to `var/` and excluded from version control.

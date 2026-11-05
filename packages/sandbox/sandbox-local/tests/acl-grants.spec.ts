@@ -157,6 +157,47 @@ describe('windows-acl write grants (LocalSandboxProvider)', () => {
     }
   })
 
+  it('re-materializes a temp capability whose directory was removed out of band', async () => {
+    try {
+      const { sandbox, fiber } = await setup()
+      const ws = workspaceRoot()
+      scratch.push(ws)
+      const policy: SandboxPolicy = { mode: 'workspace-write', workspaceRoot: ws, sessionId: SessionId('sess-1') }
+
+      const first = await sandbox.confine(['pwsh', '/Command', 'x'], policy)
+      const staleDir = flag(first.argv, '--temp') ?? ''
+      const staleSid = flag(first.argv, '--temp-write-sid')
+      expect(existsSync(staleDir)).toBe(true)
+
+      // Temp hygiene or disk cleanup removes the live directory mid-session:
+      // its ACEs die with it, so the cached grant cannot authorize anything.
+      rmSync(staleDir, { recursive: true, force: true })
+      const second = await sandbox.confine(['pwsh', '/Command', 'x'], policy)
+      const freshDir = flag(second.argv, '--temp') ?? ''
+      const freshSid = flag(second.argv, '--temp-write-sid')
+      expect(freshDir).toBeDefined()
+      expect(freshDir).not.toBe(staleDir)
+      expect(freshSid).toBe(`TEMP:${freshDir}`)
+      expect(freshSid).not.toBe(staleSid)
+      expect(existsSync(freshDir)).toBe(true)
+      expect(mockState.grants).toEqual([
+        expect.objectContaining({ writeSid: WORKSPACE_SID, disposed: false }),
+        expect.objectContaining({ writeSid: staleSid, disposed: true }),
+        expect.objectContaining({ writeSid: freshSid, added: [{ path: freshDir, standing: false }], disposed: false }),
+      ])
+
+      // The replacement capability is the one reused from here on.
+      expect((await sandbox.confine(['pwsh', '/Command', 'x'], policy)).argv).toEqual(second.argv)
+      expect(mockState.grants).toHaveLength(3)
+
+      await fiber.dispose()
+      expect(mockState.grants.every(grant => grant.disposed)).toBe(true)
+      expect(existsSync(freshDir)).toBe(false)
+    } finally {
+      cleanup()
+    }
+  })
+
   it('read-only materializes no capability; upgrade creates them and downgrade leaves them reusable', async () => {
     try {
       const { sandbox, fiber } = await setup()

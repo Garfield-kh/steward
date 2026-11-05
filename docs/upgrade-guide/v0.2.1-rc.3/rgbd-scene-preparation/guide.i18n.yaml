@@ -1,0 +1,16 @@
+# Bilingual-pair consistency record for guide.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/upgrade-guide/v0.2.1-rc.3/rgbd-scene-preparation/guide.md
+/:
+  en: 915357bf7b671637
+  zh: e3245ada47fbea9d
+/general-rgbd-scene-preparation:
+  en: f496606a9e31de7b
+  zh: 4658e7d5467fa181
+/general-rgbd-scene-preparation/change:
+  en: a944daa9f32c5d22
+  zh: 1b6e4176396dc655
+/general-rgbd-scene-preparation/migration:
+  en: c73d2a7c5c30caba
+  zh: 90ca64c7162c484d

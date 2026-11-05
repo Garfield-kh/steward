@@ -50,6 +50,22 @@ def test_every_generator_compiles_to_mjcf(name):
     assert model.nbody >= 2
 
 
+def test_textured_appearance_dresses_furniture_and_casts_a_key_light():
+    ent = GENERATORS["counter"]()
+    ent.id = "w:x"
+    scene = SceneState(mode="world", entities=[ent])
+    flat = build_mjcf(scene)
+    rich = build_mjcf(scene, appearance="textured")
+    assert "castshadow" not in flat.xml and not flat.shadows
+    assert 'castshadow="true"' in rich.xml and rich.shadows
+    assert "<material " in rich.xml
+    assert rich.compile().nmat >= 1
+    glass = GENERATORS["cup"]()
+    glass.id = "w:g"
+    glass_build = build_mjcf(SceneState(mode="world", entities=[glass]), appearance="textured")
+    assert "<material " not in glass_build.xml
+
+
 def test_planar_root_starts_at_entity_pose(kitchen_scene):
     scene = SceneState.from_dict(kitchen_scene)
     build = build_mjcf(scene)

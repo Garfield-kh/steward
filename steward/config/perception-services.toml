@@ -1,0 +1,85 @@
+# Remote perception and reconstruction services callable from Steward.
+# Catalogue and evaluation notes: steward.md §13.7.6. Loaded by steward.perception_services;
+# `steward services` checks every entry's health endpoint.
+#
+# Each service lists `urls` in preference order. The linxlab-research.com domain is intermittently
+# blocked by the network path (HTTP 403 "非法阻断" or HTTPS connection reset), so every service also
+# lists the plain-HTTP IP address of the same gateway; callers use the first URL whose health check
+# passes. Paths in `endpoints` are relative to the chosen base URL.
+
+[services.sam3]
+title = "SAM 3.1 Multiplex（Ascend 910B，bf16）"
+kind = "segmentation"
+urls = ["https://linxlab-research.com/sam3", "http://115.120.57.9/sam3"]
+docs = "https://linxlab-research.com/sam3"
+openapi = "/openapi.json"
+health = "/api/health"
+timeout_s = 60
+[services.sam3.endpoints]
+segment = "POST /api/segment"
+create_session = "POST /api/sessions"
+session_request = "POST /api/sessions/{sid}/request"
+propagate = "POST /api/sessions/{sid}/propagate"
+delete_session = "DELETE /api/sessions/{sid}"
+
+[services.novelanything]
+title = "NovelAnything（新视角 RGB 与深度，可选 SAM 3.1 分割）"
+kind = "novel-view"
+urls = ["https://linxlab-research.com/novelanything", "http://115.120.57.9/novelanything"]
+docs = "https://linxlab-research.com/novelanything/docs"
+openapi = "/openapi.json"
+health = "/api/health"
+timeout_s = 600
+[services.novelanything.endpoints]
+upload = "POST /api/uploads"
+submit_job = "POST /api/jobs"
+job = "GET /api/jobs/{job_id}"
+job_log = "GET /api/jobs/{job_id}/log"
+artifact = "GET /api/jobs/{job_id}/artifacts/{path}"
+samples = "GET /api/samples"
+
+[services.nvs]
+title = "NVS rgbd_videogen（RGB-D 新视角视频生成）"
+kind = "novel-view"
+urls = ["http://linxlab-research.com/nvs", "http://115.120.57.9/nvs"]
+docs = "http://linxlab-research.com/nvs/v1/capabilities"
+capabilities = "/v1/capabilities"
+health = "/health/ready"
+timeout_s = 600
+[services.nvs.endpoints]
+upload_job = "POST /v1/nvs/jobs/upload"
+job = "GET /v1/nvs/jobs/{id}"
+result = "GET /v1/nvs/jobs/{id}/result"
+demo = "POST /v1/nvs/demo"
+
+[services.slarm]
+title = "SLARM 场景重建（Waymo 驾驶场景预训练）"
+kind = "scene-reconstruction"
+urls = ["http://linxlab-research.com/slarm", "http://115.120.57.9/slarm"]
+docs = "http://linxlab-research.com/slarm/openapi.json"
+openapi = "/openapi.json"
+capabilities = "/v1/capabilities"
+health = "/health/ready"
+timeout_s = 1800
+[services.slarm.endpoints]
+upload_dataset = "POST /v1/datasets"
+dataset = "GET /v1/datasets/{dataset_id}"
+create_reconstruction = "POST /v1/reconstructions"
+reconstruction = "GET /v1/reconstructions/{id}"
+reconstruction_result = "GET /v1/reconstructions/{id}/result"
+reconstruction_artifact = "GET /v1/reconstructions/{id}/artifacts/{artifact_id}"
+create_view = "POST /v1/views"
+view_result = "GET /v1/views/{id}/result"
+
+[services.sam3d]
+title = "SAM 3D Objects（单视图形状补全，Ascend NPU）"
+kind = "shape-completion"
+urls = ["https://linxlab-research.com/sam3d", "http://115.120.57.9/sam3d"]
+docs = "https://linxlab-research.com/sam3d/docs"
+openapi = "/openapi.json"
+health = "/api/health"
+timeout_s = 600
+[services.sam3d.endpoints]
+submit_job = "POST /api/jobs"
+job = "GET /api/jobs/{job_id}"
+artifact = "GET /api/jobs/{job_id}/artifacts/{path}"

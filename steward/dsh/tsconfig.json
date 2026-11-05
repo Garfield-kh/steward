@@ -1,14 +1,50 @@
 {
   "files": [],
   "references": [
-    { "path": "packages/http-json" },
-    { "path": "packages/dsh-ego" },
-    { "path": "packages/dsh-ego-runtime-client" },
-    { "path": "packages/dsh-tool-ego" },
-    { "path": "packages/dsh-tool-ego-capabilities" },
-    { "path": "packages/dsh-robot-safety" },
-    { "path": "packages/dsh-world" },
-    { "path": "packages/dsh-world-client" },
-    { "path": "packages/dsh-tool-world" }
+    {
+      "path": "packages/http-json"
+    },
+    {
+      "path": "packages/dsh-ego"
+    },
+    {
+      "path": "packages/dsh-ego-runtime-client"
+    },
+    {
+      "path": "packages/dsh-tool-ego"
+    },
+    {
+      "path": "packages/dsh-tool-ego-capabilities"
+    },
+    {
+      "path": "packages/dsh-robot-safety"
+    },
+    {
+      "path": "packages/dsh-world"
+    },
+    {
+      "path": "packages/dsh-world-client"
+    },
+    {
+      "path": "packages/dsh-tool-world"
+    },
+    {
+      "path": "packages/dsh-novelanything"
+    },
+    {
+      "path": "packages/dsh-novelanything-client"
+    },
+    {
+      "path": "packages/dsh-tool-novelanything"
+    },
+    {
+      "path": "packages/dsh-rgbd-video-gen"
+    },
+    {
+      "path": "packages/dsh-rgbd-video-gen-client"
+    },
+    {
+      "path": "packages/dsh-tool-rgbd-video-gen"
+    }
   ]
 }

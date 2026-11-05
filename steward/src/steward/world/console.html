@@ -40,6 +40,8 @@
   canvas.plain { width: 100%; display: block; border-radius: 6px; background: #11151a; }
   .cam img { width: 100%; border-radius: 6px; background: #11151a; aspect-ratio: 4 / 3; object-fit: cover; display: block; }
   .cam img:not([src]) { visibility: hidden; }
+  .cam + .cam { margin-top: 10px; }
+  .cam .caption { font-size: 12px; color: var(--muted); margin: 0 0 4px; }
   table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
   td { padding: 3px 0; border-bottom: 1px solid #20262e; }
   td:last-child { text-align: right; }
@@ -204,8 +206,11 @@
   </section>
   <div class="grid3">
     <section class="card">
-      <h2 id="robotCamLabel">机器人头部相机</h2>
-      <div class="cam"><img id="camRobot" alt="机器人头部相机"></div>
+      <h2 id="robotCamLabel">机器人相机</h2>
+      <div class="cam"><p class="caption" id="camCaption-head_camera">头部相机 · 看前方（垂直视野 60°，俯 30°）</p>
+        <img id="camRobot-head_camera" alt="头部相机"></div>
+      <div class="cam"><p class="caption" id="camCaption-wide_camera">广角相机 · 短焦，看身前台面与夹爪（垂直视野 100°，俯 45°）</p>
+        <img id="camRobot-wide_camera" alt="广角相机"></div>
     </section>
     <section class="card">
       <h2>俯视地图（蓝：真实状态　橙：自我态）</h2>
@@ -822,15 +827,26 @@ $('chatStop').onclick = async () => { try { await api('POST', '/console/chat/sto
 $('chatReset').onclick = async () => { try { await api('POST', '/console/chat/reset', { agent: chatTarget }); refreshChat(); } catch (e) { showError(e); } };
 renderTarget();
 
+const ROBOT_CAMERAS = ['head_camera', 'wide_camera'];
 const cameraMeter = rateMeter();
-let cameraShown = null;
+const cameraShown = {};
+const cameraCaption = Object.fromEntries(ROBOT_CAMERAS.map(c => [c, $('camCaption-' + c).textContent]));
+async function refreshCameraImage(sensor) {
+  const res = await fetch(`/wca/render?camera=${encodeURIComponent('robot:' + robotId)}&sensor=${sensor}&width=480&height=360&format=jpeg`,
+    { cache: 'no-store' });
+  if (res.status === 404) {
+    $('camCaption-' + sensor).textContent = `${cameraCaption[sensor]} · ${robotId} 没有这台相机（场景按旧的机器人模型构建，运行 steward build-kitchen 重建）`;
+    $('camRobot-' + sensor).removeAttribute('src');
+    return;
+  }
+  if (!res.ok) return;
+  cameraShown[sensor] = await showBlob($('camRobot-' + sensor), res, cameraShown[sensor]);
+  $('camCaption-' + sensor).textContent = cameraCaption[sensor];
+}
 async function refreshRobotCamera() {
   if (!robotId) return;
-  const res = await fetch(`/wca/render?camera=${encodeURIComponent('robot:' + robotId)}&width=480&height=360&format=jpeg`,
-    { cache: 'no-store' });
-  if (!res.ok) return;
-  cameraShown = await showBlob($('camRobot'), res, cameraShown);
-  $('robotCamLabel').textContent = `${robotId} 头部相机 · ${cameraMeter().toFixed(1)} fps`;
+  await Promise.all(ROBOT_CAMERAS.map(refreshCameraImage));
+  $('robotCamLabel').textContent = `机器人相机 · ${robotId} · ${cameraMeter().toFixed(1)} fps`;
 }
 
 // ------------------------------------------------------------------ scenarios & bodies

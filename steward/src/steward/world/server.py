@@ -36,6 +36,7 @@ from steward.world.chat import ChatConfig, HarnessChat
 from steward.viewloop import ViewLoop, ViewSettings, frame_response
 from steward.world.goals import evaluate as evaluate_goal
 from steward.world.sim import EditError, PerceptionConfig, WorldSim, speed_json
+from steward.world.sensor_cameras import SensorCameras
 from steward.world.world_view import WorldViewRenderer
 
 
@@ -58,17 +59,24 @@ class _MainTask:
 class StewardHost:
     def __init__(self, root: Path | str, *, scenario: str | None = None, speed: float = 1.0, seed: int = 0,
                  run_dir: Path | None = None, wca_port: int = 0, robot_ports: dict[str, int] | None = None,
-                 chat: ChatConfig | None = None, phase: str = DEFAULT_PHASE, bind_wait_s: float = 0.0,
-                 pause_on_perception_fault: bool = False, freeze_idle: bool = False):
-        phase_modules(phase)
-        self.phase = phase
+                 chat: ChatConfig | None = None, phase: str | None = None, fallback_phase: str = DEFAULT_PHASE,
+                 bind_wait_s: float = 0.0, pause_on_perception_fault: bool = False, freeze_idle: bool = False,
+                 appearance: str = "flat"):
+        # ``phase`` pins the level for every episode; None: each scenario's declared level, or
+        # ``fallback_phase`` for a scenario that declares none.
+        phase_modules(phase or fallback_phase)
+        self._pinned_phase = phase
+        self._fallback_phase = fallback_phase
+        self.phase = phase or fallback_phase
         self.authoring = AuthoringService(root)
         self.chat = HarnessChat(chat, lambda: self.wca.url)
         self.speed = speed
         self.freeze_idle = freeze_idle
+        self.appearance = appearance
         self.seed = seed
         self.run_dir = run_dir
         self.sim: WorldSim | None = None
+        self.sensor_cameras = SensorCameras(self._require_sim)
         self.scenario: dict | None = None
         self.embodiments: dict[str, dict] = {}
         self.observer = Observer(self._require_sim, run_dir, phase=lambda: self.phase, on_anomaly=self._perception_fault)
@@ -102,11 +110,14 @@ class StewardHost:
         scenario = self.authoring.load_scenario(name)
         if scenario.get("phase"):
             phase_modules(scenario["phase"])  # a scenario declares the level it was built for; unknown ones fail here
-            self.phase = scenario["phase"]
+        self.phase = self._pinned_phase or scenario.get("phase") or self._fallback_phase
+        self.sensor_cameras.recordings.interrupt("Scene changed; start a new RGB recording")
         if self.sim is not None:
             self.sim.stop()
         self.sim = WorldSim(scenario["sceneState"], speed=self.speed, seed=self.seed, freeze_idle=self.freeze_idle,
-                            perception=PerceptionConfig(mode=phase_modules(self.phase)["perception"]))
+                            appearance=self.appearance,
+                            perception=PerceptionConfig(mode=phase_modules(self.phase)["perception"],
+                                                        masks=phase_modules(self.phase).get("masks", True)))
         self.scenario = scenario
         self.embodiments = scenario_embodiments(scenario)
         self.observer.reset()
@@ -137,9 +148,10 @@ class StewardHost:
         """Switch the running system to a phase level (module implementations), effective with the
         next sensor frame; later episodes start at the same level."""
         modules = phase_modules(level)
-        self.phase = level
+        self.phase = self._pinned_phase = level
         if self.sim is not None:
             self.sim.perception.mode = modules["perception"]
+            self.sim.perception.masks = modules.get("masks", True)
             self.sim.events.append({"t": self.sim.time, "type": "phase/switch", "level": level})
         return self.phase_state()
 
@@ -224,6 +236,7 @@ class StewardHost:
             server.stop()
         self.wca.stop()
         self.world_view.stop()
+        self.sensor_cameras.close()
         if self.sim is not None:
             self.sim.stop()
 
@@ -261,6 +274,7 @@ class StewardHost:
                 return result
             if action == "reset":
                 sim = self._require_sim()
+                self.sensor_cameras.recordings.interrupt("Scene reset; start a new RGB recording")
                 self.on_main(sim.reset)
                 self.observer.reset()
                 return {"reset": True}
@@ -283,7 +297,10 @@ class StewardHost:
             sim = self._require_sim()
             camera = q.get("camera", "overview")
             if camera.startswith("robot:"):
-                camera = sim.robot_camera_name(camera.removeprefix("robot:"))
+                try:
+                    camera = sim.robot_camera_name(camera.removeprefix("robot:"), q.get("sensor"))
+                except KeyError as exc:
+                    raise HttpError(404, f"no such robot camera: {exc}") from None
             elif camera == "free":
                 try:
                     lookat = [float(v) for v in q["lookat"].split(",")]
@@ -488,10 +505,18 @@ class StewardHost:
 
     # ------------------------------------------------------------ robot port
     def _robot_routes(self, rid: str) -> dict:
+        def camera_id(q) -> str | None:
+            """The ``camera`` query (a sensor id of this robot; absent: its primary camera)."""
+            camera = q.get("camera")
+            if camera is not None and camera not in {c["id"] for c in self._require_sim().robot_cameras(rid)}:
+                raise HttpError(404, f"robot {rid} has no camera {camera!r}")
+            return camera
+
         def camera(q, b):
             sim = self._require_sim()
             fmt = image_format(q)
-            image = sim.render(sim.robot_camera_name(rid), int(q.get("width", 320)), int(q.get("height", 240)), fmt=fmt)
+            image = sim.render(sim.robot_camera_name(rid, camera_id(q)), int(q.get("width", 320)),
+                               int(q.get("height", 240)), fmt=fmt)
             return Binary(image, IMAGE_FORMATS[fmt])
 
         def clock_wait(q, b):
@@ -518,11 +543,19 @@ class StewardHost:
             # The robot's own encoders without a perception sample: an Ego-State view polling
             # them at frame rate must not advance the detector's noise stream.
             ("GET", "/sensors/proprioception"): lambda q, b: self._require_sim().proprioception(rid),
-            ("GET", "/sensors/rgbd"): lambda q, b: Binary(self._require_sim().rgbd(rid, camera=q.get("camera")),
-                                                        "application/octet-stream"),
+            ("GET", "/sensors/rgbd"): lambda q, b: Binary(self._require_sim().rgbd(rid, camera_id(q)), "application/octet-stream"),
+            ("GET", "/sensors/cameras"): lambda q, b: self.sensor_cameras.sensor_snapshot(rid),
+            ("GET", "/sensors/kinematics"): lambda q, b: self.sensor_cameras.kinematics(rid),
+            ("GET", "/sensors/cameras/calibration"): lambda q, b: self.sensor_cameras.calibration(rid),
+            ("POST", "/sensors/rgb/record/start"): lambda q, b: self.sensor_cameras.recordings.start(rid, b or {}),
+            ("GET", "/sensors/rgb/record/status"): lambda q, b: self.sensor_cameras.recordings.get(rid, q["recording_id"]).status(),
+            ("POST", "/sensors/rgb/record/stop"): lambda q, b: self.sensor_cameras.recordings.get(rid, b["recording_id"]).finish(b.get("cancel", False)),
+            ("GET", "/sensors/rgb/record/result"): lambda q, b: self.sensor_cameras.recordings.get(rid, q["recording_id"]).result(),
+            ("GET", "/sensors/rgb/pose"): lambda q, b: self.sensor_cameras.odometry_kinematics(rid),
             ("GET", "/camera/rgb"): camera,
             ("POST", "/command"): lambda q, b: self._require_sim().command(rid, b or {}),
             ("POST", "/telemetry"): telemetry,
             ("POST", "/clock/wait"): clock_wait,
             ("POST", "/clock/release"): lambda q, b: self._require_sim().release(f"{rid}/{b['hold']}") or {},
+            ("POST", "/clock/renew"): lambda q, b: self._require_sim().renew(f"{rid}/{b['hold']}") or {},
         }

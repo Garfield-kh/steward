@@ -1,0 +1,34 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write steward/dsh/packages/dsh-tool-rgbd-video-gen/README.md
+/:
+  en: b9f09890e8ed2c24
+  zh: 70be796aceb8a748
+/steward-dsh-tool-rgbd-video-gen:
+  en: 59e5d7ad9df2562c
+  zh: 350bb3c83fccd1d2
+/steward-dsh-tool-rgbd-video-gen/summary:
+  en: 614380d4b8b11cc4
+  zh: 0ed1ed4a5200e258
+/steward-dsh-tool-rgbd-video-gen/table-of-contents:
+  en: d152484eb41ac6b4
+  zh: 364c80ee00a374ff
+/steward-dsh-tool-rgbd-video-gen/use-this-package:
+  en: ab91c0eb8b6c90a4
+  zh: 1fd9981714d205ad
+/steward-dsh-tool-rgbd-video-gen/understand-the-implementation:
+  en: 697fe5510942b17d
+  zh: 6c8f512c332b0cdc
+/steward-dsh-tool-rgbd-video-gen/further-exploration:
+  en: 48edb5ba5d64fd08
+  zh: df85b94ac4cde815
+/steward-dsh-tool-rgbd-video-gen/model-experience:
+  en: f8f6351b3a225b24
+  zh: d756835d0c3c8039
+/steward-dsh-tool-rgbd-video-gen/known-limitations-and-deferred-work:
+  en: c7e4c3b7bfebbd5c
+  zh: 5f1ee3d218a50edd
+/steward-dsh-tool-rgbd-video-gen/dev-note:
+  en: b75c8458928b72b9
+  zh: 003ba4e17b4b5269

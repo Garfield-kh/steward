@@ -515,6 +515,21 @@ def test_a_pour_spot_keeps_the_contents_slide_from_every_edge_of_the_surface():
         esim._choose_spot(es, table, entity_box(table)[0], box, entity_box(box)[0], [0.0, -0.3], 0.0, 0.015, edge_keep=keep)
 
 
+def test_a_held_box_overhanging_the_base_is_not_put_down_on_the_floor_under_it():
+    from steward.ego.esim import Esim
+
+    model = steward_bot().to_dict()
+    est = EgoEstimator(robot_model=model)
+    est.tracks = {"e:2": _track("e:2", "box", [0.35, 0.0, 0.775], [0.54, 0.54, 0.05]),
+                  "e:3": _track("e:3", "puzzle_piece", [0.35, 0.0, 0.003], [0.115, 0.115, 0.006])}
+    es = est.to_scene()
+    box, piece = es.find("e:2"), es.find("e:3")
+    esim = Esim(model)
+    assert "under the robot's base" in esim._release_blocked([], box, (0.35, 0.0), 0.0, (0.0, 0.0), 0.0)
+    assert esim._release_blocked([], box, (0.75, 0.0), 0.0, (0.0, 0.0), 0.0) is None
+    assert esim._release_blocked([], piece, (0.0, 0.0), 0.0, (0.0, 0.0), 0.0) is None, "the base drives over it"
+
+
 def test_a_remembered_face_gathers_views_and_is_replaced_after_the_object_is_put_down():
     est = EgoEstimator(robot_model=steward_bot().to_dict())
     est.tracks["e:3"] = _track("e:3", "puzzle_piece", [0.5, 0.0, 0.753], [0.115, 0.115, 0.006])

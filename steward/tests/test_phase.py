@@ -173,8 +173,11 @@ def test_a_region_whose_base_is_cut_hidden_or_overhanging_has_no_seen_bottom():
     depth[45:60, 30:38] = 2.5
     mask[35:45, 72:78] = 5  # a table top segmented without its legs: the room below it is farther
     depth[35:45, 72:78] = 2.7
+    mask[2:8, 5:15] = 6  # a bowl whose rim reaches past the table edge: half of it rests on the table
+    depth[2:8, 5:15] = 3.55
+    depth[8:10, 5:10] = 3.6
     seen = {round(seg.range, 1): seg.bottom_seen for seg in segments(_frame(depth, mask), CAM)}
-    assert seen == {3.0: True, 3.4: False, 2.0: True, 2.5: False, 2.7: False}
+    assert seen == {3.0: True, 3.4: False, 2.0: True, 2.5: False, 2.7: False, 3.5: True}
 
 
 def test_a_partial_view_without_its_base_is_classified_by_its_visible_top():

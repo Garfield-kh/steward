@@ -120,6 +120,4 @@ def test_sim_rgbd_per_camera() -> None:
         assert frame["rgb"].shape == (480, 640, 3)
         assert frame["depth"].shape == (480, 640)
         assert frame["mask"].shape == (480, 640)
-        import json
-        header = json.loads(str(frame["header"]))
-        assert header["camera"]["id"] == expect
+        assert str(frame["camera"]) == expect

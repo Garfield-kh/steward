@@ -409,6 +409,10 @@
   name: '@steward/dsh-robot-safety'
   config:
     maxRisk: 0.35
+- id: steward-ego-reflection
+  name: '@steward/dsh-ego-reflection'
+  config:
+    instructionMarker: 操作员任务：
 - id: steward-tool-ego-capabilities
   name: '@steward/dsh-tool-ego-capabilities'
   config:

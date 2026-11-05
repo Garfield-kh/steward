@@ -20,6 +20,9 @@
       "path": "packages/dsh-robot-safety"
     },
     {
+      "path": "packages/dsh-ego-reflection"
+    },
+    {
       "path": "packages/dsh-world"
     },
     {

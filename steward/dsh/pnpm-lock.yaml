@@ -20,6 +20,9 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 3.18.5
         version: 3.18.5
+      '@steward/dsh-ego-reflection':
+        specifier: workspace:*
+        version: link:packages/dsh-ego-reflection
       '@steward/dsh-ego-runtime-client':
         specifier: workspace:*
         version: link:packages/dsh-ego-runtime-client
@@ -56,6 +59,9 @@ importers:
 
   packages/dsh-bundle-ego:
     dependencies:
+      '@steward/dsh-ego-reflection':
+        specifier: workspace:*
+        version: link:../dsh-ego-reflection
       '@steward/dsh-ego-runtime-client':
         specifier: workspace:*
         version: link:../dsh-ego-runtime-client
@@ -111,6 +117,28 @@ importers:
       '@deepseek-ai/cordis':
         specifier: 4.0.5
         version: 4.0.5(@deepseek-ai/cordis-plugin-include@1.0.10)(@deepseek-ai/cordis-plugin-loader@1.0.6)
+
+  packages/dsh-ego-reflection:
+    dependencies:
+      '@steward/dsh-ego':
+        specifier: workspace:*
+        version: link:../dsh-ego
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: 4.0.5
+        version: 4.0.5(@deepseek-ai/cordis-plugin-include@1.0.10)(@deepseek-ai/cordis-plugin-loader@1.0.6)
+      '@deepseek-ai/dsh-agent':
+        specifier: 0.2.1-rc.3
+        version: 0.2.1-rc.3(02d0f40b432df75e85918e266882ca13)
+      '@deepseek-ai/dsh-llm':
+        specifier: 0.2.1-rc.3
+        version: 0.2.1-rc.3(@deepseek-ai/cordis@4.0.5)
+      '@deepseek-ai/dsh-tools':
+        specifier: 0.2.1-rc.3
+        version: 0.2.1-rc.3(216a232736cc22d421973382c4e97320)
+      '@deepseek-ai/schemastery':
+        specifier: 3.18.5
+        version: 3.18.5
 
   packages/dsh-ego-runtime-client:
     dependencies:

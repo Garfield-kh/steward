@@ -284,6 +284,24 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
       },
     }),
     defineTool({
+      name: 'ego_candidates',
+      description: 'Find the objects that could be what the instruction calls something when perception names it differently: '
+        + 'the segmenter names things by appearance (a lid printed with a picture can be "picture"), and the classifier only '
+        + 'knows the shapes of its categories. Ranks objects by how well their perceived category alternatives, segmenter '
+        + 'names and size fit `name` and `size`; without either, lists the objects whose current name is doubtful. Each '
+        + 'carries `doubts` and the evidence behind its name. Confirm with ego_inspect or a closer look, then ego_annotate.',
+      parameters: {
+        name: { type: 'string', description: 'What you are looking for, as a category word, for example "box" or "lid".' },
+        size: { type: 'array', items: { type: 'number' }, description: 'One to three approximate dimensions in metres from the instruction or your expectation.' },
+        exclude: { type: 'array', items: { type: 'string' }, description: 'Object ids to leave out.' },
+        limit: { type: 'number', description: 'Maximum number of candidates.' },
+      },
+      output: { schema: JSON_OUTPUT, render: (_a, v) => text(v) },
+      async execute(args, exec) {
+        return json({ candidates: await ego.candidates({ name: args.name, size: args.size, exclude: args.exclude, limit: args.limit }, exec.signal) })
+      },
+    }),
+    defineTool({
       name: 'skill_run',
       description: 'Execute the plan of a receipt from ego_predict. Waits for the skill to finish unless wait is '
         + 'false. The robot refuses receipts that are infeasible, expired, already used, or above the risk limit.',

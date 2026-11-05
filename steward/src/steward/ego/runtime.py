@@ -28,6 +28,8 @@ from steward.ego.perception import (box_of, decode_rgbd, match_face, resample_fa
 from steward.ego.kinematics import gripper_pose
 from steward.ego.esim import Esim, EsimConfig
 from steward.ego.estimator import SELF_ID, EgoEstimator
+from steward.ego import reflection
+from steward.ego.reflection import ReflectionConfig
 from steward.ego.roles import RoleConfig, assign_roles
 from steward.ego.segmenter import Segmenter, SegmenterError
 from steward.ego.skills import MotionConfig, SkillExecutor, SkillFailed
@@ -93,6 +95,7 @@ class RuntimeConfig:
     esim: EsimConfig = field(default_factory=EsimConfig)
     motion: MotionConfig = field(default_factory=MotionConfig)
     roles: RoleConfig = field(default_factory=RoleConfig)
+    reflection: ReflectionConfig = field(default_factory=ReflectionConfig)
 
 
 def body_ok(category: str) -> bool:
@@ -783,6 +786,60 @@ class EgoRuntime:
             r = radius if radius is not None else 1.0
             objs = [o for o in objs if o["id"] != near and math.dist(o["position"][:2], anchor["position"][:2]) <= r]
         return objs
+
+    def _naming(self) -> tuple[list[dict], dict[str, reflection.Evidence], dict[str, list[str]]]:
+        """Summary objects, the perception evidence of each track and the segmenter prompt words per category."""
+        objects = self.summary()["objects"]
+        with self._lock:
+            evidence = {}
+            for tid, track in self.estimator.tracks.items():
+                total = sum(track.category_counts.values())
+                perceived = {k: v / total for k, v in track.category_counts.items()} if total else {}
+                segmenter = ({k: v / track.semantic_views for k, v in track.semantic_counts.items()}
+                             if track.semantic_views else {})
+                evidence[tid] = reflection.Evidence(perceived, segmenter, track.label)
+        words: dict[str, list[str]] = {}
+        if self.segmenter is not None:
+            for prompt, category in self.segmenter.config.vocabulary.items():
+                words.setdefault(category, []).append(prompt)
+        return objects, evidence, words
+
+    def candidates(self, request: dict) -> dict:
+        """Objects that could be what a name and approximate size refer to, with the naming evidence
+        and doubts of each (see :mod:`steward.ego.reflection`).
+
+        :param request: ``{name?, size?, exclude?, limit?}``; without ``name`` and ``size`` the
+            doubtfully named objects.
+        :returns: ``{candidates}``.
+        :raises ValueError: malformed fields."""
+        name, size, exclude, limit = (request.get(k) for k in ("name", "size", "exclude", "limit"))
+        if name is not None and (not isinstance(name, str) or not name.strip()):
+            raise ValueError("name must be a non-empty string")
+        if size is not None and (not isinstance(size, list) or not 1 <= len(size) <= 3
+                                 or not all(isinstance(v, (int, float)) and v > 0 for v in size)):
+            raise ValueError("size must list one to three positive dimensions in metres")
+        if exclude is not None and (not isinstance(exclude, list) or not all(isinstance(e, str) for e in exclude)):
+            raise ValueError("exclude must be a list of entity ids")
+        if limit is not None and (not isinstance(limit, int) or limit < 1):
+            raise ValueError("limit must be a positive integer")
+        objects, evidence, words = self._naming()
+        return {"candidates": reflection.candidates(objects, evidence, words, self.config.reflection,
+                                                    name, size, exclude or (), limit)}
+
+    def reflect(self, failure: dict) -> dict:
+        """Evidence for reflecting on a failed step: its cause, the objects it was about and
+        candidates for the object the instruction meant (see :func:`steward.ego.reflection.reflect`).
+
+        :param failure: ``{tool?, arguments?, message, name?, size?}``.
+        :returns: ``{cause, sought, targets, missing, candidates}``.
+        :raises ValueError: malformed fields."""
+        if failure.get("arguments") is not None and not isinstance(failure["arguments"], dict):
+            raise ValueError("arguments must be an object")
+        size = failure.get("size")
+        if size is not None and (not isinstance(size, list) or not all(isinstance(v, (int, float)) and v > 0 for v in size)):
+            raise ValueError("size must list positive dimensions in metres")
+        objects, evidence, words = self._naming()
+        return reflection.reflect(objects, evidence, words, self.config.reflection, failure)
 
     def capture_cameras(self) -> dict:
         """Capture the existing robot RGB views without moving or changing the perception loop.

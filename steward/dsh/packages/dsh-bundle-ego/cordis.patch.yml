@@ -12,6 +12,11 @@
       name: '@steward/dsh-robot-safety'
       config:
         maxRisk: 0.35
+    # The console prefixes every operator message with this marker (steward.world.chat).
+    - id: steward-ego-reflection
+      name: '@steward/dsh-ego-reflection'
+      config:
+        instructionMarker: '操作员任务：'
     - id: steward-tool-ego-capabilities
       name: '@steward/dsh-tool-ego-capabilities'
       config:

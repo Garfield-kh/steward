@@ -123,6 +123,8 @@ def _routes(runtime: EgoRuntime) -> dict:
         ("POST", "/ego/control"): lambda q, b: control(b),
         ("POST", "/ego/predict"): lambda q, b: runtime.predict(b["skill"], b.get("params", {})),
         ("POST", "/ego/annotate"): lambda q, b: runtime.annotate(b),
+        ("POST", "/ego/candidates"): lambda q, b: runtime.candidates(b),
+        ("POST", "/ego/reflect"): lambda q, b: runtime.reflect(b),
         ("POST", "/ego/inspect"): lambda q, b: runtime.inspect(b["entity"], int(b.get("px", 24))),
         ("POST", "/ego/match-face"): lambda q, b: runtime.match_face(b.get("entities"), b["reference"], int(b.get("px", 12))),
         ("GET", "/ego/receipt"): lambda q, b: runtime.receipt(q["id"]),

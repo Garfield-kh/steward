@@ -107,6 +107,68 @@ export interface Annotation {
   affordances?: string[]
 }
 
+/** What the instruction asked for, to find the objects that could be it (see {@link EgoService.candidates}). */
+export interface CandidateQuery {
+  /** Category, role or segmenter word sought, for example `box`. */
+  name?: string
+  /** One to three approximate dimensions in metres, any order. */
+  size?: number[]
+  /** Object ids to leave out. */
+  exclude?: string[]
+  /** Maximum number of candidates; the runtime default applies when absent. */
+  limit?: number
+}
+
+/** An object with the evidence behind its name, for comparison with an instruction. */
+export interface Candidate {
+  id: string
+  category: string
+  role: string | null
+  extentM: number[] | null
+  color: string | null
+  on: string | null
+  position: number[]
+  lastSeenAgoS: number
+  /** Category probabilities from perception alone, ignoring any label. */
+  perceived?: Record<string, number>
+  /** Mean segmenter score per category, with the prompt words that map to it. */
+  segmenter?: Record<string, { score: number; prompts: string[] }>
+  /** The label the robot agent gave it, if any. */
+  label?: string
+  /** Reasons to doubt its current name; empty when the name is well supported. */
+  doubts: string[]
+  /** Fit to the sought name and size; present only for a query with either. */
+  score?: number
+  why?: string[]
+}
+
+/** A failed robot step to reflect on (see {@link EgoService.reflect}). */
+export interface FailureReport {
+  /** Tool that failed. */
+  tool?: string
+  /** Its arguments; ids among them (`target`, `on`, `params.target`, ...) name the objects involved. */
+  arguments?: JsonObject
+  /** The failure text: error, receipt issues or skill message. */
+  message: string
+  /** What the instruction asked for, when known. */
+  name?: string
+  size?: number[]
+}
+
+/** Evidence for reflecting on a failed step. */
+export interface Reflection {
+  /** The kind of failure and what usually resolves it. */
+  cause: { key: string; label: string; advice: string }
+  /** The name and size the candidates were ranked against. */
+  sought: { name: string | null; size: number[] | null }
+  /** The objects the failed call was about. */
+  targets: Candidate[]
+  /** Ids the call named that the Ego-State no longer holds. */
+  missing: string[]
+  /** Other objects that could be the sought one, then doubtfully named ones. */
+  candidates: Candidate[]
+}
+
 /** Filter for Ego-State object queries. */
 export interface EgoQuery {
   /** Category to keep, for example `cup`. */
@@ -260,6 +322,24 @@ export abstract class EgoService extends Service {
    * @returns the object's Ego-State summary entry after the change.
    */
   abstract annotate(annotation: Annotation, signal?: AbortSignal): Promise<JsonObject>
+
+  /**
+   * Objects that could be what a name and approximate size refer to, best first, each with its
+   * naming evidence and doubts; without a name or size, the doubtfully named objects.
+   * @param query - sought name and size.
+   * @param signal - caller cancellation.
+   * @returns the candidates.
+   */
+  abstract candidates(query: CandidateQuery, signal?: AbortSignal): Promise<Candidate[]>
+
+  /**
+   * Evidence for reflecting on a failed step: its cause, the objects involved and candidates for
+   * the object the instruction meant.
+   * @param failure - the failed call and its failure text.
+   * @param signal - caller cancellation.
+   * @returns the reflection evidence.
+   */
+  abstract reflect(failure: FailureReport, signal?: AbortSignal): Promise<Reflection>
 
   /**
    * Execute the plan of a receipt. The runtime re-checks validity, expiry and risk.

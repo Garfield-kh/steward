@@ -176,7 +176,7 @@ def test_the_shipped_settings_load_and_bad_settings_fail_loud(tmp_path):
                           ("[segmenter]\nthreshold='x'\n[vocabulary]\nbowl='bowl'\n", "segmenter.threshold"),
                           ("[segmenter]\ntresh=0.4\n[vocabulary]\nbowl='bowl'\n", "unknown segmenter keys"),
                           ("[segmenter]\ncrop_prompts=['cup']\n[vocabulary]\nbowl='bowl'\n", "not in [vocabulary]")]:
-        bad.write_text(text)
+        bad.write_text(text, encoding="utf-8")
         with pytest.raises(ValueError, match=message.replace("[", r"\[")):
             load_config(bad)
 
@@ -221,9 +221,10 @@ def test_without_world_masks_the_robot_segments_keyframes_and_alerts_on_failure(
     try:
         host.set_phase("phase1-sam")
         assert "mask" not in host.sim.sensors("w:robot-1") and host.sim.sensors("w:robot-1")["masks"] is False
-        _pump_until(host, lambda: runtime.perception_mode == "rgbd-segmenter" and stub.calls >= 2)
+        # A keyframe batch is segmented camera by camera before it is fused, so wait for the fusion.
+        _pump_until(host, lambda: runtime.perception_mode == "rgbd-segmenter" and stub.calls >= 2
+                    and any(t.semantic_views for t in list(runtime.estimator.tracks.values())))
         assert runtime.segmentation["frames"] == stub.calls
-        assert any(t.semantic_views for t in runtime.estimator.tracks.values())
         assert "segmentation" in runtime.summary()
         stub.fail = True
         _pump_until(host, lambda: runtime.segmentation["failures"] >= 2)

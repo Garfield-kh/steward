@@ -8,6 +8,7 @@ dependencies = [
   "numpy>=1.26",
   "pillow>=10.0",
   "mink>=1.3",  # 6-DoF arm IK on the robot's own model (PyRoki refuses 6-DoF)
+  "zstandard>=0.23",  # DSH session files, without a zstd executable on PATH
 ]
 
 [project.optional-dependencies]

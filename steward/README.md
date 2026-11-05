@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-The robot Ego Harness can use the `rgbd_video_gen` and `NovelAnything` skills for remote novel-view synthesis. On Windows, install them with `scripts/setup-rgbd-video-gen.ps1` and `scripts/setup-novelanything.ps1`; `scripts/setup-dsh-profiles.sh` installs both into the robot profile on Linux/macOS. See the [rgbd_video_gen guide](dsh/packages/dsh-bundle-rgbd-video-gen/README.md) and [NovelAnything guide](dsh/packages/dsh-bundle-novelanything/README.md).
+The robot Ego Harness can use the `rgbd_video_gen` and `NovelAnything` skills for remote novel-view synthesis. `scripts/setup-dsh-profiles.sh` (Linux/macOS) and `scripts/setup-dsh-profiles.ps1` (Windows) install both into the robot profile; on Windows, `scripts/setup-rgbd-video-gen.ps1` and `scripts/setup-novelanything.ps1` add them to an existing one. See the [rgbd_video_gen guide](dsh/packages/dsh-bundle-rgbd-video-gen/README.md) and [NovelAnything guide](dsh/packages/dsh-bundle-novelanything/README.md).
 
 Model evidence uses the existing `head_camera`. Continuous recording samples in simulation time with measured robot odometry and encoders; target gripper views use robot-owned forward kinematics. Snapshots retain the head/wide cameras and their individual calibration, layout, field of view and perception responsibilities. These capabilities do not install SLARM or extra cameras.
 
@@ -37,6 +37,22 @@ echo 'DEEPSEEK_API_KEY=sk-...' > .env     # 已被 Git 忽略，运行脚本自�
 ./scripts/install-desktop-app.sh          # 在桌面安装 Steward.app：选场景后启动世界、Ego Harness 并打开控制台
 .venv/bin/steward services                # 检查远程感知服务（SAM 3.1、NovelAnything、NVS、SLARM）是否可达
 ```
+
+## Windows
+
+Steward runs on Windows with the same commands: `uv sync` installs the `steward` executable under `.venv\Scripts`, and every `.sh` script has a PowerShell counterpart with the same name and arguments. If PowerShell refuses unsigned scripts, run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once.
+
+```powershell
+uv sync
+.venv\Scripts\steward up --phase phase1-sam
+.\scripts\setup-dsh-profiles.ps1          # 构建插件，创建 ego、world、world-task profile
+.\scripts\run-ego.ps1 "把杯子放到桌上"      # 机器人智能体
+.\scripts\run-world.ps1 --port 3091       # World Harness 浏览器界面
+.\scripts\check.ps1                       # Python 测试、DSH 插件编译与测试、组合配置快照比对
+.\scripts\install-desktop-app.ps1         # 在桌面创建 Steward 快捷方式：选场景后启动世界、Ego Harness 并打开控制台
+```
+
+The desktop launcher writes its logs to `%LOCALAPPDATA%\Steward\Logs`; on macOS they go to `~/Library/Logs/Steward`.
 
 The robot `ego` profile observes and acts through the Ego API; general shell, file and web tools are disabled. The `world` and `world-task` profiles use the World Control API for assets, scenes and episodes. Robot and World Harnesses use separate `DSH_HOME` directories.
 

@@ -90,7 +90,7 @@ def load_env_file(path: Path) -> dict[str, str]:
     out: dict[str, str] = {}
     if not path.exists():
         return out
-    for line in path.read_text().splitlines():
+    for line in path.read_text(encoding="utf-8").splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -326,7 +326,7 @@ class HarnessChat:
     def _run(self, agent: _Agent, text: str, first: bool) -> None:
         cfg = self.config
         fd, name = tempfile.mkstemp(prefix=f"steward-{agent.key}-", suffix=".yml")
-        with os.fdopen(fd, "w") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(agent.patch())
         patch = Path(name)
         args = [str(cfg.dsh), "--profile", agent.profile, "--patch", str(patch), "--json"]

@@ -92,7 +92,7 @@ class AuthoringService:
         if not report["ok"]:
             raise AuthoringError(f"scene {name!r} failed physical checks: {report['errors']}")
         path = self.root / "scenes" / f"{name}.json"
-        path.write_text(json.dumps(scene_dict, indent=2))
+        path.write_text(json.dumps(scene_dict, indent=2), encoding="utf-8")
         return {"name": name, "path": str(path), "report": report, "entities": len(scene.entities)}
 
     def _placement_pose(self, scene: SceneState, placement: dict) -> dict:
@@ -197,7 +197,7 @@ class AuthoringService:
         path = self.root / "scenes" / f"{name}.json"
         if not path.exists():
             raise AuthoringError(f"unknown scene {name!r}")
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
 
     def list_scenes(self) -> list[str]:
         return sorted(p.stem for p in (self.root / "scenes").glob("*.json"))
@@ -241,14 +241,14 @@ class AuthoringService:
                 raise AuthoringError(f"scenario robot {rid!r} is not in scene {scenario['scene']!r}")
         record = {"perturbationPolicy": {"allowed": [], "budget": 0}, **scenario}
         path = self.root / "scenarios" / f"{scenario['name']}.json"
-        path.write_text(json.dumps(record, indent=2))
+        path.write_text(json.dumps(record, indent=2), encoding="utf-8")
         return {"name": scenario["name"], "path": str(path)}
 
     def load_scenario(self, name: str) -> dict:
         path = self.root / "scenarios" / f"{name}.json"
         if not path.exists():
             raise AuthoringError(f"unknown scenario {name!r}")
-        scenario = json.loads(path.read_text())
+        scenario = json.loads(path.read_text(encoding="utf-8"))
         return scenario | {"sceneState": self.load_scene(scenario["scene"])}
 
     def list_scenarios(self) -> list[str]:

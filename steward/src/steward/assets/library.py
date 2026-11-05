@@ -40,11 +40,11 @@ class AssetLibrary:
             self._write_index({"assets": {}})
 
     def _read_index(self) -> dict:
-        return json.loads(self._index_path.read_text())
+        return json.loads(self._index_path.read_text(encoding="utf-8"))
 
     def _write_index(self, index: dict) -> None:
         tmp = self._index_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(index, indent=2, sort_keys=True))
+        tmp.write_text(json.dumps(index, indent=2, sort_keys=True), encoding="utf-8")
         tmp.replace(self._index_path)
 
     def publish(self, name: str, template: dict, meta: dict | None = None, validation: dict | None = None) -> str:
@@ -64,7 +64,7 @@ class AssetLibrary:
             "meta": meta or {},
             "validation": validation,
         }
-        (self.root / "objects" / f"{digest}.json").write_text(json.dumps(record, indent=2, sort_keys=True))
+        (self.root / "objects" / f"{digest}.json").write_text(json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
         index = self._read_index()
         entry = index["assets"].setdefault(name, {"latest": digest, "versions": []})
         if all(v["hash"] != digest for v in entry["versions"]):
@@ -82,7 +82,7 @@ class AssetLibrary:
         path = self.root / "objects" / f"{digest}.json"
         if not path.exists():
             raise KeyError(f"unknown version {digest!r} of asset {name!r}")
-        return json.loads(path.read_text()) | {"version": digest}
+        return json.loads(path.read_text(encoding="utf-8")) | {"version": digest}
 
     def search(self, query: str | None = None, category: str | None = None) -> list[dict]:
         out = []

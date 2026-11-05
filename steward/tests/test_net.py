@@ -1,5 +1,5 @@
-"""JSON-over-HTTP services: binding a fixed port that a stopped service still holds, and results
-that JSON cannot represent."""
+"""JSON-over-HTTP services: binding a fixed port that a stopped service or a running one still
+holds, and results that JSON cannot represent."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import urllib.request
 
 import pytest
 
-from steward.net import JsonServer
+from steward.net import JsonServer, address_in_use
 
 
 def _held_port() -> socket.socket:
@@ -36,10 +36,21 @@ def test_a_fixed_port_freed_within_the_wait_is_bound():
 def test_a_fixed_port_still_held_after_the_wait_fails_loudly():
     held = _held_port()
     try:
-        with pytest.raises(OSError):
+        with pytest.raises(OSError) as caught:
             JsonServer({}, port=held.getsockname()[1], name="probe", bind_wait_s=0.6)
+        assert address_in_use(caught.value)
     finally:
         held.close()
+
+
+def test_a_second_server_on_a_running_servers_port_is_refused_not_sharing_it():
+    first = JsonServer({}, port=0, name="first").start()
+    try:
+        with pytest.raises(OSError) as caught:
+            JsonServer({}, port=first.port, name="second")
+        assert address_in_use(caught.value)
+    finally:
+        first.stop()
 
 
 def test_a_result_holding_a_non_finite_number_is_a_json_server_error():

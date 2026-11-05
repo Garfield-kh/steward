@@ -154,7 +154,7 @@ class Observer:
             self.latest[robot_id] = record
             self.history.setdefault(robot_id, []).append(record)
             if self.out_dir is not None:
-                with (self.out_dir / "observer.jsonl").open("a") as fh:
+                with (self.out_dir / "observer.jsonl").open("a", encoding="utf-8") as fh:
                     fh.write(json.dumps(record) + "\n")
 
     def reset(self) -> None:

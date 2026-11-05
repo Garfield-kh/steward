@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import errno
 import json
+import os
 import sys
 import threading
 import time
@@ -39,6 +40,23 @@ class Binary:
 
 NO_CONTENT = object()
 """A handler result answered with ``204 No Content`` (for example: no newer frame yet)."""
+
+# Windows reports a held port as WSAEADDRINUSE (10048), which is not errno.EADDRINUSE there.
+_ADDR_IN_USE = {errno.EADDRINUSE, getattr(errno, "WSAEADDRINUSE", errno.EADDRINUSE)}
+
+
+def address_in_use(exc: OSError) -> bool:
+    """Whether a bind failed because another socket holds the address, on POSIX and Windows.
+
+    :param exc: the error ``bind`` raised.
+    :returns: True for "address already in use"."""
+    return exc.errno in _ADDR_IN_USE or getattr(exc, "winerror", None) in _ADDR_IN_USE
+
+
+class _Server(ThreadingHTTPServer):
+    # SO_REUSEADDR on Windows lets a second socket bind a port another one listens on, so two
+    # runs would share a port silently; Windows rebinds a port in TIME_WAIT without it anyway.
+    allow_reuse_address = os.name != "nt"
 
 
 class JsonServer:
@@ -113,10 +131,10 @@ class JsonServer:
         deadline, waited = time.monotonic() + bind_wait_s, False
         while True:
             try:
-                self._httpd = ThreadingHTTPServer((host, port), _Handler)
+                self._httpd = _Server((host, port), _Handler)
                 break
             except OSError as exc:
-                if exc.errno != errno.EADDRINUSE or port == 0 or time.monotonic() >= deadline:
+                if not address_in_use(exc) or port == 0 or time.monotonic() >= deadline:
                     raise
                 waited = True
                 time.sleep(0.5)

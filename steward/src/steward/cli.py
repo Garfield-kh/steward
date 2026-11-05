@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import argparse
-import errno
 import json
 import math
 import os
@@ -107,14 +106,18 @@ def _require_free(ports: dict[str, int]) -> None:
             continue
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
             # A port a previous run left in TIME_WAIT is free for us; only a live listener is not.
-            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # Windows rebinds TIME_WAIT ports by default, and SO_REUSEADDR there would bind over a live listener.
+            if os.name != "nt":
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 probe.bind(("127.0.0.1", port))
             except OSError:
+                find = (f"netstat -ano | findstr :{port}" if os.name == "nt"
+                        else f"lsof -nP -iTCP:{port} -sTCP:LISTEN")
                 raise SystemExit(
                     f"steward: the {what} port {port} is already in use.\n"
                     f"  another steward run is probably still up; find it with\n"
-                    f"    lsof -nP -iTCP:{port} -sTCP:LISTEN\n"
+                    f"    {find}\n"
                     f"  then stop it, or pass a different port (--wca-port / --robot-port / --api-port).\n"
                     f"  the kitchen scenario owns 7400/7410/7420; `steward cobot` owns "
                     f"{COBOT_WCA_PORT}/{COBOT_ROBOT_PORT}") from None
@@ -227,7 +230,9 @@ def _exit_with_parent(parent_pid: int) -> None:
     def watch() -> None:
         while parent_alive():
             time.sleep(1.0)
-        os.kill(os.getpid(), signal.SIGTERM)
+        # raise_signal runs the SIGTERM handler on both systems; os.kill on Windows terminates
+        # the process at once, skipping the stoppers.
+        signal.raise_signal(signal.SIGTERM)
 
     threading.Thread(target=watch, name="parent-watch", daemon=True).start()
 
@@ -253,9 +258,11 @@ class _EgoProcess:
             cmd += ["--mission-config", json.dumps(self.mission_config, ensure_ascii=False)]
         if body["ego"] == "ego":  # only the mobile robot's runtime segments by itself
             cmd += ["--segmentation-config", args.segmentation_config]
+        # The child writes its piped stdout in the locale encoding (GBK on Chinese Windows) unless told
+        # otherwise; the reader decodes UTF-8, so a locale decode error cannot kill it and backpressure the child.
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, encoding="utf-8",
-                                     errors="replace", start_new_session=True)  # NDJSON is UTF-8; a locale
-        # decode error here would silently kill the reader (and backpressure the child) on Windows
+                                     errors="replace", env=os.environ | {"PYTHONIOENCODING": "utf-8"},
+                                     start_new_session=True)
         first = self.proc.stdout.readline()
         if not first:
             raise SystemExit(f"the Ego Runtime process for {robot_url} ({body['ego']}) exited with status "
@@ -911,7 +918,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return args.fn(args)
     except OSError as exc:
-        if exc.errno != errno.EADDRINUSE:
+        from steward.net import address_in_use
+
+        if not address_in_use(exc):
             raise
         raise SystemExit(f"steward: a port is already in use ({exc}); stop the other run or pass "
                          f"different --wca-port / --robot-port / --api-port values") from None

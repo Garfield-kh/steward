@@ -10,9 +10,10 @@ from __future__ import annotations
 import glob
 import json
 import os
-import subprocess
 import threading
 import time
+
+import zstandard
 
 _TEXT_LIMIT = 2000
 _TIME_BUDGET_S = 0.5
@@ -28,12 +29,13 @@ def _session_file(robot_home: str) -> str | None:
 
 
 def _decode(path: str) -> list[dict]:
-    out = subprocess.run(["zstd", "-dc", path], capture_output=True, text=True,
-                         encoding="utf-8", errors="replace")  # dsh speaks UTF-8; the Windows
-                         # locale (GBK) would kill the reader thread and leave stdout None
-    if out.returncode != 0:
-        raise RuntimeError(f"zstd failed to decode {path}: {out.stderr.strip()}")
-    return [json.loads(line) for line in out.stdout.splitlines() if line.strip()]
+    try:
+        with open(path, "rb") as fh:
+            data = zstandard.ZstdDecompressor().stream_reader(fh, read_across_frames=True).read()
+    except zstandard.ZstdError as exc:
+        raise RuntimeError(f"zstd failed to decode {path}: {exc}") from exc
+    text = data.decode("utf-8", errors="replace")  # dsh writes UTF-8 whatever the locale
+    return [json.loads(line) for line in text.splitlines() if line.strip()]
 
 
 def _rows(path: str, deadline: float) -> list[dict]:

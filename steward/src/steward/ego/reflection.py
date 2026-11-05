@@ -32,6 +32,8 @@ class ReflectionConfig:
     size_under_weight: float = 0.25
     # An object whose bottom lies this far above the top of its support has a part below it unseen.
     hidden_gap_m: float = 0.02
+    # Match score of a name sharing a word with the sought one ("dinner table" for "table").
+    shared_word_score: float = 0.8
     min_alternative: float = 0.05  # perceived categories below this probability are not listed
 
 
@@ -46,6 +48,10 @@ class Evidence:
 
 def _dims(size) -> list[float]:
     return sorted((float(v) for v in size), reverse=True)
+
+
+def _words(name: str) -> set[str]:
+    return {w for w in re.split(r"[\s_\-]+", name.lower()) if w}
 
 
 def size_fit(extent, size, scale: float, under_weight: float = 1.0) -> float:
@@ -156,7 +162,8 @@ def match(obj: dict, evidence: Evidence | None, name: str | None, size, cfg: Ref
           support: dict | None = None) -> tuple[float, list[str]]:
     """How well an object fits a sought name and approximate size.
 
-    The score adds the perceived probability of the name (1 for a matching role, label or category),
+    The score adds the perceived probability of the name (1 for a matching role, label or category,
+    ``shared_word_score`` for one sharing a word with it),
     the segmenter's mean score for it, and the size fit (against ``size``, or else against the
     name's prototype when it has one); a doubted name adds a little, since a misnamed object is
     what a failed lookup by name misses.
@@ -171,9 +178,14 @@ def match(obj: dict, evidence: Evidence | None, name: str | None, size, cfg: Ref
     :returns: the score and the reasons behind it."""
     score, why = 0.0, []
     if name:
+        sought = _words(name)
+        shared = next((n for n in (obj.get("role"), obj["category"]) if n and n != name and sought & _words(n)), None)
         if name in (obj.get("role"), obj["category"]):
             score += 1.0
             why.append(f"it goes by {name}")
+        elif shared:
+            score += cfg.shared_word_score
+            why.append(f"its name {shared} shares a word with {name}")
         else:
             p = (evidence.perceived.get(name, 0.0) if evidence else obj.get("categories", {}).get(name, 0.0))
             if p >= cfg.min_alternative:
@@ -289,3 +301,29 @@ def reflect(objects: list[dict], evidence: dict[str, Evidence], prompt_words: di
         "missing": [i for i in ids if i not in by_id],
         "candidates": found,
     }
+
+
+def _brief(entry: dict) -> str:
+    doubt = f"（存疑：{entry['doubts'][0]}）" if entry["doubts"] else ""
+    score = f" 吻合 {entry['score']:.2f}" if "score" in entry else ""
+    return f"{entry['id']} {entry['category']}{score}{doubt}"
+
+
+def activity_text(failure: dict, result: dict, limit: int = 3) -> str:
+    """The reflection as one entry of the robot's activity record, for the operator console.
+
+    :param failure: the reflected failure (``tool``, ``message``).
+    :param result: what :func:`reflect` returned for it.
+    :param limit: objects listed per group.
+    :returns: the failure, its cause, the objects involved and the best candidates."""
+    parts = [f"{failure.get('tool') or '?'}：{failure['message'][:240]}"]
+    if result["cause"]["key"] != "unknown":
+        parts.append(f"归类：{result['cause']['label']}")
+    if result["targets"]:
+        parts.append("涉及：" + "；".join(_brief(t) for t in result["targets"][:limit]))
+    if result["missing"]:
+        parts.append("已不在 Ego State：" + ", ".join(result["missing"]))
+    if result["candidates"]:
+        sought = result["sought"]["name"]
+        parts.append(f"候选{f'（{sought}）' if sought else ''}：" + "；".join(_brief(c) for c in result["candidates"][:limit]))
+    return "\n".join(parts)

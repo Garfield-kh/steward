@@ -8,11 +8,20 @@ inspecting each sensor frame, so the information boundary is unchanged.
 
 from __future__ import annotations
 
+import tomllib
+from pathlib import Path
+
 PHASES: dict[str, dict] = {
     "phase0": {
         "label": "Phase 0 · 理想感知",
         "description": "WSim 直接给出带噪声的检测结果（类别与包围盒）；ER 用卡尔曼融合",
         "perception": "ideal",
+    },
+    "phase0-misnamed": {
+        "label": "Phase 0 · 理想感知（名称混淆）",
+        "description": "同 Phase 0，但按 config/misnames.toml 把一些类别报成混淆的名字（例如盒子报成 picture），用来调试 Ego Harness 的反思",
+        "perception": "ideal",
+        "misnamed": True,
     },
     "phase1": {
         "label": "Phase 1 · RGB-D 感知链路",
@@ -37,6 +46,17 @@ def phase_modules(level: str) -> dict:
     if level not in PHASES:
         raise ValueError(f"unknown phase level {level!r}; known: {', '.join(PHASES)}")
     return PHASES[level]
+
+
+def load_misnames(path: str | Path) -> dict[str, str]:
+    """The ``[misnames]`` table of a TOML file (category → reported name); raises ``ValueError``
+    when it is missing or holds anything but non-empty names."""
+    data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
+    table = data.get("misnames")
+    if not isinstance(table, dict) or not all(isinstance(k, str) and isinstance(v, str) and k and v.strip()
+                                              for k, v in table.items()):
+        raise ValueError(f"{path}: [misnames] must map categories to non-empty names")
+    return dict(table)
 
 
 def phase_catalog() -> list[dict]:

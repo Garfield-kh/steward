@@ -70,6 +70,14 @@ def test_a_thin_top_floating_above_its_support_is_doubted_and_fits_a_taller_box(
     assert entry["why"][0].startswith("size fit 0.82")
 
 
+def test_a_name_sharing_a_word_with_the_sought_one_ranks_first():
+    table = _obj("e:4", "dinner table", [2.39, 1.14, 0.75])
+    box = _obj("e:2", "picture", [0.54, 0.54, 0.05])
+    ranked = candidates([box, table], {}, WORDS, CFG, name="table")
+    assert ranked[0]["id"] == "e:4"
+    assert ranked[0]["why"][0] == "its name dinner table shares a word with table"
+
+
 def test_a_smaller_measurement_costs_less_than_a_larger_one():
     assert size_fit([0.46, 0.46, 0.03], [0.46, 0.46, 0.12], 0.35, 0.25) > size_fit([0.46, 0.46, 0.48], [0.46, 0.46, 0.12], 0.35, 0.25)
 
@@ -89,6 +97,11 @@ def test_the_runtime_reads_naming_evidence_from_its_tracks():
     assert entry["segmenter"] == {"picture": {"score": 0.8, "prompts": []}}
     with pytest.raises(ValueError, match="size"):
         runtime.candidates({"size": [0.4, -1]})
+    runtime.reflect({"tool": "ego_query", "arguments": {"category": "box"}, "message": "no box in the ego state"})
+    [entry] = [e for e in runtime.activity_since(0) if e["kind"] == "reflection"]
+    assert entry["text"].split("\n") == [
+        "ego_query：no box in the ego state", "归类：感知缺失：需要的物体不在 Ego State 里",
+        "候选（box）：e:3 picture 吻合 0.20（存疑：the robot has no shape knowledge of a picture: the name comes from appearance alone）"]
 
 
 def test_a_label_is_reported_with_what_perception_alone_calls_the_object():

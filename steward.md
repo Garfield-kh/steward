@@ -742,6 +742,7 @@ Bundle 的 `package.json` 声明：
 - **ER 证据**：`POST /ego/candidates {name?, size?, exclude?, limit?}` 列出可能就是所找物体的对象，每个附带命名证据：只来自感知的类别概率（不受标注影响）、分割网络的平均分数及对应的提示词、尺寸与所属类别形状先验的偏差、是否被 EH 标注过，以及据此得出的 `doubts`；给出 `name`、`size` 时按吻合度排序，否则只列名字存疑的对象。`POST /ego/reflect {tool, arguments, message}` 用 `steward.diagnosis` 的失败分类给出原因与常见对策，并列出这一步涉及的对象（参数里的 id 与报错文本里的 `e:N`）、已不在 ES 中的 id 和候选对象。阈值在 `RuntimeConfig.reflection`。
 - **EH 插件**（`@steward/dsh-ego-reflection`）：`agent/inbox/claimed` 记下操作员消息里 `instructionMarker` 之后的原始指令；`tools/post-execute` 在机器人工具出错、预测不可行、技能失败或 `ego_query` 查不到物体时，以及 `run_code` 程序本身失败而其中没有嵌套失败被反思过时，调用 `ctx.ego.reflect`，把【反思】消息作为 `additionalContexts` 附在结果上，source 为 `ego-reflection`，因此进入会话日志；`run_code` 程序里的嵌套失败随 `run_code` 结果一起送达。`skill_run` 的目标由插件记住的收据参数补全。同一指令下相同失败只反思一次，次数上限 `maxPerInstruction`。模型在没有工具报错、但结果与目标不符或没有进展时，调用 `reflect` 工具描述困难，得到同样的反思内容。
 - **反思内容**：先列事实（指令原文、失败、同一指令下之前的失败、ER 的失败归类与物体证据），再提出通用问题，让模型用自己的物理常识推理，而不是预置针对某个任务的技能：目标拆成可检验的条件；预期与实际的差异；设想人亲手做时会遇到的困难，列出至少三个可能原因，并逐项检查感知（认错、只看到一部分、被遮挡、只看到某一面）、物体状态（位置、朝向、哪一面朝上、叠压、数量、是否离开原处）、动作和任务理解；每个原因最便宜的证据；完成最终动作前世界应处的前提状态，以及是否应先创造这些条件；带预期与检验的下一步。从第二次反思起，先回顾之前的假设哪些被证实或否定、失败有无共同模式。
+- **调试**：阶段 `phase0-misnamed` 与 Phase 0 相同，但理想检测按 `config/misnames.toml` 把一些类别报成混淆的名字（默认盒子报成 `picture`、餐桌报成 `dinner table`；`--misnames-config` 换文件），用来在感知可靠时单独检验反思。ER 把每次反思（失败、归类、涉及与候选物体）记为 `reflection` 活动；控制台把它们和机器人的计划活动、以及 Ego Harness 输出的文字（对反思的逐条回答，标为"思考"）按到达顺序显示在同一个可拉高的滚动框里。
 - **模型工具** `ego_candidates`：模型自己按指令里的名字和大小查找候选，核实后用 `ego_annotate` 改正名字与可供性。
 
 ### 6.7 会话日志与"模型可见即已记录"

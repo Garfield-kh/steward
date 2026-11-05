@@ -1,0 +1,6 @@
+# Names the ideal detections report instead of an object's true category at the phase level
+# "phase0-misnamed", to exercise the Ego Harness reflection on perception that names objects
+# differently from the operator. Keys are World State categories; values are the reported names.
+[misnames]
+box = "picture"
+table = "dinner table"

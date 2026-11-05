@@ -831,7 +831,8 @@ class EgoRuntime:
         candidates for the object the instruction meant (see :func:`steward.ego.reflection.reflect`).
 
         :param failure: ``{tool?, arguments?, message, name?, size?}``.
-        :returns: ``{cause, sought, targets, missing, candidates}``.
+        :returns: ``{cause, sought, targets, missing, candidates}``; a ``reflection`` activity entry
+            records it for the console.
         :raises ValueError: malformed fields."""
         if failure.get("arguments") is not None and not isinstance(failure["arguments"], dict):
             raise ValueError("arguments must be an object")
@@ -839,7 +840,9 @@ class EgoRuntime:
         if size is not None and (not isinstance(size, list) or not all(isinstance(v, (int, float)) and v > 0 for v in size)):
             raise ValueError("size must list positive dimensions in metres")
         objects, evidence, words = self._naming()
-        return reflection.reflect(objects, evidence, words, self.config.reflection, failure)
+        result = reflection.reflect(objects, evidence, words, self.config.reflection, failure)
+        self._log("reflection", reflection.activity_text(failure, result))
+        return result
 
     def capture_cameras(self) -> dict:
         """Capture the existing robot RGB views without moving or changing the perception loop.
@@ -1139,7 +1142,7 @@ class EgoRuntime:
     # ---------------------------------------------------------------- activity
     def _log(self, kind: str, text: str) -> None:
         """Append to the activity record the console shows below the Ego-State view: ``step``,
-        ``difficulty``, ``state``, ``skill`` and ``alert`` entries, newest last."""
+        ``difficulty``, ``state``, ``skill``, ``alert`` and ``reflection`` entries, newest last."""
         with self._lock:
             self.activity.append({"id": next(self._activity_ids), "t": round(self.estimator.stamp, 1),
                                   "kind": kind, "text": text[:ALERT_TEXT_MAX]})

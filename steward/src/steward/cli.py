@@ -26,11 +26,12 @@ import time
 from pathlib import Path
 
 from steward.embodiments import EMBODIMENTS
-from steward.phases import LATEST_PHASE, PHASES
+from steward.phases import LATEST_PHASE, PHASES, load_misnames
 
 STEWARD_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_ROOT = STEWARD_DIR / "var" / "steward"
 SEGMENTATION_CONFIG = STEWARD_DIR / "config" / "segmentation.toml"
+MISNAMES_CONFIG = STEWARD_DIR / "config" / "misnames.toml"
 
 # The Cobot Magic twin keeps its own ports: the kitchen scenario owns 7400/7410, and two worlds
 # that fight over one port is the most confusing failure there is -- the console comes up, but it
@@ -90,7 +91,8 @@ def _host(args, run_dir: Path, start: bool = True):
                        wca_port=args.wca_port, robot_ports=ports, chat=_chat_config(args),
                        phase=args.phase, fallback_phase=LATEST_PHASE, bind_wait_s=getattr(args, "bind_wait", 0.0),
                        pause_on_perception_fault=getattr(args, "pause_on_perception_fault", False),
-                       freeze_idle=args.freeze_idle)
+                       freeze_idle=args.freeze_idle,
+                       misnames=load_misnames(args.misnames_config) if getattr(args, "misnames_config", "") else None)
     return host.start() if start else host
 
 
@@ -855,6 +857,8 @@ def main(argv: list[str] | None = None) -> int:
                             f"from the console); default: the scenario's declared level, else {LATEST_PHASE}")
         p.add_argument("--wca-port", type=int, default=COBOT_WCA_PORT if name == "cobot" else (0 if in_process else 7400))
         p.add_argument("--robot-port", type=int, default=COBOT_ROBOT_PORT if name == "cobot" else (0 if in_process else 7410))
+        p.add_argument("--misnames-config", default=str(MISNAMES_CONFIG),
+                       help="names the ideal detections report instead of true categories at the phase0-misnamed level; '' disables it")
         if not in_process:
             p.add_argument("--bind-wait", type=float, default=10.0,
                            help="seconds to wait for a fixed port still held by a service that just stopped")

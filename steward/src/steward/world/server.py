@@ -61,10 +61,12 @@ class StewardHost:
                  run_dir: Path | None = None, wca_port: int = 0, robot_ports: dict[str, int] | None = None,
                  chat: ChatConfig | None = None, phase: str | None = None, fallback_phase: str = DEFAULT_PHASE,
                  bind_wait_s: float = 0.0, pause_on_perception_fault: bool = False, freeze_idle: bool = False,
-                 appearance: str = "flat"):
+                 appearance: str = "flat", misnames: dict[str, str] | None = None):
         # ``phase`` pins the level for every episode; None: each scenario's declared level, or
         # ``fallback_phase`` for a scenario that declares none.
         phase_modules(phase or fallback_phase)
+        # Names the ideal detections report instead of the true categories at a ``misnamed`` level.
+        self.misnames = dict(misnames or {})
         self._pinned_phase = phase
         self._fallback_phase = fallback_phase
         self.phase = phase or fallback_phase
@@ -117,7 +119,8 @@ class StewardHost:
         self.sim = WorldSim(scenario["sceneState"], speed=self.speed, seed=self.seed, freeze_idle=self.freeze_idle,
                             appearance=self.appearance,
                             perception=PerceptionConfig(mode=phase_modules(self.phase)["perception"],
-                                                        masks=phase_modules(self.phase).get("masks", True)))
+                                                        masks=phase_modules(self.phase).get("masks", True),
+                                                        misnames=self._misnames_at(self.phase)))
         self.scenario = scenario
         self.embodiments = scenario_embodiments(scenario)
         self.observer.reset()
@@ -152,8 +155,14 @@ class StewardHost:
         if self.sim is not None:
             self.sim.perception.mode = modules["perception"]
             self.sim.perception.masks = modules.get("masks", True)
+            self.sim.perception.misnames = self._misnames_at(level)
             self.sim.events.append({"t": self.sim.time, "type": "phase/switch", "level": level})
         return self.phase_state()
+
+    def _misnames_at(self, level: str) -> dict[str, str]:
+        if phase_modules(level).get("misnamed") and not self.misnames:
+            raise ValueError(f"phase level {level!r} misnames objects, but this host has no misnames configured")
+        return dict(self.misnames) if phase_modules(level).get("misnamed") else {}
 
     def phase_state(self) -> dict:
         return {"level": self.phase, "levels": phase_catalog()}

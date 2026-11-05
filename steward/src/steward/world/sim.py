@@ -85,6 +85,9 @@ class PerceptionConfig:
     confusion: dict[str, list[str]] = field(default_factory=lambda: {"cup": ["bowl"], "bowl": ["cup"]})
     confusion_prob: float = 0.03
     transparent_detect_prob: float = 0.6
+    # With "ideal": categories always reported under another name (category → reported name),
+    # in place of the random confusion.
+    misnames: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -1202,8 +1205,8 @@ class WorldSim:
             color, alpha = self._appearance(ent, links)
             if alpha < 0.5 and rng.random() > p.transparent_detect_prob:
                 continue
-            label = category
-            if category in p.confusion and rng.random() < p.confusion_prob:
+            label = p.misnames.get(category, category)
+            if category not in p.misnames and category in p.confusion and rng.random() < p.confusion_prob:
                 label = str(rng.choice(p.confusion[category]))
             seen.add(part)
             dets.append({"category": label, "confidence": round(float(0.9 - 0.05 * rng_m / p.max_range), 3),

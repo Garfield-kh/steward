@@ -144,3 +144,18 @@ def test_with_freeze_idle_the_world_steps_only_while_a_caller_waits_for_time_to_
         assert sim.time == t, "then it stands still again"
     finally:
         sim.stop()
+
+
+def test_console_box_says_whether_an_object_lies_upright():
+    """A face-down object's yaw reads as the mirrored heading, so the console GT summary also says
+    whether the entity's +z axis still points up - same threshold as the relative-poses goal."""
+    from types import SimpleNamespace
+
+    from steward.math3d import quat_mul
+    from steward.world.console import _box
+
+    c, s = math.cos(math.pi / 4), math.sin(math.pi / 4)
+    up = SimpleNamespace(center=[0.1, 0.2, 0.77], size=[0.115, 0.115, 0.006], quat=[c, 0.0, 0.0, s])
+    down = SimpleNamespace(center=[0.1, 0.2, 0.77], size=[0.115, 0.115, 0.006], quat=quat_mul([0.0, 1.0, 0.0, 0.0], [c, 0.0, 0.0, s]))
+    assert _box("w:x", "puzzle_piece", "object", up)["upright"] is True
+    assert _box("w:y", "puzzle_piece", "object", down)["upright"] is False

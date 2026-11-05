@@ -76,6 +76,44 @@ def test_support_surfaces_are_cropped_enlarged_and_their_small_objects_mapped_ba
     assert 68 <= ys.min() and ys.max() <= 100, "the bowl lands on the table's upper edge in the full frame"
 
 
+def test_a_cup_of_a_few_dozen_pixels_found_in_a_crop_is_kept():
+    """Mapped back from the enlarged crop, a distant cup is about twenty pixels. The full-image
+    floor of 25 pixels drops it; the crop floor keeps it. A speck of a few pixels is still dropped."""
+    shape = (40, 50)
+    cup = _box(shape, 10, 15, 10, 14)  # 5 * 4 = 20 pixels
+    speck = _box(shape, 0, 2, 0, 3)  # 6 pixels
+    cfg = SegmenterConfig(vocabulary={"cup": "cup"}, min_pixels=25, crop_min_pixels=8)
+    segmenter = Segmenter(cfg, FakeClient(lambda image, prompts: []))
+    kept, labels = segmenter._instances([("cup", 0.8, cup, True)], shape)
+    assert any("cup" in v for v in labels.values()) and int((kept > 0).sum()) == 20
+    _, dropped = segmenter._instances([("cup", 0.8, cup, False)], shape)
+    assert dropped == {}, "the same mask from the full image stays under min_pixels"
+    _, noise = segmenter._instances([("cup", 0.8, speck, True)], shape)
+    assert noise == {}
+
+
+def test_a_crop_that_names_the_cabinet_body_box_or_paints_the_whole_window_is_dropped():
+    shape = (120, 160)
+    cabinet = _box(shape, 40, 110, 30, 90)
+
+    def reply(image, prompts):
+        if image.shape[:2] == shape:
+            return [("cabinet", 0.9, cabinet)]
+        h, w = image.shape[:2]
+        upper = _box((h, w), int(h * 0.45), int(h * 0.95), int(w * 0.05), int(w * 0.95))
+        bowl = _box((h, w), int(h * 0.15), int(h * 0.35), int(w * 0.4), int(w * 0.55))
+        filled = np.ones((h, w), dtype=bool)
+        return [("box", 0.8, upper), ("bowl", 0.7, bowl), ("plate", 0.6, filled)]
+
+    cfg = SegmenterConfig(vocabulary={**VOCAB, "cabinet": "cabinet", "box": "box"},
+                          crop_prompts=("box", "bowl", "plate"), crop_categories=("cabinet",),
+                          crop_target_px=480, crop_max_scale=4.0)
+    seg = Segmenter(cfg, FakeClient(reply)).segment(np.zeros((*shape, 3), np.uint8))
+    names = [sorted(v) for v in seg.labels.values()]
+    assert ["bowl"] in names and ["cabinet"] in names
+    assert not any("box" in v or "plate" in v for v in names)
+
+
 def test_results_are_cached_by_image_and_settings(tmp_path):
     shape = (20, 20)
     client = FakeClient(lambda image, prompts: [("table", 0.9, _box(shape, 0, 20, 0, 20))])

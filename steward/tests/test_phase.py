@@ -9,15 +9,20 @@ import time
 import numpy as np
 import pytest
 
+import mujoco
+
 from steward.assets.generators import steward_bot
+from steward.authoring.service import AuthoringService
 from steward.ego.classify import classify
-from steward.ego.perception import box_of
+from steward.ego.estimator import EgoEstimator
+from steward.ego.perception import box_of, decode_rgbd
 from steward.ego.runtime import EgoRuntime, RobotLink
 from steward.ego.server import ego_api
 from steward.net import call
 from steward.phases import PHASES, phase_modules
 from steward.world.console import console_state
 from steward.world.server import StewardHost
+from steward.world.sim import PerceptionConfig, WorldSim
 
 
 def _pump_until(host: StewardHost, done, timeout: float = 120.0) -> None:
@@ -389,3 +394,207 @@ def test_a_well_known_table_that_looks_hollow_from_afar_is_kept_while_an_unknown
     est.tracks = {"e:29": table, "e:30": unknown}
     est._drop_impossible(cam)
     assert list(est.tracks) == ["e:29"]
+
+
+def test_phase1_keeps_the_far_edge_of_a_counter(kitchen_root):
+    """The far edge of a counter top is a few percent of its pixels. A random sample of the cloud
+    publishes about half the depth; the box of every valid pixel keeps it."""
+    scene = AuthoringService(kitchen_root).load_scenario("phase0-chores")["sceneState"]
+    sim = WorldSim(scene, seed=1, perception=PerceptionConfig(mode="rgbd", masks=True))
+    names = sim.build.names["w:robot-1"]
+    for jname, val in zip(names.root_joints, (0.6, -2.2, 1.57), strict=True):
+        jid = mujoco.mj_name2id(sim.model, mujoco.mjtObj.mjOBJ_JOINT, jname)
+        sim.data.qpos[sim.model.jnt_qposadr[jid]] = val
+    sim.command("w:robot-1", {"base": [0.6, -2.2, 1.57]})
+    mujoco.mj_forward(sim.model, sim.data)
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    est.update_rgbd(decode_rgbd(sim.rgbd("w:robot-1")))
+    gt = sim.entity_obb("w:counter-1")
+    counter = min((t for t in est.tracks.values() if t.category == "counter"),
+                  key=lambda t: float(np.linalg.norm(t.pos - gt.center)))
+    assert float(np.linalg.norm(counter.pos - gt.center)) < 0.12
+    assert float(np.mean(np.abs(np.sort(counter.size) - np.sort(gt.size)))) < 0.05
+
+
+def _paint(depth, mask, cam, fovy, points, instance: int) -> None:
+    """Write ``points`` (map frame) into a depth image through ``cam``."""
+    from steward.math3d import pose_compose, pose_inverse
+
+    h, w = depth.shape
+    f = (h / 2.0) / math.tan(math.radians(fovy) / 2.0)
+    inv = pose_inverse(cam)
+    for p in points:
+        x, y, z = pose_compose(inv, {"p": p.tolist(), "q": [1.0, 0.0, 0.0, 0.0]})["p"]
+        if x < 0.3:
+            continue
+        u = int(round((w - 1) / 2 - y * f / x))
+        v = int(round((h - 1) / 2 - z * f / x))
+        if 0 <= u < w and 0 <= v < h:
+            depth[v, u] = x
+            mask[v, u] = instance
+
+
+def test_two_raised_objects_in_one_segmenter_mask_become_two_tracks():
+    """A bowl and a mug painted as one region are one wide track. With segmenter labels the gap
+    splits them, and each keeps its own size."""
+    from steward.ego.perception import segments
+    from steward.math3d import matrix_from_quat
+
+    header = {"stamp": 1.0, "odometry": {"x": 0.0, "y": 0.0, "yaw": 0.0},
+              "joints": {"lift": 0.4, "reach": 0.0, "wrist_yaw": 0.0, "wrist_roll": 0.0},
+              "gripper": {"state": "open", "holding": False}}
+    cam = EgoEstimator(robot_model=steward_bot().to_dict()).camera_pose(header["odometry"])
+    rot = matrix_from_quat(cam["q"])
+    origin = np.asarray(cam["p"], float)
+    h, w, fovy = 90, 120, 60.0
+    depth = np.zeros((h, w), np.float32)
+    mask = np.zeros((h, w), np.uint8)
+    rng = np.random.default_rng(0)
+
+    def blob(local_centre, size, n=90):
+        centre = origin + rot @ np.asarray(local_centre, float)
+        return rng.uniform(centre - np.asarray(size) / 2, centre + np.asarray(size) / 2, (n, 3))
+
+    _paint(depth, mask, cam, fovy, blob([1.15, 0.16, -0.05], [0.14, 0.14, 0.05]), 1)
+    _paint(depth, mask, cam, fovy, blob([1.15, -0.16, -0.02], [0.09, 0.08, 0.09]), 1)
+    bare = {"depth": depth, "mask": mask, "rgb": np.full((h, w, 3), 160, np.uint8), "fovy": fovy,
+            "header": header, "camera": "head_camera"}
+    assert len(segments(bare, cam)) == 1, "an anonymous mask stays one region"
+    named = dict(bare)
+    named["labels"] = {1: {"bowl": 0.5}}
+    assert len(segments(named, cam)) == 2
+    before, after = EgoEstimator(robot_model=steward_bot().to_dict()), EgoEstimator(robot_model=steward_bot().to_dict())
+    before.update_rgbd(bare)
+    after.update_rgbd(named)
+    assert len(before.tracks) == 1 and max(t.footprint for t in before.tracks.values()) > 0.25
+    small = [t for t in after.tracks.values() if t.footprint < 0.25]
+    assert len(after.tracks) == 2 and len(small) == 2
+    assert not any(t.category == "drawer" for t in after.tracks.values())
+
+
+def test_a_mask_mixing_near_and_far_surfaces_does_not_start_a_wide_track():
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    header = {"stamp": 1.0, "odometry": {"x": 0.0, "y": 0.0, "yaw": 0.0},
+              "joints": {"lift": 0.4, "reach": 0.0, "wrist_yaw": 0.0, "wrist_roll": 0.0},
+              "gripper": {"state": "open", "holding": False}}
+    cam = est.camera_pose(header["odometry"])
+    h, w, fovy = 80, 100, 60.0
+    depth = np.zeros((h, w), np.float32)
+    mask = np.zeros((h, w), np.uint8)
+    rng = np.random.default_rng(1)
+    for x0 in (1.3, 2.8):
+        pts = np.column_stack([np.full(500, x0), rng.uniform(-0.8, 0.8, 500), rng.uniform(0.2, 1.2, 500)])
+        _paint(depth, mask, cam, fovy, pts, 1)
+    frame = {"depth": depth, "mask": mask, "rgb": np.full((h, w, 3), 120, np.uint8), "fovy": fovy,
+             "header": header, "labels": {1: {"box": 0.6}}}
+    est.update_rgbd(frame)
+    assert not any(t.footprint > 1.0 for t in est.tracks.values())
+
+
+def test_a_box_standing_on_a_counter_stays_its_own_track():
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    counter = _remembered("e:1", "counter", [0.0, 0.0, 0.45], [1.8, 0.62, 0.9])
+    box = _remembered("e:2", "box", [0.2, 0.0, 0.98], [0.4, 0.35, 0.16])
+    est.tracks = {"e:1": counter, "e:2": box}
+    est._fold_furniture_slices(np.array([0.0, -1.5, 1.4]))
+    assert set(est.tracks) == {"e:1", "e:2"}
+
+
+def test_an_upper_half_named_box_is_folded_back_into_the_cabinet():
+    """The upper body named box is a second object. Folding it back removes that object and
+    restores the cabinet's height."""
+    from steward.math3d import matrix_from_quat
+
+    header = {"stamp": 1.0, "odometry": {"x": 0.0, "y": 0.0, "yaw": 0.0},
+              "joints": {"lift": 0.4, "reach": 0.0, "wrist_yaw": 0.0, "wrist_roll": 0.0},
+              "gripper": {"state": "open", "holding": False}}
+    cam = EgoEstimator(robot_model=steward_bot().to_dict()).camera_pose(header["odometry"])
+    forward = matrix_from_quat(cam["q"])[:, 0].copy()
+    forward[2] = 0.0
+    forward /= np.linalg.norm(forward)
+    centre = np.asarray(cam["p"], float) + forward * 1.4
+    centre[2] = 0.4
+    h, w, fovy = 120, 160, 60.0
+    depth = np.zeros((h, w), np.float32)
+    mask = np.zeros((h, w), np.uint8)
+    rgb = np.zeros((h, w, 3), np.uint8)
+    rng = np.random.default_rng(2)
+
+    def slab(z0, z1, instance, color):
+        pts = np.column_stack([
+            rng.uniform(centre[0] - 0.28, centre[0] + 0.28, 400),
+            rng.uniform(centre[1] - 0.22, centre[1] + 0.22, 400),
+            rng.uniform(z0, z1, 400),
+        ])
+        _paint(depth, mask, cam, fovy, pts, instance)
+        ys, xs = np.nonzero(mask == instance)
+        rgb[ys, xs] = color
+
+    slab(0.02, 0.72, 1, (90, 110, 150))  # the body, blue-grey
+    slab(0.74, 0.76, 2, (90, 110, 150))  # the top face, a couple of centimetres above, named box
+    frame = {"depth": depth, "mask": mask, "rgb": rgb, "fovy": fovy, "header": header,
+             "labels": {1: {"cabinet": 0.9}, 2: {"box": 0.8}}}
+
+    def run(fold: bool) -> EgoEstimator:
+        est = EgoEstimator(robot_model=steward_bot().to_dict())
+        if not fold:
+            est._fold_furniture_slices = lambda _cam_p: None
+        est.update_rgbd(frame)
+        return est
+
+    before, after = run(False), run(True)
+    assert any(t.category == "box" for t in before.tracks.values())
+    assert not any(t.category == "box" for t in after.tracks.values())
+    cab = next(t for t in after.tracks.values() if t.category == "cabinet")
+    assert cab.top() == pytest.approx(0.76, abs=0.06)
+    assert "box" not in cab.category_counts
+
+
+def test_a_printed_lid_with_a_visible_wall_gains_the_box_under_it():
+    """The segmenter names the printed lid and not the 5 cm box under it. Depth of that wall,
+    inside the lid's outline, becomes its own box. A lid with nothing under it does not."""
+    from steward.ego.perception import segments
+    from steward.math3d import matrix_from_quat
+
+    header = {"stamp": 1.0, "odometry": {"x": 0.0, "y": 0.0, "yaw": 0.0},
+              "joints": {"lift": 0.4, "reach": 0.0, "wrist_yaw": 0.0, "wrist_roll": 0.0},
+              "gripper": {"state": "open", "holding": False}}
+    cam = EgoEstimator(robot_model=steward_bot().to_dict()).camera_pose(header["odometry"])
+    rot = matrix_from_quat(cam["q"])
+    origin = np.asarray(cam["p"], float)
+    h, w, fovy = 120, 160, 60.0
+    rng = np.random.default_rng(1)
+    lid_centre = origin + rot @ np.array([1.15, 0.0, 0.0])
+    lid = rng.uniform(lid_centre - np.array([0.17, 0.17, 0.004]), lid_centre + np.array([0.17, 0.17, 0.004]), (120, 3))
+    forward = rot @ np.array([1.0, 0.0, 0.0])
+    forward[2] = 0.0
+    forward /= np.linalg.norm(forward)
+    wall = lid.copy()
+    wall[:, :2] -= forward[:2] * 0.08
+    wall[:, 2] = lid[:, 2] - rng.uniform(0.02, 0.06, len(wall))
+
+    def frame_of(points_lid, points_wall):
+        depth = np.zeros((h, w), np.float32)
+        mask = np.zeros((h, w), np.uint8)
+        _paint(depth, mask, cam, fovy, points_lid, 1)
+        if points_wall is not None:
+            lid_mask = mask.copy()
+            depth_lid = depth.copy()
+            _paint(depth, mask, cam, fovy, points_wall, 1)
+            wall_depth = depth.copy()
+            wall_only = (mask == 1) & (lid_mask == 0)
+            depth[:] = depth_lid
+            depth[wall_only] = wall_depth[wall_only]
+            mask[:] = lid_mask
+        return {"depth": depth, "mask": mask, "rgb": np.full((h, w, 3), 180, np.uint8), "fovy": fovy,
+                "header": header, "labels": {1: {"picture": 0.8}}}
+
+    seen = segments(frame_of(lid, wall), cam)
+    assert any(s.semantics and "box" in s.semantics for s in seen)
+    assert not any(s.semantics and "box" in (s.semantics or {}) for s in segments(frame_of(lid, None), cam))
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    est.update_rgbd(frame_of(lid, wall))
+    boxes = [t for t in est.tracks.values() if t.category == "box"]
+    assert len(boxes) == 1
+    assert boxes[0].size[2] == pytest.approx(0.05, abs=0.03)
+    assert min(boxes[0].size[0], boxes[0].size[1]) > 0.2

@@ -112,6 +112,26 @@ def test_the_widest_camera_is_in_charge_of_near_regions_unless_one_is_named():
         _offline(RuntimeConfig(cameras=("head_camera",), near_camera="wide_camera"))
 
 
+def test_a_look_around_samples_a_heading_where_a_long_table_is_fully_in_frame():
+    """The head camera's horizontal view is about 1.3 rad. A long table up close is fully inside
+    it for only ~0.22 rad of heading. A look-around at the navigation rate turns 0.36 rad between
+    frames and can land only on the truncated views, which do not start a track. While perception
+    keeps keyframes the look-around steps 0.1 rad, and a stop also becomes a keyframe."""
+    cfg = RuntimeConfig()
+    old_step = 3.6 / cfg.perception_hz
+    new_step = max(cfg.motion.look_angular_speed / cfg.perception_hz, cfg.keyframe_turn_rad)
+    window = 0.22
+    assert old_step > window and new_step <= window
+    runtime = _offline()
+    runtime._keyframe = {"head_camera": _header()}
+    assert not runtime._keyframe_due(_header(stamp=1.2, yaw=0.05), "head_camera"), "0.05 rad is still one view"
+    assert runtime._keyframe_due(_header(stamp=1.3, yaw=0.12), "head_camera")
+    runtime._keyframe = {"head_camera": _header()}
+    runtime._pose_sample = None
+    assert not runtime._keyframe_due(_header(stamp=1.1, yaw=0.05), "head_camera")
+    assert runtime._keyframe_due(_header(stamp=1.6, yaw=0.05), "head_camera"), "stopped on a new heading"
+
+
 def test_arm_motion_with_the_base_still_makes_a_keyframe_of_the_near_camera_only():
     runtime = _offline()
     runtime._keyframe = {c: _header() for c in ("head_camera", "wide_camera")}

@@ -1610,6 +1610,9 @@ flowchart LR
 | NovelAnything 1.3 | `novelanything` | [服务](https://linxlab-research.com/novelanything)，[文档](https://linxlab-research.com/novelanything/docs) | 由带位姿的输入视角预测目标视角的 RGB 与深度；可选对预测图像做 SAM 3.1 分割；渲染分辨率 518×336 | 根目录含 `scene.json` 的 ZIP；每个输入帧需 RGB、`w2c` 与 `fxfycxcy`，深度可选；目标帧只需 `w2c` | `POST /api/uploads`、`POST /api/jobs`、`GET /api/jobs/{id}` 与产物 |
 | NVS rgbd_videogen 1.0 | `nvs` | [服务](http://linxlab-research.com/nvs)，[能力说明](http://linxlab-research.com/nvs/v1/capabilities)，界面在 `/nvs/ui` | RGB-D 新视角视频生成：默认 6 个源视角，最多 24 个目标视角；输出 RGB 与深度视频、深度 `npz`、逐帧 ZIP | `rgbd_videogen_scene_v1`，分辨率 378×672，2–64 帧 | `POST /v1/nvs/jobs/upload`、`GET /v1/nvs/jobs/{id}/result` |
 | SLARM 0.4 | `slarm` | [服务](http://linxlab-research.com/slarm)，[OpenAPI](http://linxlab-research.com/slarm/openapi.json) | 多帧场景重建：深度、场景流、语义、点云、3D 高斯；可用重建结果渲染新视角 | Waymo 单场景 ZIP 或通用三相机场景，分辨率 160×240，16–300 帧；同时只能运行 1 个重建任务 | `POST /v1/datasets`、`POST /v1/reconstructions`、`POST /v1/views` |
+| SAM 3D Objects | `sam3d` | [服务](https://linxlab-research.com/sam3d)，文档在 `/sam3d/docs`，OpenAPI 在 `/sam3d/openapi.json` | 由一张 RGB、可选掩码和度量点云生成物体形状（体素或高斯）。看不见的部分是生成结果，须用观测深度校验后才能当形状先验 | 异步任务：RGB，可选掩码（非零为前景），可选点云 `npy`（H×W×3，+X 左、+Y 上、+Z 前；掩码外必须是 NaN，不能是 0） | `POST /api/jobs`；`GET /api/jobs/{id}`；`GET /api/jobs/{id}/artifacts/{path}` |
+
+Phase 1 不调用 `sam3d`。度量深度已经给出可见部分的尺寸；在本厨房上，生成形状没有比可见盒子更接近真值，可见表面贴合时盒子也会偏小，ESim 只对盒子的地面投影做碰撞。清单只提供地址，供需要离线试这个接口的人调用。`steward services` 报告它是否在线。
 
 **初步结论（2026-11）。** 直接把这几个服务接到 Phase 1 的感知链路上，ES 效果没有改善。Phase 1 的瓶颈是语义分割：能力 A 和 C（13.7.1）没有到位，后面的重建与深度估计都无从发挥。目前正在把分割模型与上述重建、深度模型融合。另有两个影响结论的因素：
 
@@ -1662,13 +1665,12 @@ flowchart LR
 
 同一设置重复运行的差异不小：关键帧的时刻随墙钟略有不同，每次分割的图像都不一样，缓存只在逐帧重放时命中；厨房场景双相机另一次运行中操作台没有检出，召回率为 0.57。广角相机在厨房场景补上了操作台，但它近看家具时更常把柜体上半截检成「box」：厨房的两个误检之一就是操作台上半截，chores 的类别错误主要是柜子抽屉与餐边柜被判为 box 或重复成两条轨迹。
 
+柜体上半截、并排的小物体、混进背景的裁剪，三处按下面处理。柜子、餐边柜、操作台或抽屉的上半截被叫成 box，并且大部分像素落在这件家具上、面积达到它的四分之一时，裁剪结果丢掉；已经进了估计器的，中心在家具足迹内、顶面不高出这件家具，就并回这件家具，不把 box 的票数加进去。顶面高出家具的盒子仍单独保留。足迹超过 0.9 米的 box 删除。机器人自己分割的一帧里，抬离地面、两团紧凑的点之间空出 5 厘米以上，就拆成两段各自分类；世界给出的匿名掩码不拆。裁剪掩码盖住裁剪框六成以上的丢弃。反投影后水平方向又宽又厚、相机距离前后相差超过 0.9 米、而且不是墙的区域不建轨迹。
+
 已知问题：
 
 - 机器人三米外看操作台上的杯子，放大 4 倍后仍只有二十几个像素，检不出；要先走近。
-- 柜子与餐边柜的上半截常另被检为「box」，成为与家具重叠的重复轨迹。
-- 并排的绿碗与咖啡杯有时被合成一个区域，形状先验把它判为抽屉。
 - 拼图盒只分出印着图案的盒盖（`picture`），盒盖下 5 厘米高的盒身没有单独的区域。
-- 放大裁剪中的个别掩码混入背景，反投影后出现两米宽的幽灵物体。
 - 关键帧之间的物体没有区域证据：环顾转得快（约 120°/秒），关键帧间隔取转角而不设最短时间间隔，否则只在画面边缘露过一次的家具（被截断的区域不建轨迹）会被漏掉。
 
 ### 13.8 机器人本体的双相机

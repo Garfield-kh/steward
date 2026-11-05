@@ -37,6 +37,12 @@ class SkillFailed(Exception):
 class MotionConfig:
     linear_speed: float = 1.4
     angular_speed: float = 3.6
+    look_angular_speed: float = 1.0
+    """Turn rate of a look-around while perception keeps keyframes. At the perception rate this
+    is one keyframe step, so a long table that is fully inside the head camera for only ~0.2 rad
+    is sampled. The faster ``angular_speed`` steps ~0.36 rad and can land only on the truncated
+    views, which do not start a track. A look-around that fuses every frame keeps
+    ``angular_speed``."""
     gentle_speed: float = 0.3
     """Base speed while carrying a container with its contents (plans marked ``gentle``)."""
     gentle_turn_speed: float = 0.5
@@ -128,6 +134,8 @@ class SkillExecutor:
         self.config = config or MotionConfig()
         self._ids = itertools.count(1)
         self._gentle = False  # the running plan moves a container with its contents
+        self._look = False  # the running skill is a look-around
+        self._keyframed = False  # that look-around turns at look_angular_speed only while perception keeps keyframes
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self.jobs: dict[str, Job] = {}
@@ -178,7 +186,11 @@ class SkillExecutor:
             plan = receipt.get("plan", {})
             self._gentle = bool(plan.get("gentle"))
             if skill == "look_around":
-                self._look_around(job)
+                self._look = True
+                try:
+                    self._look_around(job)
+                finally:
+                    self._look = False
             elif skill == "navigate":
                 self._drive(job, plan["path"], plan["yaw"])
             elif skill == "pick":
@@ -238,7 +250,13 @@ class SkillExecutor:
         o = st["odometry"]
         x, y, yaw0 = o["x"], o["y"], o["yaw"]
         delta = wrap_angle(yaw_target - yaw0)
-        duration = abs(delta) / (self.config.gentle_turn_speed if self._gentle else self.config.angular_speed)
+        if self._look and self._keyframed:
+            speed = self.config.look_angular_speed
+        elif self._gentle:
+            speed = self.config.gentle_turn_speed
+        else:
+            speed = self.config.angular_speed
+        duration = abs(delta) / speed
         t0 = st["stamp"]
         deadline = t0 + duration * 3 + 5.0
         stall = _Stall(t0, self.config.stall_s, 0.02)

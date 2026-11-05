@@ -19,7 +19,7 @@ def _write(tmp_path, fields: dict[str, str], endpoint: str = '"GET /p"'):
 
 def test_shipped_file_lists_every_catalogued_service():
     services = ps.load()
-    assert set(services) == {"sam3", "novelanything", "nvs", "slarm"}
+    assert set(services) == {"sam3", "novelanything", "nvs", "slarm", "sam3d"}
     for svc in services.values():
         assert len(svc.urls) >= 2, f"{svc.name} needs a fallback URL"
     method, url = services["sam3"].url(services["sam3"].urls[0], "propagate", sid="s1")

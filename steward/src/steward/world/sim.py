@@ -140,7 +140,7 @@ class _RobotState:
 class WorldSim:
     def __init__(self, scene: dict, *, timestep: float = 0.002, speed: float = 1.0, seed: int = 0,
                  perception: PerceptionConfig | None = None, grasp: GraspConfig | None = None,
-                 overview_camera: dict | None = None, freeze_idle: bool = False):
+                 overview_camera: dict | None = None, freeze_idle: bool = False, appearance: str = "flat"):
         self._initial_scene = copy.deepcopy(scene)
         self.timestep = timestep
         self.speed = speed
@@ -155,6 +155,7 @@ class WorldSim:
         self.grasp = grasp or GraspConfig()
         self._seed = seed
         self._overview = overview_camera
+        self.appearance = appearance
         self.lock = threading.RLock()
         self._clock = threading.Condition(self.lock)
         self._thread: threading.Thread | None = None
@@ -168,7 +169,8 @@ class WorldSim:
     def _load(self, scene_dict: dict) -> None:
         self.template = SceneState.from_dict(scene_dict)
         cameras = [self._overview or self._default_overview()]
-        self.build: MjcfBuild = build_mjcf(self.template, timestep=self.timestep, extra_cameras=cameras)
+        self.build: MjcfBuild = build_mjcf(self.template, timestep=self.timestep, extra_cameras=cameras,
+                                           appearance=self.appearance)
         self.model = self.build.compile()
         self.data = mujoco.MjData(self.model)
         self.build.apply_initial(self.model, self.data)
@@ -904,6 +906,7 @@ class WorldSim:
                 self._renderers[key] = mujoco.Renderer(self.model, height, width)
             renderer = self._renderers[key]
             renderer.update_scene(self.data, camera=self.robot_camera_name(robot_id, sensor["id"]))
+            self._shade(renderer)
             rgb = renderer.render().copy()
             renderer.enable_depth_rendering()
             depth = renderer.render().copy()
@@ -1111,12 +1114,19 @@ class WorldSim:
                     for gid in hidden:
                         self.model.geom_group[gid] = HIDDEN_GROUP
                     renderer.update_scene(self.data, camera=free_camera(camera))
+                    self._shade(renderer)
                 finally:
                     for gid, group in saved.items():
                         self.model.geom_group[gid] = group
             else:
                 renderer.update_scene(self.data, camera=camera)
+                self._shade(renderer)
         return encode_image(renderer.render(), fmt)
+
+    def _shade(self, renderer: mujoco.Renderer) -> None:
+        """Cast the key light when this world was built in the textured appearance."""
+        if self.build.shadows:
+            renderer.scene.flags[int(mujoco.mjtRndFlag.mjRND_SHADOW)] = True
 
     def cutaway_walls(self, spec: dict) -> list[int]:
         """Geoms of environment walls on the camera side of the room, hidden in free-camera views

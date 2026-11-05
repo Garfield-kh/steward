@@ -1071,7 +1071,8 @@ class EgoEstimator:
         shift = np.zeros(3)
         completion = 0.0
         total = sum(track.category_counts.values())
-        if proto is not None and track.category_counts[track.category] / total > 0.6:
+        # A label (ego_annotate) may name a category perception never accumulated evidence for.
+        if proto is not None and track.category_counts.get(track.category, 0.0) / total > 0.6:
             long_side, short_side, height = proto
             axes = [(0, long_side, np.array([math.cos(yaw), math.sin(yaw), 0.0])),
                     (1, short_side, np.array([-math.sin(yaw), math.cos(yaw), 0.0]))]
@@ -1786,7 +1787,7 @@ def _identified(track: Track) -> bool:
     total = sum(track.category_counts.values())
     category = track.category
     return track.observations >= ESTABLISHED_VIEWS and category != "unknown" and total > 0 \
-        and track.category_counts[category] / total >= IDENTIFIED_SHARE
+        and track.category_counts.get(category, 0.0) / total >= IDENTIFIED_SHARE
 
 
 def _named(track: Track, min_score: float) -> bool:

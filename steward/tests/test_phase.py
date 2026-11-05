@@ -419,6 +419,23 @@ def test_phase1_keeps_the_far_edge_of_a_counter(kitchen_root):
     assert float(np.mean(np.abs(np.sort(counter.size) - np.sort(gt.size)))) < 0.05
 
 
+def test_a_label_perception_never_reported_does_not_break_the_next_rgbd_frame(kitchen_root):
+    """The agent may name an object with a category the robot's perception holds no evidence for
+    (a lid the segmenter only ever called unknown); every later frame must still be fused."""
+    from steward.ego.estimator import ESTABLISHED_VIEWS
+
+    scene = AuthoringService(kitchen_root).load_scenario("phase0-chores")["sceneState"]
+    sim = WorldSim(scene, seed=1, perception=PerceptionConfig(mode="rgbd", masks=True))
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    frame = decode_rgbd(sim.rgbd("w:robot-1"))
+    for _ in range(ESTABLISHED_VIEWS):
+        est.update_rgbd(frame)
+    for track_id in est.tracks:
+        est.annotate(track_id, "lid")
+    est.update_rgbd(frame)
+    assert est.tracks and all(t.category == "lid" for t in est.tracks.values())
+
+
 def _paint(depth, mask, cam, fovy, points, instance: int) -> None:
     """Write ``points`` (map frame) into a depth image through ``cam``."""
     from steward.math3d import pose_compose, pose_inverse

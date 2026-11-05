@@ -6,7 +6,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { EgoError, EgoService } from '@steward/dsh-ego'
-import type { Annotation, EgoQuery, EgoSkill, FaceMatchResult, InspectResult, JsonObject, PredictionReceipt, ProblemReport, SkillJob } from '@steward/dsh-ego'
+import type { Annotation, EgoQuery, EgoSkill, FaceMatchResult, InspectResult, JsonObject, PredictionReceipt, ProblemReport, SkillJob, RecordingId } from '@steward/dsh-ego'
+import { saveCameraCapture } from './camera-capture.ts'
+import { parseCameraCalibration, parseGripperPose } from './sensor-packet.ts'
 import { baseUrl, HttpJsonError, requestJson } from '@steward/http-json'
 
 /** Validated plugin configuration. */
@@ -15,10 +17,11 @@ export interface Config {
   endpoint: string
   /** Deadline for ordinary requests in milliseconds. */
   timeoutMs: number
-  /**
-   * Control owner sent with skill and explore requests. While a client holds exclusive control of
-   * the robot, the Ego Runtime only starts skills for requests naming that owner.
-   */
+  /** Directory for saved camera evidence relative to the robot workspace. */
+  cameraCaptureDir: string
+  /** Maximum decoded JPEG bytes in one camera snapshot. */
+  cameraMaxBytes: number
+  /** Control owner sent with skill and explore requests. */
   owner?: string
 }
 
@@ -27,6 +30,8 @@ export class EgoRuntimeClient extends EgoService {
   static Config = z.object({
     endpoint: z.string().default('http://127.0.0.1:7420'),
     timeoutMs: z.number().min(100).default(15_000),
+    cameraCaptureDir: z.string().default('var/camera-captures'),
+    cameraMaxBytes: z.number().min(1).default(16 * 1024 * 1024),
     owner: z.string(),
   })
 
@@ -63,6 +68,47 @@ export class EgoRuntimeClient extends EgoService {
   observe(signal?: AbortSignal): Promise<JsonObject> {
     return this.call('POST', '/ego/observe', {}, signal)
   }
+
+  async captureCameras(signal?: AbortSignal): Promise<JsonObject> {
+    const packet = await this.call<unknown>('POST', '/ego/cameras/capture', {}, signal)
+    return saveCameraCapture(packet, this.config.cameraCaptureDir, this.config.cameraMaxBytes, signal)
+  }
+
+
+  async cameraCalibration(signal?: AbortSignal): Promise<JsonObject> {
+    return parseCameraCalibration(await this.call<unknown>('GET', '/ego/cameras/calibration', undefined, signal))
+  }
+
+
+  startRgbRecording(fps: number, maxFrames: number, requestKey: string, signal?: AbortSignal): Promise<JsonObject> {
+    return this.call('POST', '/ego/rgb/record/start', { fps, max_frames: maxFrames, request_key: requestKey }, signal)
+  }
+
+
+  rgbRecordingStatus(id: RecordingId, signal?: AbortSignal): Promise<JsonObject> {
+    return this.call('GET', `/ego/rgb/record/status?recording_id=${encodeURIComponent(id)}`, undefined, signal)
+  }
+
+
+  stopRgbRecording(id: RecordingId, cancel: boolean, signal?: AbortSignal): Promise<JsonObject> {
+    return this.call('POST', '/ego/rgb/record/stop', { recording_id: id, cancel }, signal, this.config.timeoutMs + 20_000)
+  }
+
+
+  rgbRecordingEvidence(id: RecordingId, signal?: AbortSignal): Promise<JsonObject> {
+    return this.call('POST', '/ego/rgb/record/export', { recording_id: id }, signal)
+  }
+
+
+  prepareNovelAnything(id: RecordingId, sourceCount: number | undefined, signal?: AbortSignal): Promise<JsonObject> {
+    return this.call('POST', '/ego/rgb/prepare-novelanything', { recording_id: id, num_source_views: sourceCount }, signal)
+  }
+
+
+  async gripperPose(signal?: AbortSignal): Promise<JsonObject> {
+    return parseGripperPose(await this.call<unknown>('GET', '/ego/gripper/pose', undefined, signal))
+  }
+
 
   explore(signal?: AbortSignal): Promise<SkillJob> {
     return this.call('POST', '/ego/explore', { owner: this.config.owner }, signal)

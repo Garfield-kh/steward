@@ -1,0 +1,31 @@
+{
+  "name": "@steward/dsh-novelanything-client",
+  "version": "0.0.1",
+  "private": true,
+  "description": "NovelAnything HTTP provider with durable local POST receipts and bounded artifact downloads.",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    }
+  },
+  "files": [
+    "lib"
+  ],
+  "dependencies": {
+    "@steward/dsh-novelanything": "workspace:*",
+    "zod": "^4.4.3",
+    "@steward/dsh-ego": "workspace:*"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.5",
+    "@deepseek-ai/schemastery": "^3.18.5"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "4.0.5",
+    "@deepseek-ai/schemastery": "3.18.5"
+  }
+}

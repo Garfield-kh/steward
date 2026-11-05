@@ -6,7 +6,11 @@
   "scripts": {
     "build": "tsc -b",
     "clean": "tsc -b --clean",
-    "test": "tsc -b && node --test test/*.test.mjs"
+    "test": "tsc -b && node --test test/*.test.mjs",
+    "test:rgbd-video-gen": "tsc -b && node --test test/rgbd-video-gen.test.mjs test/rgbd-scene.test.mjs test/rgbd-recording.test.mjs test/rgbd-video-gen-snapshot.test.mjs",
+    "test:rgbd-video-gen:live": "tsc -b && node --test test/rgbd-video-gen-live.test.mjs",
+    "test:novelanything": "tsc -b && node --test test/novelanything.test.mjs test/novelanything-snapshot.test.mjs",
+    "test:novelanything:live": "tsc -b && node --test test/novelanything-live.test.mjs"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "4.0.5",
@@ -19,7 +23,11 @@
     "@steward/dsh-tool-ego-capabilities": "workspace:*",
     "@steward/dsh-tool-world": "workspace:*",
     "@types/node": "^24.0.0",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "@steward/dsh-rgbd-video-gen-client": "workspace:*",
+    "@steward/dsh-tool-rgbd-video-gen": "workspace:*",
+    "@steward/dsh-novelanything-client": "workspace:*",
+    "@steward/dsh-tool-novelanything": "workspace:*"
   },
   "engines": {
     "node": "^22.19.0 || >=24.0.0"

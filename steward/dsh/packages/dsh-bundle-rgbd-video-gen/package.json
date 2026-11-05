@@ -1,0 +1,11 @@
+{
+  "name": "@steward/dsh-bundle-rgbd-video-gen",
+  "version": "0.0.1",
+  "private": true,
+  "description": "rgbd_video_gen novel-view synthesis tools and skill for the robot Ego Harness.",
+  "type": "module",
+  "files": ["cordis.patch.yml", "skills"],
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "engines": { "dsh": ">=0.2.1-rc.3 <0.3.0" },
+  "dependencies": { "@steward/dsh-rgbd-video-gen-client": "workspace:*", "@steward/dsh-tool-rgbd-video-gen": "workspace:*", "@deepseek-ai/dsh-skill-filesystem": "0.2.1-rc.3" }
+}

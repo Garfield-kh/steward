@@ -1,0 +1,211 @@
+[
+  {
+    "skill": "<skill_content name=\"rgbd-video-gen\">\n<skill_resources>\nBase directory for this skill: {{dshWorkspace}}/packages/dsh-bundle-rgbd-video-gen/skills/rgbd-video-gen\nResolve relative paths mentioned by this skill against the base directory before using them. Load referenced resources only as needed.\n</skill_resources>\n\n<skill_instructions>\n# rgbd_video_gen novel-view synthesis\n\nUse this skill only for rgbd_video_gen tasks. If the operator explicitly requests NovelAnything, use its skill and tools instead. This skill's preparation tool does not make rgbd_video_gen an authorized substitute for another named model; report missing capabilities rather than switching models.\n\nChoose an input supported by the available `rgbd_video_gen_*` tools:\n\n- Evidence throughout motion: call `ego_rgb_recording_start` at the requested FPS before navigation, use the existing prediction/receipt and `skill_run wait=false` tools independently, then `ego_rgb_recording_stop` and inspect status until succeeded. A recording that reaches max_frames before motion ends does not cover the whole route. Do not emulate fixed FPS with repeated model-driven camera calls. Reuse an already successful recording when supplied. Call `rgbd_video_gen_prepare_recording` with its recording_id and explicit targets; never replace requested whole-motion evidence with a final snapshot or `prepare_scene`. The recorder and preparation do not command motion or inference.\n\n- Single-timestamp snapshot evidence (only when requested): capture with `ego_capture_cameras` if no capture was supplied, then call `rgbd_video_gen_prepare_scene` with its exact `manifest_path` and explicit `targets`. Omit `source_cameras` to use ONLY middle `head_camera` RGB, even when the capture contains other cameras. Additional sources require an explicit selection and matching dimensions and intrinsics; the existing `wide_camera` has different intrinsics and cannot be combined by this helper. Preparation reads only selected JPEGs and saves the complete scene. Submit its returned `scene_path` with the returned `num_source_views` and `max_target_views`; the default one-source/one-target scene has 2 frames and must be submitted with `num_source_views=1`. Do not use the server default of 6 for a prepared one-image scene.\n- A supplied `rgbd_videogen_scene_v1` JSON file with inline evidence images: use `rgbd_video_gen_submit`.\n- A ZIP with `scene.json` and relative image files: use `rgbd_video_gen_upload`, which uses server generation defaults.\n- An explicitly requested service demo: use `rgbd_video_gen_demo`. `trajectory` follows the demo trajectory; `bev` requires an explicit view count and altitude scale and has no target ground truth.\n\nRecording preparation retains every middle-camera RGB image and measured pose in `recording_manifest_path`. The remote API documentation and UI declare 1–8 source images per job. By default, use every frame for recordings of at most eight frames; otherwise uniformly select eight frames across the complete recording, including the first and last. No extra confirmation is needed for this default policy. `num_source_views` can override the uniform sample count, or `source_frame_indices` can explicitly select chronological samples for a batch. If the operator explicitly requires every recorded image to condition generation, explain the service limit and use an agreed alternative rather than describing a sample as all images. Batches produce separate predictions, not one prediction jointly conditioned on all frames. Inspect and report `recorded_frames`, `source_frame_indices`, `source_stamps` and `all_frames_used`. Preserving all local images does not mean all images reached the model. Do not put unused source images after the evidence block: the API treats those frames as targets. Submit exactly the returned scene_path, num_source_views and max_target_views.\n\nDescribe each target with `frame` plus either a rigid 4x4 `camera_to_frame` matrix OR the three vectors `position`, `look_at`, `up`, never both. `frame=reference` uses the middle camera's OpenCV axes (right/down/forward): the capture instant for snapshots, or the first recorded instant for recordings. `frame=gripper` uses gripper axes (forward/left/up). Positions and look-at points are metres; up is an image-up direction, not parallel to the viewing direction. Reuse middle-camera intrinsics. No target pose is selected implicitly: use the operator's requested viewpoint, or ask for the missing viewpoint.\n\nFor a gripper-forward view, use `targets:[{frame:\"gripper\",position:[0,0,0],look_at:[1,0,0],up:[0,0,1]}]`. For offsets, other directions or multiple novel views, specify those targets explicitly. Reference-frame targets do not require any gripper pose. Snapshot gripper targets require the embedded same-timestamp pose; do not mix in a later `ego_gripper_pose`. Recording preparation obtains a current gripper pose and relates it to all earlier evidence through the shared measured odometry frame.\n\nLocal scenes need 2–64 ordered frames, calibrated pixel intrinsics K and OpenCV camera-to-world poses in metres. The first `num_source_views` frames are evidence images (1–8, default 6); at least one later frame must supply a target pose, with an optional image for ground-truth comparison. Explicitly set `num_source_views` for fewer than 6 evidence images: one image plus one target needs 2 frames and `num_source_views=1`; three camera images plus one target need 4 frames and `num_source_views=3`. Use separate ordered reference-camera frames for the evidence images; three views within one frame do not count as three evidence frames. The model was trained on 6 evidence views, so other counts may reduce quality. Use JSON submission for small evidence sets; the ZIP tool uses server generation defaults. Do not pad or duplicate evidence to reach 7 frames, invent poses or treat an SLARM capture ZIP as this format.\n\nIn the robot Ego Harness, input paths resolve inside the robot workspace. Use supplied robot evidence and estimated poses. If these inputs are missing, report what is needed; a server demo is not a prediction of the robot's current surroundings. Do not obtain privileged simulator state through World tools or repository files.\n\nThe robot profile deliberately has no general file or shell tools, and delegated subagents inherit that restriction. Do not delegate scene file authoring or probe invented paths. Use the preparation tool directly; no plugin-source inspection or filesystem permission change is needed. Preparation does not submit a remote job. If the tool is unavailable, state the missing installed capability without escalating it as a robot hardware fault.\n\nCheck `rgbd_video_gen_capabilities`, submit with a stable `request_key`, then query `rgbd_video_gen_status`. Preserve the same key and options when retrying an uncertain submission. `queued` and `running` are pending; `failed` and `cancelled` stop the generation flow. Only `succeeded` permits reading `rgbd_video_gen_result` and selecting returned filenames for `rgbd_video_gen_download`. Submitted scenes, parameters and uploaded ZIPs are archived under inputs/rgbd_video_gen. Download returned artifacts under outputs/rgbd_video_gen/<job_id> and retain local_manifest_path; this manifest lists verified local paths, input archives and target RGB/depth mappings for downstream processes. Return its absolute path. No UI visualization is required. Report remote generation success and verified local downloads separately. Stopping local waiting does not cancel a remote job; use `rgbd_video_gen_cancel` for an explicit cancellation request.\n\nInterpret RGB and depth as model predictions, not observations. Target camera `i` maps to frame `num_source_views+i`; inspect metadata instead of assuming six source views. Target PSNR requires target ground truth. Generated views do not update Ego-State or establish free space, grasp feasibility or a motion receipt. Robot motion continues to require the existing `ego_predict` and `skill_run` flow with actual observations.\n\nLocal loose RGB files distinguish `source_reconstruction_*.jpg` (input-view reconstructions) from `target_prediction_*.jpg` ("
+  },
+  {
+    "ready": {
+      "status": "ready"
+    },
+    "capabilities": {
+      "input_format": "rgbd_videogen_scene_v1",
+      "defaults": {
+        "num_source_views": 6,
+        "max_target_views": 10,
+        "num_inference_steps": 50,
+        "seed": 1234,
+        "output_fps": 4,
+        "flow_dtype": "bf16"
+      },
+      "ready": true
+    }
+  },
+  {
+    "scene_path": "inputs/rgbd_video_gen/prepared/rgb_cccccccccccccccccccccccccccccccc-14db8458803b00f668cf04e32be068ab20520a55f4796e074f1dd865344a2e2a/scene-b73df1ff1aa5a959a7f1fb7cf6a3a9eff54cbc012cef9df248384701eae3fdaf.json",
+    "local_scene_path": "{{cwd}}/robot-workspace/inputs/rgbd_video_gen/prepared/rgb_cccccccccccccccccccccccccccccccc-14db8458803b00f668cf04e32be068ab20520a55f4796e074f1dd865344a2e2a/scene-b73df1ff1aa5a959a7f1fb7cf6a3a9eff54cbc012cef9df248384701eae3fdaf.json",
+    "recording_manifest_path": "{{cwd}}/robot-workspace/inputs/rgbd_video_gen/prepared/rgb_cccccccccccccccccccccccccccccccc-14db8458803b00f668cf04e32be068ab20520a55f4796e074f1dd865344a2e2a/recording.json",
+    "recording_id": "rgb_cccccccccccccccccccccccccccccccc",
+    "fps": 2,
+    "camera_id": "head_camera",
+    "input_modalities": [
+      "rgb"
+    ],
+    "recorded_frames": 37,
+    "source_frame_indices": [
+      0,
+      5,
+      10,
+      15,
+      21,
+      26,
+      31,
+      36
+    ],
+    "source_stamps": [
+      0,
+      2.5,
+      5,
+      7.5,
+      10.5,
+      13,
+      15.5,
+      18
+    ],
+    "first_stamp": 0,
+    "last_stamp": 18,
+    "all_frames_used": false,
+    "coordinate_frame": "first_recorded_head_camera_opencv",
+    "pose_source": "robot_odometry_and_joint_encoders",
+    "target_stamp": 18.25,
+    "targets": [
+      {
+        "frame": "gripper",
+        "label": "current gripper origin view, forward +X, image-up +Z"
+      }
+    ],
+    "predicted": true,
+    "frame_count": 9,
+    "num_source_views": 8,
+    "max_target_views": 1,
+    "prediction_label": "novel_view_prediction",
+    "next_action": "rgbd_video_gen_submit"
+  },
+  {
+    "job_id": "j_one",
+    "state": "succeeded",
+    "progress": {
+      "stage": "done",
+      "percent": 100
+    },
+    "error": null,
+    "request_key": "robot-rgbd-snapshot",
+    "request_record": "{{cwd}}/robot-workspace/state/{{service}}/requests/submit-140657a6276df3dedd2989076edf4d0c9d0389443c6267709c373a25ce6bd464.json",
+    "local_input": {
+      "request_path": "{{cwd}}/robot-workspace/inputs/rgbd_video_gen/submit-69006ef228e37745cf8d2c1135227b09da0cb866e5e573fd8f313e26c82732f4/request.json",
+      "body_sha256": "69006ef228e37745cf8d2c1135227b09da0cb866e5e573fd8f313e26c82732f4",
+      "scene_path": "{{cwd}}/robot-workspace/inputs/rgbd_video_gen/submit-69006ef228e37745cf8d2c1135227b09da0cb866e5e573fd8f313e26c82732f4/scene.json"
+    },
+    "next_action": "rgbd_video_gen_result"
+  },
+  {
+    "job_id": "j_one",
+    "state": "succeeded",
+    "progress": {
+      "stage": "done",
+      "percent": 100
+    },
+    "error": null,
+    "next_action": "rgbd_video_gen_result"
+  },
+  {
+    "job_id": "j_one",
+    "state": "succeeded",
+    "metrics": {
+      "src_recon_rgb_psnr": 25.5
+    },
+    "params": {
+      "num_source_views": 8,
+      "max_target_views": 1,
+      "num_inference_steps": 30,
+      "seed": 1234,
+      "output_fps": 4,
+      "flow_dtype": "bf16"
+    },
+    "scene": {
+      "scene_id": "fixture"
+    },
+    "meta": {
+      "target_cameras": [],
+      "has_target_gt": false
+    },
+    "artifacts": [
+      {
+        "kind": "frames_zip",
+        "filename": "frames.zip",
+        "bytes": 22,
+        "sha256": "bc3c372c8b5452c55abfce3f009e5edc5adb5ed1561ea06dd827717de97813d1",
+        "media_type": "application/octet-stream",
+        "local_filename": "frames.zip"
+      },
+      {
+        "kind": "depth_npz",
+        "filename": "depth.npz",
+        "bytes": 22,
+        "sha256": "bc3c372c8b5452c55abfce3f009e5edc5adb5ed1561ea06dd827717de97813d1",
+        "media_type": "application/octet-stream",
+        "local_filename": "depth.npz"
+      },
+      {
+        "kind": "rgb_video",
+        "filename": "demo_pred_tgt.mp4",
+        "bytes": 22,
+        "sha256": "bc3c372c8b5452c55abfce3f009e5edc5adb5ed1561ea06dd827717de97813d1",
+        "media_type": "application/octet-stream",
+        "local_filename": "demo_pred_tgt.mp4"
+      },
+      {
+        "kind": "meta",
+        "filename": "meta.json",
+        "bytes": 22,
+        "sha256": "bc3c372c8b5452c55abfce3f009e5edc5adb5ed1561ea06dd827717de97813d1",
+        "media_type": "application/octet-stream",
+        "local_filename": "meta.json"
+      }
+    ],
+    "artifact_urls": {
+      "frames.zip": "/v1/nvs/jobs/j_one/artifacts/frames.zip",
+      "depth.npz": "/v1/nvs/jobs/j_one/artifacts/depth.npz",
+      "demo_pred_tgt.mp4": "/v1/nvs/jobs/j_one/artifacts/demo_pred_tgt.mp4",
+      "meta.json": "/v1/nvs/jobs/j_one/artifacts/meta.json"
+    },
+    "completed": true,
+    "local_result_path": "{{cwd}}/robot-workspace/outputs/rgbd_video_gen/j_one/result.json",
+    "local_manifest_path": "{{cwd}}/robot-workspace/outputs/rgbd_video_gen/j_one/manifest.json",
+    "interpretation": "RGB and depth are generated predictions, not observed geometry. Target PSNR is available only with target ground truth. Local source_reconstruction_*.jpg files reconstruct inputs; target_prediction_*.jpg files predict requested views, numbered from zero. Use artifacts[].filename for downloads and local_filename/path for local consumers. ZIP contents and depth keys retain server names."
+  },
+  {
+    "job_id": "j_one",
+    "files": [
+      {
+        "filename": "frames.zip",
+        "local_filename": "frames.zip",
+        "kind": "frames_zip",
+        "path": "{{cwd}}/robot-workspace/outputs/rgbd_video_gen/j_one/frames.zip",
+        "bytes": 22,
+        "sha256": "bc3c372c8b5452c55abfce3f009e5edc5adb5ed1561ea06dd827717de97813d1",
+        "verified": true,
+        "reused": false
+      },
+      {
+        "filename": "depth.npz",
+        "local_filename": "depth.npz",
+        "kind": "depth_npz",
+        "path": "{{cwd}}/robot-workspace/outputs/rgbd_video_gen/j_one/depth.npz",
+        "bytes": 22,
+        "sha256": "bc3c372c8b5452c55abfce3f009e5edc5adb5ed1561ea06dd827717de97813d1",
+        "verified": true,
+        "reused": false
+      },
+      {
+        "filename": "demo_pred_tgt.mp4",
+        "local_filename": "demo_pred_tgt.mp4",
+        "kind": "rgb_video",
+        "path": "{{cwd}}/robot-workspace/outputs/rgbd_video_gen/j_one/demo_pred_tgt.mp4",
+        "bytes": 22,
+        "sha256": "bc3c372c8b5452c55abfce3f009e5edc5adb5ed1561ea06dd827717de97813d1",
+        "verified": true,
+        "reused": false
+      },
+      {
+        "filename": "meta.json",
+        "local_filename": "meta.json",
+        "kind": "meta",
+        "path": "{{cwd}}/robot-workspace/outputs/rgbd_video_gen/j_one/meta.json",
+        "bytes": 22,
+        "sha256": "bc3c372c8b5452c55abfce3f009e5edc5adb5ed1561ea06dd827717de97813d1",
+        "verified": true,
+        "reused": false
+      }
+    ],
+    "local_manifest_path": "{{cwd}}/robot-workspace/outputs/rgbd_video_gen/j_one/manifest.json"
+  }
+]

@@ -15,11 +15,15 @@ ROBOT_TEMPLATE="${ROBOT_TEMPLATE:-headless}"
 setup_profile() {
   local home="$1" profile="$2" template="$3" bundle="$4"
   mkdir -p "$home"
-  DSH_HOME="$home" "$DSH" --profile "$profile" --from-default-profile "$template" --dump-default-config >/dev/null
+  if [ ! -f "$home/profiles/$profile/package.json" ]; then
+    DSH_HOME="$home" "$DSH" --profile "$profile" --from-default-profile "$template" --dump-default-config >/dev/null
+  fi
   DSH_HOME="$home" "$DSH" plugin --profile "$profile" add "$STEWARD/dsh/packages/$bundle"
   echo "profile $profile ready in $home"
 }
 
 setup_profile "$VAR/robot-1" ego "$ROBOT_TEMPLATE" dsh-bundle-ego
+DSH_HOME="$VAR/robot-1" "$DSH" plugin --profile ego add "$STEWARD/dsh/packages/dsh-bundle-rgbd-video-gen"
+DSH_HOME="$VAR/robot-1" "$DSH" plugin --profile ego add "$STEWARD/dsh/packages/dsh-bundle-novelanything"
 setup_profile "$VAR/world" world web dsh-bundle-world
 setup_profile "$VAR/world" world-task headless dsh-bundle-world

@@ -1,0 +1,19 @@
+- insert:
+    - id: steward-novelanything-api
+      name: '@steward/dsh-novelanything-client'
+      config:
+        endpoint: 'http://115.120.57.9/novelanything'
+        inputRoot: '.'
+        stateDir: 'var/novelanything'
+        inputsDir: 'inputs/novelanything'
+        outputsDir: 'outputs/novelanything'
+    - id: steward-tool-novelanything
+      name: '@steward/dsh-tool-novelanything'
+    - id: steward-novelanything-skills
+      name: '@deepseek-ai/dsh-skill-filesystem'
+      config:
+        providerName: steward-novelanything
+        includeDefaultRoots: false
+        watch: false
+        bundledSkillDir: !!js >-
+          process.getBuiltinModule('node:path').join(process.getBuiltinModule('node:path').dirname(process.getBuiltinModule('node:module').createRequire(baseUrl).resolve('@steward/dsh-bundle-novelanything/package.json')), 'skills')

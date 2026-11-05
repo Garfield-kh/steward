@@ -21,6 +21,7 @@ import queue
 import threading
 import time
 import zlib
+import uuid
 from dataclasses import dataclass, field
 
 import mujoco
@@ -163,6 +164,7 @@ class WorldSim:
         self.paused = False
         self.events: list[dict] = []
         self._render_requests: queue.Queue[_RenderRequest] = queue.Queue()
+        self._step_listeners = []
         self._load(self._initial_scene)
 
     # ------------------------------------------------------------------ setup
@@ -178,6 +180,7 @@ class WorldSim:
         for renderer in getattr(self, "_renderers", {}).values():
             close_renderer(renderer)
         self._epoch = getattr(self, "_epoch", 0) + 1
+        self.odometry_frame_id = uuid.uuid4().hex
         self._holds: dict[str, _Hold] = {}
         self._renderers: dict[tuple[int, int], mujoco.Renderer] = {}
         self._index_bodies()
@@ -397,6 +400,28 @@ class WorldSim:
                 mujoco.mj_step(self.model, self.data)
                 self._follow_attached()
                 self.step_count += 1
+                for listener in tuple(self._step_listeners):
+                    listener()
+
+    def subscribe_steps(self, listener):
+        """Subscribe a nonblocking recorder callback under the physics lock; return its disposer."""
+        with self.lock:
+            self._step_listeners.append(listener)
+        def dispose():
+            with self.lock:
+                if listener in self._step_listeners:
+                    self._step_listeners.remove(listener)
+        return dispose
+
+    def odometry(self, robot_id: str) -> dict:
+        """Read the same deterministic body sensor channel used by normal perception."""
+        with self.lock:
+            names = self.build.names[robot_id]
+            x, y, yaw = (self._joint_q(j) for j in names.root_joints)
+            p, rng = self.perception, self._sensor_rng(robot_id, "body")
+            return {"x": x + rng.normal(0, p.odom_pos_sigma), "y": y + rng.normal(0, p.odom_pos_sigma),
+                    "yaw": yaw + rng.normal(0, p.odom_yaw_sigma),
+                    "sigma": {"pos": p.odom_pos_sigma, "yaw": p.odom_yaw_sigma}}
 
     def step_seconds(self, seconds: float) -> None:
         self.step(max(1, int(round(seconds / self.timestep))))

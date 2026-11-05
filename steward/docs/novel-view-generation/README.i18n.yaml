@@ -1,0 +1,31 @@
+# Bilingual-pair consistency record for README.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write steward/docs/novel-view-generation/README.md
+/:
+  en: 5be0b4af865f9bb5
+  zh: 23eea2a19dc0a8ca
+/perception-model-skills-guide:
+  en: 6cb36c56ef26347b
+  zh: c6fef49ebb202c23
+/perception-model-skills-guide/summary:
+  en: 9634c68baa89145f
+  zh: 2f63882d4372bf3f
+/perception-model-skills-guide/table-of-contents:
+  en: 636c6d873da2b01c
+  zh: 1dcc7127dc9d3151
+/perception-model-skills-guide/prerequisites:
+  en: 5a20d3b897a8c29b
+  zh: e36ddb798a9285ea
+/perception-model-skills-guide/copyable-examples:
+  en: a90a66f6eaf7f30b
+  zh: bbe3da5cad3d55a1
+/perception-model-skills-guide/virtual-camera-and-sampling:
+  en: e669b941e23ff8d2
+  zh: f494fb0977481d6b
+/perception-model-skills-guide/flow-and-package-reference:
+  en: ac8a60113bb481d6
+  zh: 6d0fdbbc60a09188
+/perception-model-skills-guide/results-and-recovery:
+  en: 3aaac23fd8191401
+  zh: 97b40ae9b7608955

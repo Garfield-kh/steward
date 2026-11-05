@@ -10,6 +10,19 @@
 
 import { Service, type Context } from '@deepseek-ai/cordis'
 
+import { brandString, type Branded } from '@deepseek-ai/dsh-brand'
+
+/** Robot-owned RGB recording identity. */
+export type RecordingId = Branded<'StewardRgbRecordingId'>
+/** Admit a recording identity from model/tool JSON or a sensor response.
+ * @param value - remote recording identity.
+ * @returns validated recording identity.
+ */
+export function recordingId(value: string): RecordingId {
+  if (!/^rgb_[a-f0-9]{32}$/.test(value)) throw new EgoError('Invalid RGB recording identity')
+  return brandString<RecordingId>(value)
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     ego: EgoService
@@ -288,4 +301,64 @@ export abstract class EgoService extends Service {
    * @returns the recorded alert.
    */
   abstract reportProblem(report: ProblemReport, signal?: AbortSignal): Promise<JsonObject>
+
+  /**
+   * Save synchronized images from the robot's existing cameras.
+   * @param signal - caller cancellation.
+   * @returns shared sensor timestamp, saved image paths, camera calibration and the same-sample gripper pose; no absolute poses.
+   */
+  abstract captureCameras(signal?: AbortSignal): Promise<JsonObject>
+
+  /**
+   * Read fixed RGB intrinsics and relative extrinsics without imaging or motion.
+   * @param signal - caller cancellation.
+   * @returns RGB calibration; camera_to_reference maps each OpenCV camera into the middle camera, in metres.
+   */
+  abstract cameraCalibration(signal?: AbortSignal): Promise<JsonObject>
+
+  /** Start an independent RGB recorder; it never commands motion.
+   * @param fps - requested sensor cadence in simulation time.
+   * @param maxFrames - hard frame bound, at least two.
+   * @param requestKey - stable start identity, reused after uncertain responses.
+   * @param signal - local cancellation; an accepted recording continues.
+   * @returns recording identity and status.
+   */
+  abstract startRgbRecording(fps: number, maxFrames: number, requestKey: string, signal?: AbortSignal): Promise<JsonObject>
+
+  /** Inspect a middle RGB recording.
+   * @param id - actual recording identity.
+   * @param signal - local cancellation.
+   * @returns cadence, sensor counts and terminal errors.
+   */
+  abstract rgbRecordingStatus(id: RecordingId, signal?: AbortSignal): Promise<JsonObject>
+
+  /** Stop sampling and finalize evidence, or explicitly discard a cancelled recording.
+   * @param id - recording identity.
+   * @param cancel - false preserves evidence; true cancels recording.
+   * @param signal - local cancellation, not recording cancellation.
+   * @returns recording status; finalizing requires another status query.
+   */
+  abstract stopRgbRecording(id: RecordingId, cancel: boolean, signal?: AbortSignal): Promise<JsonObject>
+
+  /** Export all middle-camera RGB samples, measured poses and current gripper geometry.
+   * @param id - successfully completed recording.
+   * @param signal - local cancellation.
+   * @returns inline sensor evidence for local preparation; providers must strip image bytes before model output.
+   */
+  abstract rgbRecordingEvidence(id: RecordingId, signal?: AbortSignal): Promise<JsonObject>
+
+  /** Export a finished sensor recording as a NovelAnything scene, without inference or motion.
+   * @param id - successful middle RGB recording.
+   * @param sourceCount - explicit 2–16 context count; undefined selects up to 16 evenly spaced frames.
+   * @param signal - local cancellation.
+   * @returns ZIP bytes encoded for the local provider and metadata; callers must save and strip archive_base64 before model output.
+   */
+  abstract prepareNovelAnything(id: RecordingId, sourceCount: number | undefined, signal?: AbortSignal): Promise<JsonObject>
+
+  /**
+   * Read gripper-link pose from joint encoders and the robot body model without imaging or motion.
+   * @param signal - caller cancellation.
+   * @returns sensor timestamp, joint readings and transforms from gripper axes (forward/left/up) to base and OpenCV camera frames, in metres.
+   */
+  abstract gripperPose(signal?: AbortSignal): Promise<JsonObject>
 }

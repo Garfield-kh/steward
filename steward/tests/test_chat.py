@@ -145,6 +145,33 @@ def test_stopping_a_robot_turn_ends_the_run_and_releases_control(tmp_path):
     assert chat.cancel("robot") == {"stopped": False}
 
 
+def test_a_turn_ended_by_the_budget_reports_a_designed_stop_not_a_failure(tmp_path):
+    """The wall-clock budget ends long turns by design: ``_terminate`` kills the harness process, and
+    on Windows that exit is non-zero with a stderr tail holding only the node startup warning, which
+    used to be reported as a run failure and alarmed the operator. A budget timeout (like an operator
+    cancel) must read as a designed end: no error entry, no failure alert."""
+    script = tmp_path / "dsh"
+    script.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
+    script.chmod(0o755)
+    calls = []
+
+    def control(q, b):
+        calls.append(b["action"])
+        return {"owner": None}
+
+    ego = JsonServer({("POST", "/ego/control"): control, ("GET", "/ego/control"): lambda q, b: {"owner": None}}).start()
+    try:
+        chat = HarnessChat(ChatConfig(dsh=script, cwd=tmp_path, env_file=tmp_path / ".env", robot_home=_home(tmp_path, "robot-1", "ego"),
+                                      ego_api=ego.url, timeout_s=0.4), lambda: "unused")
+        chat.send("robot", "慢慢来")
+        _wait_idle(chat, "robot")
+    finally:
+        ego.stop()
+    roles = [m["role"] for m in chat.state()["messages"]]
+    assert "error" not in roles
+    assert any("回合预算" in m["text"] for m in chat.state()["messages"])
+
+
 def test_shuttle_pauses_while_an_operator_controls_the_robot():
     from steward.mission import _wait_for_control
 

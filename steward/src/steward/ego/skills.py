@@ -617,8 +617,11 @@ class SkillExecutor:
     def _place_floor(self, job: Job, plan: dict) -> None:
         """Drive in with the held object, lower it to just above the floor, release and back away.
 
-        The arm keeps its carrying reach: retracting it would pull the object over the base."""
+        The arm keeps its carrying reach, or extends to the plan's ``reach`` where the object would
+        otherwise land on the base: retracting it would pull the object over the base."""
         self._dock(job, plan, retract=False)
+        if "reach" in plan:
+            self._set_joint("reach", plan["reach"])
         self._set_joint("lift", plan["lift"])
         self._command({"gripper": "open"})
         self._released(plan["object"], plan["floor"])

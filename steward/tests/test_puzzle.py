@@ -530,6 +530,28 @@ def test_a_held_box_overhanging_the_base_is_not_put_down_on_the_floor_under_it()
     assert esim._release_blocked([], piece, (0.0, 0.0), 0.0, (0.0, 0.0), 0.0) is None, "the base drives over it"
 
 
+def test_a_held_box_overhanging_the_base_is_set_down_on_the_floor_with_the_arm_extended():
+    from steward.ego.esim import Esim
+
+    model = steward_bot().to_dict()
+    est = EgoEstimator(robot_model=model)
+    est.odometry = {"x": 0.0, "y": 0.0, "yaw": 0.0, "sigma": {"pos": 0.0, "yaw": 0.0}}
+    est.joints = {"lift": 0.8, "reach": 0.1}
+    est.tracks = {"e:2": _track("e:2", "box", [0.35, 0.0, 0.775], [0.54, 0.54, 0.05])}
+    est.held_id, est.tracks["e:2"].held = "e:2", True
+    esim = Esim(model)
+    receipt = esim.predict(est.to_scene(), "place", {"at": [0.35, 0.0]})
+    assert receipt["feasible"], receipt["issues"]
+    plan = receipt["plan"]
+    shift = plan["reach"] - 0.1
+    assert shift > 0 and plan["dock"] == pytest.approx([-shift, 0.0]), "it backs off as far as the arm extends"
+    assert plan["predock"][0] < plan["dock"][0], "then backs away from the box it set down"
+    far = esim.predict(est.to_scene(), "place", {"at": [2.0, 0.0], "yaw": 0.0})
+    assert far["feasible"], far["issues"]
+    assert far["plan"]["reach"] == pytest.approx(plan["reach"])
+    assert far["plan"]["dock"][0] == pytest.approx(2.0 - (0.35 + shift), abs=1e-6)
+
+
 def test_a_remembered_face_gathers_views_and_is_replaced_after_the_object_is_put_down():
     est = EgoEstimator(robot_model=steward_bot().to_dict())
     est.tracks["e:3"] = _track("e:3", "puzzle_piece", [0.5, 0.0, 0.753], [0.115, 0.115, 0.006])

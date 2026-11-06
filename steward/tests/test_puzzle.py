@@ -552,6 +552,22 @@ def test_a_held_box_overhanging_the_base_is_set_down_on_the_floor_with_the_arm_e
     assert far["plan"]["dock"][0] == pytest.approx(2.0 - (0.35 + shift), abs=1e-6)
 
 
+def test_a_heading_the_wrist_cannot_turn_to_from_the_nearest_side_is_placed_from_another_side():
+    from steward.ego.esim import Esim
+
+    model = steward_bot().to_dict()
+    est = EgoEstimator(robot_model=model)
+    est.odometry = {"x": 0.0, "y": 1.0, "yaw": -math.pi / 2, "sigma": {"pos": 0.0, "yaw": 0.0}}
+    est.joints = {"lift": 0.85, "reach": 0.1, "wrist_yaw": 0.0}
+    est.tracks = {"e:4": _track("e:4", "table", [0.0, 0.0, 0.375], [0.6, 0.6, 0.75]),
+                  "e:3": _track("e:3", "puzzle_piece", [0.0, 0.6, 0.85], [0.115, 0.115, 0.006], yaw=-math.pi / 2)}
+    est.held_id, est.tracks["e:3"].held = "e:3", True
+    receipt = Esim(model).predict(est.to_scene(), "place", {"on": "e:4", "offset": [0.0, 0.1], "yaw": math.pi / 2})
+    assert receipt["feasible"], receipt["issues"]
+    assert abs(math.cos(receipt["plan"]["yaw"])) == pytest.approx(1.0, abs=1e-6), "docked at a side face, not the near one"
+    assert abs(receipt["plan"]["wristYaw"]) == pytest.approx(math.pi / 2, abs=1e-6)
+
+
 def test_a_remembered_face_gathers_views_and_is_replaced_after_the_object_is_put_down():
     est = EgoEstimator(robot_model=steward_bot().to_dict())
     est.tracks["e:3"] = _track("e:3", "puzzle_piece", [0.5, 0.0, 0.753], [0.115, 0.115, 0.006])

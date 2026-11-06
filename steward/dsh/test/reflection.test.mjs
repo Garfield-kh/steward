@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  apply, candidateLine, CHECKPOINT_QUESTIONS, checkpointText, Config, DEEP_QUESTIONS, failureOf, instructionOf,
+  apply, candidateLine, CHECKPOINT_QUESTIONS, checkpointText, Config, DEEP_QUESTIONS, failureOf, IDLE_QUESTIONS, instructionOf,
   RECURRING_QUESTIONS, reflectionText, sceneDigest, SHALLOW_QUESTIONS,
 } from '@steward/dsh-ego-reflection'
 
@@ -122,7 +122,7 @@ function harness(config = {}) {
     effect: (fn) => fn(),
     tools: { register: (tool) => { registered.push(tool); return () => {} } },
   }
-  apply(ctx, Config({ instructionMarker: '操作员任务：', effort: EFFORT, checkpointEvery: 0, ...config }))
+  apply(ctx, Config({ instructionMarker: '操作员任务：', effort: EFFORT, checkpointEvery: 0, idleEvery: 0, ...config }))
   const agent = {}
   const signal = new AbortController().signal
   const claim = (text, kind = 'user') => handlers['agent/inbox/claimed']({ agent, message: { source: { kind }, content: [{ type: 'text', text }] }, turn: 1 })
@@ -227,6 +227,20 @@ test('a run of programs without reflection ends with a checkpoint; a failing pro
   const text = h.text(await h.program())
   assert.match(text, /^【阶段回顾】这条指令下已运行 5 个程序，自上次反思以来的 3 个程序没有工具报错。/)
   assert.match(text, /- puzzle_piece ×8/)
+})
+
+test('a run of programs in which the robot does not act ends with a review of what they wait for', async () => {
+  const h = harness({ idleEvery: 3 })
+  h.claim('操作员任务：拼好拼图')
+  await h.program(ok(null), 'call-1')
+  await h.run('skill_run', { receipt: 'r1' }, ok({ skill: 'pick', state: 'succeeded' }), { rootCallId: 'call-2' })
+  assert.equal((await h.program(ok(null), 'call-2')).additionalContexts, undefined, 'the robot acted')
+  assert.equal((await h.program(failed('Error: x'), 'call-3')).additionalContexts.length, 1, 'a failure is reflected on first')
+  assert.equal((await h.program()).additionalContexts, undefined)
+  const text = h.text(await h.program())
+  assert.match(text, /^【阶段回顾】这条指令下已运行 5 个程序，最近 3 个程序里机器人都没有动作（只在观察、计算或打印）。/)
+  assert.ok(text.includes(IDLE_QUESTIONS[1]))
+  assert.equal((await h.program()).additionalContexts, undefined, 'the run starts again')
 })
 
 test('each request thinks as long as the kind of step it follows', async () => {

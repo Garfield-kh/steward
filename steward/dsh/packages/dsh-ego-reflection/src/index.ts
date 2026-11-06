@@ -17,7 +17,10 @@
  *   macro questions first (restate scene, task, subtasks and failures; how the instruction's
  *   words map onto the perceived objects; which assumptions were never checked), then the
  *   physical causes, then the strategy and its efficiency.
- * - checkpoint: `checkpointEvery` top-level steps without any reflection; a progress review.
+ * - checkpoint: `checkpointEvery` top-level steps without any failure or reflection, or
+ *   `idleEvery` top-level steps in a row in which the robot did not act (no `actionTools` call:
+ *   only observing, computing or printing); a review of progress, or of what the idle steps
+ *   are waiting for.
  *
  * Each model request gets the reasoning effort configured for the kind of step it follows:
  * `instruction` after an operator message, the reflection's depth after a reflection, `recover`
@@ -77,6 +80,10 @@ export interface Config {
   deepAfter: number
   /** Top-level calls without a reflection after which a checkpoint review is attached; 0: never. */
   checkpointEvery: number
+  /** Tools that make the robot act; a top-level call that called none of them is idle. */
+  actionTools: string[]
+  /** Idle top-level calls in a row after which a checkpoint review is attached; 0: never. */
+  idleEvery: number
   /** Reasoning effort of the request following each kind of step. */
   effort: Efforts
   /** Objects listed per reflection (the call's targets first, then candidates). */
@@ -109,6 +116,8 @@ export const Config: z<Config> = z.object({
   maxDeepPerInstruction: z.natural().default(4),
   deepAfter: z.natural().min(1).default(2),
   checkpointEvery: z.natural().default(8),
+  actionTools: z.array(z.string()).default(['skill_run', 'ego_explore']),
+  idleEvery: z.natural().default(5),
   effort: z.object({ act: effort, instruction: effort, recover: effort, shallow: effort, deep: effort, checkpoint: effort }),
   candidateLimit: z.natural().min(1).default(6),
   sceneGroups: z.natural().min(1).default(12),
@@ -282,6 +291,7 @@ export const REFLECT_TOOL = 'reflect'
 export const CAUSES = [
   '   - 感知：物体是否被认错或叫错（感知按外观和形状命名，不知道操作员的叫法），是否只看到了一部分、被别的东西挡住、只看到了某一面；',
   '   - 物体的状态：位置、朝向、哪一面朝上、是否相互叠压或遮挡、数量是否齐全、是否离开了原来的地方；',
+  '   - 参照：任务依据的参照物（印着目标的物体、标签、标记）是否被别的东西压住或遮挡、被翻面、被你自己挪动过，你看到的是否就是它；',
   '   - 动作：够不着、抓不稳、会碰撞、放置的空间不够；',
   '   - 任务理解：你对指令的理解和操作员的意思是否一致。',
 ]
@@ -315,7 +325,8 @@ export const DEEP_QUESTIONS = [
   '七、方法：退一步看，当前的方法从根本上可行吗？有没有完全不同的做法（换顺序、先创造前提、换观察位置、换技能组合）？比较代价和成功率。',
   '八、效率：哪些步骤在重复或只是微调参数？能否把剩下的工作写成一个程序循环完成，只在需要你判断时停下？',
   '九、计划：选出证据最支持的原因和方法，写出下一步做什么、预期看到什么、程序里怎样检验。',
-  '十、核实后确定只有操作员才能解决时（例如东西不在了、无法到达），调用 report_problem 说明。',
+  '十、得出"做不到"或想改用低于指令要求的做法之前，先核实这个结论的依据没有被你自己的动作改变过；'
+    + '核实后确定只有操作员才能解决时（例如东西不在了、无法到达），调用 report_problem 说明。',
 ]
 
 /** Question added to a deep reflection when an earlier reflection under the same message exists. */
@@ -330,6 +341,14 @@ export const CHECKPOINT_QUESTIONS = [
   '二、方法：最近的程序是否在重复相似的工作或微调参数？剩下的工作能否写成一个程序循环完成，只在需要你判断时停下？',
   '三、风险：有没有被忽略的异常迹象（数量对不上、物体移位、名字可疑、结果和预期不符）？',
   '四、下一步：做什么，怎样检验。',
+]
+
+/** Questions of a checkpoint after a run of programs in which the robot did not act. */
+export const IDLE_QUESTIONS = [
+  '一、判断：这些程序在为哪一个决定收集信息？缺的是信息，还是程序本身有错？',
+  '二、重复：它们是否在反复试探同一件事（换参数、换打印方式）？把需要的观察和计算一次写全，让程序直接给出决定，而不是把数据打印出来再看。',
+  '三、参照：你核实的参照物是否被遮挡、翻面或挪动过，你看到的是否就是它？',
+  '四、下一步：写一个推进任务的程序（含动作和检验）；确实缺少只有操作员能给的信息时，说明缺什么。',
 ]
 
 function instructionLines(instructions: readonly string[]): string[] {
@@ -384,17 +403,22 @@ export function reflectionText(failure: Failure, context: ReflectionContext,
 }
 
 /**
- * The checkpoint text after a run of steps without reflection.
- * @param context - the operator's messages, the step count and the scene digest.
+ * The checkpoint text after a run of steps without reflection (`since`), or a run of steps in
+ * which the robot did not act (`idle`).
+ * @param context - the operator's messages, the step count, the length of the run and the scene digest.
  * @returns the message text.
  */
-export function checkpointText(context: Pick<ReflectionContext, 'instructions' | 'steps' | 'scene'> & { since: number }): string {
+export function checkpointText(context: Pick<ReflectionContext, 'instructions' | 'steps' | 'scene'>
+  & ({ since: number } | { idle: number })): string {
+  const idle = 'idle' in context
   return [
-    `【阶段回顾】这条指令下已运行 ${context.steps} 个程序，自上次反思以来的 ${context.since} 个程序没有工具报错。`,
+    idle
+      ? `【阶段回顾】这条指令下已运行 ${context.steps} 个程序，最近 ${context.idle} 个程序里机器人都没有动作（只在观察、计算或打印）。`
+      : `【阶段回顾】这条指令下已运行 ${context.steps} 个程序，自上次反思以来的 ${context.since} 个程序没有工具报错。`,
     ...instructionLines(context.instructions),
     ...context.scene?.length ? ['当前场景（Ego State 摘要）：', ...context.scene] : [],
     '用几句话逐条回答，再继续：',
-    ...CHECKPOINT_QUESTIONS,
+    ...idle ? IDLE_QUESTIONS : CHECKPOINT_QUESTIONS,
   ].join('\n')
 }
 
@@ -407,6 +431,10 @@ interface AgentState {
   steps: number
   /** Top-level calls since the latest reflection. */
   quiet: number
+  /** Top-level calls in a row that called no action tool. */
+  idle: number
+  /** An action tool was called since the last top-level call ended. */
+  acted: boolean
   /** Failure signatures seen under the latest message, and whether a recurrence was reflected on deeply. */
   signatures: Map<string, { deep: boolean }>
   history: string[]
@@ -459,9 +487,10 @@ export function apply(ctx: Context, config: Config) {
   const ego: EgoService = ctx.ego
   const tools = new Set(config.tools)
   const programs = new Set(config.programTools)
+  const actions = new Set(config.actionTools)
   const states = new WeakMap<Agent, AgentState>()
   const fresh = (instructions: string[] = []): AgentState => ({ instructions, reflections: 0, deep: 0, shallowSinceDeep: 0,
-    steps: 0, quiet: 0, signatures: new Map(), history: [], roots: new Set(), failed: false })
+    steps: 0, quiet: 0, idle: 0, acted: false, signatures: new Map(), history: [], roots: new Set(), failed: false })
   const detached = fresh()
   const receipts = new Map<string, JsonObject>()
   const stateOf = (agent: Agent | undefined): AgentState => {
@@ -550,7 +579,7 @@ export function apply(ctx: Context, config: Config) {
   ctx.on('tools/post-execute', async (exec: ToolExecution, result, next): Promise<PostToolDecision> => {
     const decision = await next()
     const program = programs.has(exec.name)
-    if (!tools.has(exec.name) && !program && exec.name !== REFLECT_TOOL) return decision
+    if (!tools.has(exec.name) && !program && !actions.has(exec.name) && exec.name !== REFLECT_TOOL) return decision
     const top = exec.parent === undefined
     if (program && !top) return decision
     const value = result.isError ? undefined : record(result.value)
@@ -561,7 +590,7 @@ export function apply(ctx: Context, config: Config) {
     const state = stateOf(exec.agent)
     const failure = program
       ? (result.isError && !state.roots.has(exec.rootCallId) ? failureOf(exec.name, {}, result) : undefined)
-      : failureOf(exec.name, exec.arguments, result)
+      : tools.has(exec.name) ? failureOf(exec.name, exec.arguments, result) : undefined
     if (failure !== undefined) state.failed = true
     const contexts: UserMessage[] = []
     const chosen = failure === undefined || exec.signal.aborted ? undefined : depthOf(state, failure)
@@ -574,14 +603,19 @@ export function apply(ctx: Context, config: Config) {
         message: failure.message,
       }, chosen.depth, chosen.trigger, exec.signal) }], source: { kind: 'ego-reflection' } }))
     }
+    if (actions.has(exec.name)) state.acted = true
     if (top) {
       state.steps += 1
       state.quiet += 1
-      if (state.pending === undefined && !state.failed && config.checkpointEvery > 0 && state.quiet >= config.checkpointEvery
-        && state.reflections < config.maxPerInstruction && !exec.signal.aborted) {
-        const text = checkpointText({ instructions: [...state.instructions], steps: state.steps, since: state.quiet,
-          scene: await scene(exec.signal) })
+      state.idle = state.acted ? 0 : state.idle + 1
+      state.acted = false
+      const open = state.pending === undefined && state.reflections < config.maxPerInstruction && !exec.signal.aborted
+      const idle = open && config.idleEvery > 0 && state.idle >= config.idleEvery
+      if (idle || (open && !state.failed && config.checkpointEvery > 0 && state.quiet >= config.checkpointEvery)) {
+        const run = idle ? { idle: state.idle } : { since: state.quiet }
+        const text = checkpointText({ instructions: [...state.instructions], steps: state.steps, ...run, scene: await scene(exec.signal) })
         note(state, 'checkpoint')
+        state.idle = 0
         contexts.push(createUserMessage({ content: [{ type: 'text', text }], source: { kind: 'ego-reflection' } }))
       }
       state.next = state.pending ?? (state.failed ? 'recover' : 'act')

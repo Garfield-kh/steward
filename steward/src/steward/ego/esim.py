@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import itertools
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -205,12 +206,14 @@ class Esim:
 
     # -------------------------------------------------------------- approach
     def _approach(self, es: SceneState, support: Entity, target_xy: tuple[float, float], height: float,
-                  exclude: set[str], load: Entity | None = None) -> dict:
+                  exclude: set[str], load: Entity | None = None,
+                  heading_issue: Callable[[float], str | None] | None = None) -> dict:
         """Choose the support side to dock at; return path, dock pose and reach, or raise.
 
         With ``load`` (a floor-standing object about to be picked) a side is only accepted when the
         robot can still turn at the pre-dock pose while carrying the load in front of it, so a
-        pick never leaves the robot boxed in."""
+        pick never leaves the robot boxed in. ``heading_issue`` rejects a side by the base heading
+        docked there (a wrist turn beyond its travel), with the reason it returns."""
         sbox, _, _ = entity_box(support)
         rx, ry, _ = self._robot_xy_yaw(es)
         c, s = math.cos(sbox.yaw), math.sin(sbox.yaw)
@@ -238,6 +241,10 @@ class Esim:
             nx, ny = c * normal[0] - s * normal[1], s * normal[0] + c * normal[1]
             ex, ey = sbox.cx + c * edge[0] - s * edge[1], sbox.cy + s * edge[0] + c * edge[1]
             yaw = math.atan2(-ny, -nx)
+            issue = heading_issue(yaw) if heading_issue is not None else None
+            if issue:
+                reasons.append(f"side {normal}: {issue}")
+                continue
             # Where the nearest dock pose collides, stand farther back and reach further.
             while True:
                 dock = (ex + nx * standoff, ey + ny * standoff)
@@ -660,7 +667,17 @@ class Esim:
                 risk = 0.4
         else:
             raise PredictionError(f"{support.id} ({support.category.value}) is neither a surface nor a receptacle")
-        approach = self._approach(es, self._anchor(es, support), spot, height, {held.id})
+        turn = None
+        if params.get("yaw") is not None:
+            want, flip = float(params["yaw"]), bool(params.get("flip"))
+
+            def turn(dock_yaw: float) -> str | None:
+                try:
+                    self._wrist_for(es, held, want, dock_yaw, flip)
+                except PredictionError as exc:
+                    return str(exc)
+                return None
+        approach = self._approach(es, self._anchor(es, support), spot, height, {held.id}, heading_issue=turn)
         fragility = (held.rigid.links[0].material.value or {}).get("fragility", 0.0) if held.rigid.links[0].material else 0.0
         risk = 1.0 - (1.0 - risk) * (1.0 - 0.05 * fragility)
         plan = {**approach, "object": held.id, "support": support.id, "spot": list(spot), "lift": height,

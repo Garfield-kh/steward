@@ -17,6 +17,15 @@
       name: '@steward/dsh-ego-reflection'
       config:
         instructionMarker: '操作员任务：'
+        # A routine step after a program thinks briefly; a new instruction, a failure and every
+        # reflection think long, a deep reflection longest.
+        effort:
+          act: low
+          instruction: high
+          recover: high
+          shallow: high
+          deep: max
+          checkpoint: high
     - id: steward-tool-ego-capabilities
       name: '@steward/dsh-tool-ego-capabilities'
       config:
@@ -28,6 +37,15 @@
 - id: tools
   config:
     mode: ptc
+
+# Helper functions and variables a program declares stay in memory for the later programs of the
+# same Harness process (one console turn), so a step does not rewrite them. One program runs a
+# whole sequence of robot steps in a loop, so its deadline covers minutes of robot motion.
+- id: ptc-runtime
+  config:
+    executionMode: persistent-in-memory
+    timeoutMs: 300000
+    maxTimeoutMs: 600000
 
 # The robot perceives and acts only through ctx.ego. General computer tools inherited from
 # dsh-base would let the model run commands, read files (including simulator data holding

@@ -297,8 +297,14 @@
   config:
     provider: fork
     toolName: subagent_fork
+# == @deepseek-ai/dsh-base, patched by @steward/dsh-bundle-ego
 - id: ptc-runtime
   name: '@deepseek-ai/dsh-ptc-runtime-node'
+  config:
+    executionMode: persistent-in-memory
+    timeoutMs: 300000
+    maxTimeoutMs: 600000
+# == @deepseek-ai/dsh-base
 - id: workflow-ptc
   name: '@deepseek-ai/dsh-workflow-ptc'
   config:
@@ -413,6 +419,13 @@
   name: '@steward/dsh-ego-reflection'
   config:
     instructionMarker: 操作员任务：
+    effort:
+      act: low
+      instruction: high
+      recover: high
+      shallow: high
+      deep: max
+      checkpoint: high
 - id: steward-tool-ego-capabilities
   name: '@steward/dsh-tool-ego-capabilities'
   config:

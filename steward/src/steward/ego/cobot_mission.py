@@ -12,12 +12,14 @@ concept beyond ``frame()``.
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
 
+from steward.assets.cobot import ARM_MOUNT_X
 from steward.ego.cobot_skills import ARM_OF_GRIPPER, CobotSkills, SkillFailed, SkillStopped
 from steward.ego.estimator import EgoEstimator
 
@@ -300,9 +302,14 @@ def _extent(size, axis: int, fallback: float) -> float:
 
 
 def _arm_can_reach(skills: CobotSkills, pos: np.ndarray, arm: str = "L") -> bool:
-    """A crude gate before commanding: is this anywhere near the arm's measured workspace?"""
-    y = float(pos[1]) * (1.0 if arm == "L" else -1.0)
-    return 0.10 <= float(pos[0]) <= 0.60 and 0.02 <= y <= 0.55 and 0.55 <= float(pos[2]) <= 1.05
+    """A crude gate before commanding: is this anywhere near the arm's measured workspace? Judged
+    in the robot's frame, ahead of the arm mounts."""
+    o = skills._state().get("odometry") or {}
+    bx, by, byaw = (float(o.get(k, 0.0)) for k in ("x", "y", "yaw"))
+    dx, dy = float(pos[0]) - bx, float(pos[1]) - by
+    ahead = math.cos(byaw) * dx + math.sin(byaw) * dy - ARM_MOUNT_X
+    y = (-math.sin(byaw) * dx + math.cos(byaw) * dy) * (1.0 if arm == "L" else -1.0)
+    return 0.10 <= ahead <= 0.60 and 0.02 <= y <= 0.55 and 0.55 <= float(pos[2]) <= 1.05
 
 
 def _holding(skills: CobotSkills, grip: str) -> bool:

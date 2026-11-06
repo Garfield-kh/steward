@@ -19,6 +19,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
+from steward.assets.cobot import ARM_MOUNT_X
 from steward.assets.generators import GENERATORS
 from steward.assets.library import AssetLibrary, instantiate
 from steward.assets.preview import render_scene, render_template
@@ -549,9 +550,9 @@ def build_default_kitchen(service: AuthoringService) -> dict:
 def cobot_spec() -> dict:
     """The Cobot Magic workstation: the twin parked at a tabletop, a bowl and a plate on it.
 
-    The table's near edge sits at x = 0.40, just in front of the chassis (half-length 0.34), so
-    the twin works the band its arms can reach over the edge (measured: x 0.40-0.60 at y +-0.45,
-    strictly vertical only in the nearest part of it). The bowl and the plate stand on the same
+    The twin starts with its arm mounts at x = 0 (its chassis centre ``ARM_MOUNT_X`` behind) and
+    the table's near edge at x = 0.40, so the twin works the band its arms can reach over the edge
+    (measured: x 0.40-0.60 at y +-0.45, strictly vertical only in the nearest part of it). The bowl and the plate stand on the same
     arm's side: the errand is one arm's job, pick and place both.
     """
     return {
@@ -559,7 +560,7 @@ def cobot_spec() -> dict:
         "entities": [
             {"id": "w:room", "asset": "cobot-room", "at": {"x": 0.0, "y": 0.0}},
             {"id": "w:table-1", "asset": "cobot-table", "at": {"x": 0.85, "y": 0.0}},
-            {"id": "w:cobot-1", "asset": "cobot-magic", "at": {"x": 0.0, "y": 0.0}},
+            {"id": "w:cobot-1", "asset": "cobot-magic", "at": {"x": -ARM_MOUNT_X, "y": 0.0}},
             # Table centre is (0.85, 0); both pieces stand on the left arm's side (the mission is
             # one arm's errand), fully on the tabletop and clear of each other's footprint --
             # verified against the solver, see tests/test_cobot_table.py.
@@ -577,7 +578,7 @@ def cobot_kitchen_spec() -> dict:
     """The chores kitchen's tableware on one table the twin is parked at.
 
     The same three nesting bowls (30, 20 and 12 cm), wine glass and black mug as the chores
-    kitchen. The table's near edge sits at x = 0.38, just in front of the chassis; every piece
+    kitchen. The table's near edge sits at x = 0.38 ahead of the arm mounts (at x = 0); every piece
     stands in the strip the arms reach over that edge (measured: x 0.38-0.60, and y +-0.25 puts a
     piece in front of one arm rather than between both). The largest bowl stands on the left
     arm's line because stacking happens along that line, the other two on the arms that carry
@@ -587,7 +588,7 @@ def cobot_kitchen_spec() -> dict:
         "name": "cobot-kitchen",
         "entities": [
             {"id": "w:room", "asset": "kitchen-room", "at": {"x": 0.0, "y": 0.0}},
-            {"id": "w:cobot-1", "asset": "cobot-magic", "at": {"x": 0.0, "y": 0.0}},
+            {"id": "w:cobot-1", "asset": "cobot-magic", "at": {"x": -ARM_MOUNT_X, "y": 0.0}},
             {"id": "w:table-1", "asset": "cobot-kitchen-table", "at": {"x": 0.90, "y": 0.0}},
             # Every piece is fully on the tabletop (near edge x = 0.35) and inside the strip the
             # arms reach over it (x 0.40-0.60): a cylinder resting on one contact point tips.
@@ -690,8 +691,9 @@ def build_cobot_kitchen(service: AuthoringService) -> dict:
 # corner (0.45 m) still clears the counter's front at 2.70, and the last 0.30 m is a straight
 # drive into the working pose, which is how a real base parks against a counter.
 COBOT_ERRAND_MISSION = {
-    "drive": {"at": [2.30, 0.0, 0.0],
-              "path": [[-0.20, -1.10], [2.00, -1.10], [2.00, 0.0], [2.30, 0.0]]},
+    "drive": {"at": [2.30 - ARM_MOUNT_X, 0.0, 0.0],
+              "path": [[-0.20 - ARM_MOUNT_X, -1.10], [2.00 - ARM_MOUNT_X, -1.10], [2.00 - ARM_MOUNT_X, 0.0],
+                       [2.30 - ARM_MOUNT_X, 0.0]]},
     # The counter's top (0.90) plus the bowl's half height and the 3 cm it is released above it.
     "place": [2.80, 0.0, 0.96],
     # The counter is 15 cm taller than the table: the torso rises before the place.
@@ -703,7 +705,7 @@ COBOT_ERRAND_MISSION = {
 def cobot_errand_spec() -> dict:
     """Two stations the twin has to drive between: the dining table and a kitchen counter.
 
-    Nothing here is within reach of the other: the table's bowl is 0.46 m from the start pose,
+    Nothing here is within reach of the other: the table's bowl is 0.46 m from the arm mounts,
     the counter's drop point is 2.8 m away and 15 cm higher, so the mission can only succeed by
     carrying the bowl across the room and raising the torso.
     """
@@ -711,7 +713,7 @@ def cobot_errand_spec() -> dict:
         "name": "cobot-errand",
         "entities": [
             {"id": "w:room", "asset": "cobot-errand-room", "at": {"x": 0.0, "y": 0.0}},
-            {"id": "w:cobot-1", "asset": "cobot-magic", "at": {"x": 0.0, "y": 0.0}},
+            {"id": "w:cobot-1", "asset": "cobot-magic", "at": {"x": -ARM_MOUNT_X, "y": 0.0}},
             {"id": "w:table-1", "asset": "cobot-errand-table", "at": {"x": 0.90, "y": 0.0}},
             # The bowl stands in the same reachable band as the kitchen: 0.46 m ahead, in front of
             # the left arm, fully on the tabletop.

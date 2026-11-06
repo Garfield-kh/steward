@@ -8,7 +8,7 @@ force along its slide, which is what makes an arm pull a drawer at all.
 
 import pytest
 
-from steward.assets.cobot import cobot_magic
+from steward.assets.cobot import ARM_MOUNT_X, cobot_magic
 from steward.authoring.service import AuthoringService
 from steward.ego.cobot_skills import CobotSkills, MotionConfig
 from steward.world.sim import WorldSim
@@ -20,7 +20,7 @@ CABINET_AT = 1.2
 CABINET_YAW = 3.141592653589793
 HANDLE = [CABINET_AT - 0.27, 0.0, 0.676]
 AXIS = [-1.0, 0.0, 0.0]  # opening direction: toward the robot
-STANDOFF = 0.58          # chassis front at 0.9225, the carcass's face at 0.95
+STANDOFF = 0.58 - ARM_MOUNT_X  # the arm mounts 0.58 m from the origin, the carcass's face at 0.95
 LIFT = 0.60              # shoulders at 0.755: the wrist reaches 0.811 with the tool down
 TRAVEL = 0.18            # a real opening, and the pinch stays well inside the reachable band
 

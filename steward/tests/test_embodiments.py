@@ -7,7 +7,7 @@ import shutil
 import threading
 import types
 
-from steward.authoring.service import AuthoringService, build_cobot_kitchen
+from steward.authoring.service import COBOT_ERRAND_MISSION, AuthoringService, build_cobot_kitchen
 from steward.ego.perception import decode_rgbd
 from steward.embodiments import EMBODIMENTS, describe, embodiment_of, scenario_embodiments
 from steward.net import call
@@ -168,7 +168,7 @@ def test_the_runtime_keeper_runs_one_process_of_the_right_kind_per_robot(kitchen
         errand = started[-1]
         assert stopped[-1] is started[1], "a different mission on the same body restarts the runtime"
         assert (errand.embodiment, errand.task) == ("cobot-magic", "carry-to-counter")
-        assert errand.mission_config["drive"]["at"] == [2.3, 0.0, 0.0]
+        assert errand.mission_config["drive"]["at"] == COBOT_ERRAND_MISSION["drive"]["at"]
         assert host.ego_apis == {"w:cobot-1": errand.url}
 
         switch("phase0-shuttle")

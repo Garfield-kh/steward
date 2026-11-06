@@ -3,16 +3,17 @@
 import numpy as np
 import pytest
 
-from steward.assets.cobot import TCP_OFFSET, cobot_magic
+from steward.assets.cobot import ARM_MOUNT_X, TCP_OFFSET, cobot_magic
 from steward.assets.generators import bowl, building, dining_table, plate
 from steward.ego.cobot_skills import CobotSkills, MotionConfig
 from steward.world.sim import WorldSim
 
-# The left arm's tabletop band on the mobile twin, measured by scanning tool-down IK: the chassis
-# front is at x = 0.34, and the arm reaches x 0.38-0.60 at y +-0.25 (y = 0 sits between the arms).
+# The left arm's tabletop band on the mobile twin, measured by scanning tool-down IK: the arm
+# reaches x 0.38-0.60 ahead of its mount at y +-0.25 (y = 0 sits between the arms); the mounts
+# stand ARM_MOUNT_X ahead of the chassis centre, which is the origin here.
 TABLE_TOP = 0.75
-BOWL_AT = [0.40, 0.20, TABLE_TOP]
-PLATE_AT = [0.62, 0.20, TABLE_TOP]
+BOWL_AT = [0.40 + ARM_MOUNT_X, 0.20, TABLE_TOP]
+PLATE_AT = [0.62 + ARM_MOUNT_X, 0.20, TABLE_TOP]
 
 
 def _scene() -> dict:
@@ -24,7 +25,7 @@ def _scene() -> dict:
 
     table = dining_table(width=1.2, depth=0.9, height=TABLE_TOP).to_dict()
     table["id"] = "w:table"
-    table["pose"]["value"]["p"] = [0.92, 0.0, 0.0]
+    table["pose"]["value"]["p"] = [0.92 + ARM_MOUNT_X, 0.0, 0.0]
 
     dish = bowl().to_dict()
     dish["id"] = "w:bowl-1"

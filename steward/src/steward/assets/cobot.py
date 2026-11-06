@@ -58,6 +58,10 @@ _PIPER_FINGERS: list[dict] = [
 # Where the head (the two head cameras the mobile kitchen robot carries) sits on the chassis: a
 # mast at the front centre line, between the arm mounts, at the same height as on that robot.
 HEAD_AT = [0.16, 0.0]
+# The lift column, and with it both arm mounts, stands at the chassis front as on the real
+# machine: 0.10 m behind the front edge, so a docked robot reaches as deep into a table as the
+# mobile kitchen robot's slide does. MEASURE.
+ARM_MOUNT_X = 0.24
 
 # Grasp geometry, measured in the simulation at the open-aperture posture (see tests/test_cobot.py):
 # the pinch point sits 0.135 m along link6's +z, and the fingers separate along link6's y axis,
@@ -232,7 +236,7 @@ def cobot_magic(separation: float = 0.62, mount_height: float = 0.855) -> Entity
     # The lift carries the arms; home keeps the arms where they were before the machine had a torso.
     joints: list[Joint] = [_fixed("head_mount", "base", "head", pose([HEAD_AT[0], HEAD_AT[1], HEAD_HEIGHT_M])), Joint(
         id="lift", parent="base", child="frame", type=exact("prismatic"),
-        origin=exact(pose([0.0, 0.0, CHASSIS["height"]])), axis=exact([0.0, 0.0, 1.0]),
+        origin=exact(pose([ARM_MOUNT_X, 0.0, CHASSIS["height"]])), axis=exact([0.0, 0.0, 1.0]),
         limits=exact({"lo": LIFT_RANGE[0], "hi": LIFT_RANGE[1]}), q=exact([LIFT_HOME]), qd=exact([0.0]),
         dynamics=exact({"damping": 3000.0}),
         # A lead screw holds its height; a soft position spring sags 7 cm under the torso's weight.

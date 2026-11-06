@@ -85,7 +85,7 @@ def _host(args, run_dir: Path, start: bool = True):
                        wca_port=args.wca_port, robot_ports=ports, chat=_chat_config(args),
                        phase=args.phase, fallback_phase=LATEST_PHASE, bind_wait_s=getattr(args, "bind_wait", 0.0),
                        pause_on_perception_fault=getattr(args, "pause_on_perception_fault", False),
-                       freeze_idle=args.freeze_idle,
+                       freeze_idle=args.freeze_idle, body=getattr(args, "body", None),
                        misnames=load_misnames(args.misnames_config) if getattr(args, "misnames_config", "") else None)
     return host.start() if start else host
 
@@ -860,6 +860,9 @@ def main(argv: list[str] | None = None) -> int:
         if not in_process:
             p.add_argument("--bind-wait", type=float, default=10.0,
                            help="seconds to wait for a fixed port still held by a service that just stopped")
+            p.add_argument("--body", choices=list(EMBODIMENTS), default=None,
+                           help="the body every episode's robot gets, whatever body its scenario was built with "
+                                "(switchable from the console); default: each scenario's own")
             p.add_argument("--pause-on-perception-fault", action=argparse.BooleanOptionalAction, default=True,
                            help="pause the world when the Observer finds a gross perception fault (phantom object, "
                                 "robot inside an object) until the operator acknowledges the alert")

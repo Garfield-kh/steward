@@ -3,6 +3,7 @@ the right kind per robot as the console switches scenarios."""
 
 from __future__ import annotations
 
+import math
 import shutil
 import threading
 import types
@@ -175,3 +176,36 @@ def test_the_runtime_keeper_runs_one_process_of_the_right_kind_per_robot(kitchen
         keeper.stop()
         host.stop()
     assert set(stopped) == set(started)
+
+
+def test_any_body_takes_any_scenario_and_the_host_keeps_the_choice(kitchen_root, tmp_path) -> None:
+    host = StewardHost(kitchen_root, scenario="phase0-kitchen", body="cobot-magic", run_dir=tmp_path / "run").start()
+    try:
+        assert host.embodiments == {"w:robot-1": describe("cobot-magic")}, "the kitchen's robot, the twin's body"
+        start = next(e for e in AuthoringService(kitchen_root).load_scenario("phase0-kitchen")["sceneState"]["entities"]
+                     if e["id"] == "w:robot-1")["pose"]["value"]["p"]
+        robot = next(e for e in host.sim.world_state()["entities"] if e["id"] == "w:robot-1")
+        assert robot["category"]["value"] == "cobot-magic"
+        assert math.dist(robot["pose"]["value"]["p"][:2], start[:2]) < 1e-3, "at the scenario's start pose"
+        frame = _pump_while(host, lambda: decode_rgbd(call("GET", f"{host.robot_servers['w:robot-1'].url}/sensors/rgbd?camera=wide_camera")))
+        assert frame["camera"] == "wide_camera"
+        catalog = call("GET", f"{host.wca.url}/scenarios")
+        assert {b["id"] for b in catalog["bodies"]} == set(EMBODIMENTS) and catalog["body"] == "cobot-magic"
+        _pump_while(host, lambda: call("POST", f"{host.wca.url}/wca/episode",
+                                       {"action": "load", "scenario": "phase0-shuttle", "body": "steward-bot"}, timeout=180))
+        assert host.embodiments == {"w:robot-1": describe("steward-bot")} and host.body == "steward-bot"
+    finally:
+        host.stop()
+
+
+def test_a_body_that_does_not_fit_the_start_pose_is_refused_with_what_it_hits(kitchen_root, tmp_path) -> None:
+    from steward.embodiments import with_body
+    from steward.world.server import start_blocked
+
+    scenario = AuthoringService(kitchen_root).load_scenario("phase0-kitchen")
+    robot = next(e for e in scenario["sceneState"]["entities"] if e["id"] == "w:robot-1")
+    wall = next(e for e in scenario["sceneState"]["entities"] if e["role"] == "environment")
+    assert start_blocked(with_body(scenario, "cobot-magic")) == []
+    robot["pose"]["value"]["p"][0] = -2.9  # backed into the kitchen's west wall
+    blocked = start_blocked(with_body(scenario, "cobot-magic"))
+    assert blocked and all(wall["id"] in b and "w:robot-1" in b for b in blocked)

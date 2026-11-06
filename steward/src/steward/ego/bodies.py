@@ -12,20 +12,12 @@ import dataclasses
 
 from steward.ego.arm import Arm
 from steward.ego.runtime import RuntimeConfig
-from steward.embodiments import EMBODIMENTS
+from steward.embodiments import robot_entity
 
 
 def robot_model(body: str) -> dict:
     """The body's model as its generator builds it (the same one the scenes compile)."""
-    if body == "steward-bot":
-        from steward.assets.generators import steward_bot
-
-        return steward_bot().to_dict()
-    if body == "cobot-magic":
-        from steward.assets.cobot import cobot_magic
-
-        return cobot_magic().to_dict()
-    raise ValueError(f"unknown body {body!r}; known: {', '.join(EMBODIMENTS)}")
+    return robot_entity(body)
 
 
 def body_arm(body: str, model: dict) -> Arm | None:

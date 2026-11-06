@@ -25,13 +25,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import mujoco
+
 from steward.authoring.service import AuthoringError, AuthoringService
-from steward.embodiments import scenario_embodiments
+from steward.embodiments import EMBODIMENTS, embodiment_catalog, scenario_embodiments, with_body
 from steward.glrender import IMAGE_FORMATS
 from steward.net import NO_CONTENT, Binary, HttpError, JsonServer, call, fetch
 from steward.observer.observer import Observer
 from steward.world.console import CONSOLE_HTML, console_state
 from steward.phases import DEFAULT_PHASE, phase_catalog, phase_modules
+from steward.scene.extent import entity_body_ids
+from steward.scene.mjcf import build_mjcf
+from steward.scene.schema import SceneState
 from steward.world.chat import ChatConfig, HarnessChat
 from steward.viewloop import ViewLoop, ViewSettings, frame_response
 from steward.world.goals import evaluate as evaluate_goal
@@ -56,17 +61,39 @@ class _MainTask:
     error: BaseException | None = None
 
 
+def start_blocked(scenario: dict, tolerance: float = 0.01) -> list[str]:
+    """What a robot of ``scenario`` interpenetrates by more than ``tolerance`` at the start, from
+    the compiled scene's contacts: another body may be larger than the one the scene was built with."""
+    build = build_mjcf(SceneState.from_dict(scenario["sceneState"]), timestep=0.005)
+    model = build.compile()
+    data = mujoco.MjData(model)
+    build.apply_initial(model, data)
+    mujoco.mj_forward(model, data)
+    owner = {bid: eid for eid, names in build.names.items() for bid in entity_body_ids(model, names)}
+    robots, out = set(scenario["robots"]), []
+    for c in range(data.ncon):
+        con = data.contact[c]
+        e1, e2 = owner.get(int(model.geom_bodyid[con.geom1])), owner.get(int(model.geom_bodyid[con.geom2]))
+        if e1 != e2 and (e1 in robots or e2 in robots) and con.dist < -tolerance:
+            out.append(f"{e1} and {e2} interpenetrate by {-con.dist:.3f} m")
+    return sorted(set(out))
+
+
 class StewardHost:
     def __init__(self, root: Path | str, *, scenario: str | None = None, speed: float = 1.0, seed: int = 0,
                  run_dir: Path | None = None, wca_port: int = 0, robot_ports: dict[str, int] | None = None,
                  chat: ChatConfig | None = None, phase: str | None = None, fallback_phase: str = DEFAULT_PHASE,
                  bind_wait_s: float = 0.0, pause_on_perception_fault: bool = False, freeze_idle: bool = False,
-                 appearance: str = "flat", misnames: dict[str, str] | None = None):
+                 appearance: str = "flat", misnames: dict[str, str] | None = None, body: str | None = None):
         # ``phase`` pins the level for every episode; None: each scenario's declared level, or
         # ``fallback_phase`` for a scenario that declares none.
         phase_modules(phase or fallback_phase)
         # Names the ideal detections report instead of the true categories at a ``misnamed`` level.
         self.misnames = dict(misnames or {})
+        # The body every episode's robots get; None: the body each scenario was built with.
+        if body is not None and body not in EMBODIMENTS:
+            raise ValueError(f"unknown body {body!r}; registered: {', '.join(EMBODIMENTS)}")
+        self.body = body
         self._pinned_phase = phase
         self._fallback_phase = fallback_phase
         self.phase = phase or fallback_phase
@@ -105,11 +132,23 @@ class StewardHost:
             self.load_episode(scenario)
 
     # --------------------------------------------------------------- episodes
-    def load_episode(self, name: str) -> dict:
+    def scenario_for(self, name: str) -> dict:
+        """Scenario ``name`` as it will load: built on first use, its robots given :attr:`body`."""
         # A builtin scenario the operator picked from the catalog is built on first use, so the
-        # console offers every body's scenes without a separate build command per root.
+        # console offers every scene without a separate build command per root.
         self.authoring.ensure_scenario(name)
         scenario = self.authoring.load_scenario(name)
+        if self.body is None or set(scenario_embodiments(scenario)[r]["id"] for r in scenario["robots"]) == {self.body}:
+            return scenario
+        bodied = with_body(scenario, self.body)
+        blocked = start_blocked(bodied)
+        if blocked:
+            raise HttpError(409, f"{EMBODIMENTS[self.body]['label']} does not fit where scenario {name!r} starts its "
+                                 f"robot: {'; '.join(blocked)}")
+        return bodied
+
+    def load_episode(self, name: str) -> dict:
+        scenario = self.scenario_for(name)
         if scenario.get("phase"):
             phase_modules(scenario["phase"])  # a scenario declares the level it was built for; unknown ones fail here
         self.phase = self._pinned_phase or scenario.get("phase") or self._fallback_phase
@@ -146,6 +185,12 @@ class StewardHost:
                 self.robot_servers[rid] = server.start()
         return {"scenario": name, "robots": {rid: self.robot_servers[rid].url for rid in scenario["robots"]},
                 "task": scenario["task"]}
+
+    def set_body(self, body: str | None) -> None:
+        """The body later episodes give their robots; None: each scenario's own."""
+        if body is not None and body not in EMBODIMENTS:
+            raise HttpError(400, f"unknown body {body!r}; registered: {', '.join(EMBODIMENTS)}")
+        self.body = body
 
     def set_phase(self, level: str) -> dict:
         """Switch the running system to a phase level (module implementations), effective with the
@@ -266,10 +311,12 @@ class StewardHost:
         def episode(q, b):
             action = b.get("action")
             if action == "load":
+                if "body" in b:
+                    self.set_body(b["body"] or None)
+
                 def load() -> dict:
                     if self.before_episode_load is not None:
-                        self.authoring.ensure_scenario(b["scenario"])
-                        self.before_episode_load(self.authoring.load_scenario(b["scenario"]))
+                        self.before_episode_load(self.scenario_for(b["scenario"]))
                     result = self.load_episode(b["scenario"])
                     self.sim.start()
                     return result
@@ -368,7 +415,8 @@ class StewardHost:
             ("POST", "/scenes/render"): guard(lambda q, b: {"images": self.on_main(
                 lambda: a.render_scene_views(b["name"]))}),
             ("GET", "/scenarios"): guard(lambda q, b: {"scenarios": a.list_scenarios(),
-                                                       "catalog": a.scenario_catalog()}),
+                                                       "catalog": a.scenario_catalog(),
+                                                       "bodies": embodiment_catalog(), "body": self.body}),
             ("POST", "/scenarios/save"): guard(lambda q, b: a.save_scenario(b)),
             ("POST", "/wca/edit"): guard(lambda q, b: self.edit(b)),
             ("GET", "/wca/phase"): guard(lambda q, b: self.phase_state()),

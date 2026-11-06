@@ -7,11 +7,14 @@ the ``steward`` subcommand that runs its Ego Runtime, and the five-layer profile
 ``steward/embodiments/``. Like :mod:`steward.phases`, one entry per implementation; a body the
 registry does not know is shown by its asset id and gets no Ego Runtime.
 
-Switching bodies is never a live switch: the body is compiled into the world model, so a scenario
-with another body means a new episode and another Ego Runtime process.
+Switching bodies is never a live switch: the body is compiled into the world model, so another
+body means a new episode and another Ego Runtime process. A scenario names the body it was built
+with, but any registered body can take it (:func:`with_body`).
 """
 
 from __future__ import annotations
+
+import copy
 
 EMBODIMENTS: dict[str, dict] = {
     "steward-bot": {
@@ -78,3 +81,34 @@ def scenario_embodiments(scenario: dict) -> dict[str, dict]:
 def embodiment_catalog() -> list[dict]:
     """Every registered body with its label and description."""
     return [describe(k) for k in EMBODIMENTS]
+
+
+def robot_entity(embodiment_id: str) -> dict:
+    """A fresh scene-state entity of a registered body, as its generator builds it."""
+    if embodiment_id == "steward-bot":
+        from steward.assets.generators import steward_bot
+
+        return steward_bot().to_dict()
+    if embodiment_id == "cobot-magic":
+        from steward.assets.cobot import cobot_magic
+
+        return cobot_magic().to_dict()
+    raise ValueError(f"unknown body {embodiment_id!r}; registered: {', '.join(EMBODIMENTS)}")
+
+
+def with_body(scenario: dict, embodiment_id: str) -> dict:
+    """``scenario`` with every robot it lists given the body ``embodiment_id``: same id, same start
+    pose, the body's own model. Any body works in any scenario: what a scenario fixes is the room,
+    the objects and the task, not which robot does it."""
+    if embodiment_id not in EMBODIMENTS:
+        raise ValueError(f"unknown body {embodiment_id!r}; registered: {', '.join(EMBODIMENTS)}")
+    out = copy.deepcopy(scenario)
+    robots = set(out["robots"])
+    entities = out["sceneState"]["entities"]
+    for i, ent in enumerate(entities):
+        if ent["id"] not in robots or embodiment_of(ent) == embodiment_id:
+            continue
+        body = robot_entity(embodiment_id)
+        body.update({"id": ent["id"], "pose": copy.deepcopy(ent["pose"]), "asset": {"id": embodiment_id}})
+        entities[i] = body
+    return out

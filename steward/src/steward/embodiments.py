@@ -27,12 +27,12 @@ EMBODIMENTS: dict[str, dict] = {
         "label": "AgileX Cobot Magic 双 Piper",
         "description": "TRACER 差速底盘 + 升降柱 + 双 Piper 6-DoF 臂 + 平行爪；与 Steward 相同的头部双相机（标准焦距巡视 + 短焦工作视野）",
         "profile": "cobot-magic.yaml",
-        "ego": "cobot-ego",
-        # The twin's Ego API has no skill endpoints yet, so the scenario's scripted mission runs
-        # inside its runtime (`steward cobot-ego --task`).
-        "runs_mission": True,
-        # ...and an Ego Harness task from the console would have nothing to call.
-        "skills": False,
+        # The same Ego Runtime as the kitchen robot (`steward ego --body cobot-magic`): one Piper arm
+        # and the torso act as its planar arm (steward.ego.cobot_arm), so ESim, the skills and the
+        # Ego Harness drive it unchanged. The scripted missions stay with `steward cobot`.
+        "ego": "ego",
+        "runs_mission": False,
+        "skills": True,
     },
 }
 

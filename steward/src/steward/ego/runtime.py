@@ -26,6 +26,7 @@ from PIL import Image
 from steward.ego.perception import (box_of, decode_rgbd, match_face, resample_face, segments, top_face, top_face_array,
                                     world_up_face)
 from steward.ego.kinematics import gripper_pose
+from steward.ego.arm import Arm
 from steward.ego.esim import Esim, EsimConfig
 from steward.ego.estimator import SELF_ID, EgoEstimator
 from steward.ego import reflection
@@ -270,7 +271,9 @@ def in_view(cam: dict, intrinsics: dict, point: np.ndarray, margin: float) -> bo
 
 class EgoRuntime:
     def __init__(self, link: RobotLink, robot_model: dict, config: RuntimeConfig | None = None,
-                 out_dir: Path | None = None, segmenter: Segmenter | None = None):
+                 out_dir: Path | None = None, segmenter: Segmenter | None = None, arm: Arm | None = None):
+        """``arm`` is the body's planar arm (:mod:`steward.ego.arm`); without one the body is the
+        mobile kitchen robot, whose lift, reach slide and wrist are the planar arm itself."""
         self.link = link
         self.config = config or RuntimeConfig()
         self.estimator = EgoEstimator(robot_model=robot_model)
@@ -290,7 +293,8 @@ class EgoRuntime:
         self._still_since: float | None = None
         self._missing_cameras: frozenset[str] = frozenset()
         self.segmentation = {"frames": 0, "cached": 0, "failures": 0, "lastSeconds": None, "lastError": None}
-        self.esim = Esim(robot_model, self.config.esim)
+        self.esim = Esim(robot_model, self.config.esim, arm)
+        self.arm = self.esim.arm
         self.out_dir = out_dir
         self._lock = threading.RLock()
         self._running = False
@@ -308,7 +312,8 @@ class EgoRuntime:
         self._input_lock = threading.Lock()
         self.inputs: list[dict] = []  # Ego API requests as applied, with their world time (:meth:`apply`)
         self._alert_ids = itertools.count(1)
-        self.executor = SkillExecutor(self.link.command, self._motion_state, self._mark_held, self.config.motion,
+        self.executor = SkillExecutor(lambda cmd: self.link.command(self.arm.command(cmd)), self._motion_state,
+                                      self._mark_held, self.config.motion,
                                       shift=self._shift_track, on_error=lambda msg: self.alert(msg, "skill"),
                                       on_finish=self._skill_finished, on_release=self._released,
                                       on_begin=self._skill_begin, clock=self.link)
@@ -659,17 +664,17 @@ class EgoRuntime:
             est = self.estimator
             entities = {t.id: {"p": t.pos.tolist()} for t in est.tracks.values()}
             state = {"stamp": est.stamp, "odometry": dict(est.odometry), "joints": dict(est.joints),
-                     "gripper": dict(est.gripper), "entities": entities, "toolOffset": self.esim.tool_offset}
+                     "gripper": dict(est.gripper), "grippers": dict(est.grippers), "entities": entities}
         try:
             live = self.link.sensors()
         except Exception:  # noqa: BLE001 - the belief is still a usable answer when the body cannot be reached
-            return state
-        for key in ("stamp", "odometry", "joints", "gripper"):
+            return self.arm.virtualize(state)
+        for key in ("stamp", "odometry", "joints", "gripper", "grippers"):
             if live.get(key) is not None:
                 state[key] = live[key]
         if live.get("stamp") is not None and live["stamp"] < state["stamp"] - 1e-6:
             state["stamp"] = est.stamp  # an episode reset race: prefer the belief's own clock
-        return state
+        return self.arm.virtualize(state)
 
     def _mark_held(self, track_id: str) -> str:
         at = self.estimator.stamp
@@ -678,7 +683,7 @@ class EgoRuntime:
         except Exception:  # noqa: BLE001 - the belief's own clock is a usable second best
             pass
         with self._lock:
-            return self.estimator.mark_held(track_id, at)
+            return self.estimator.mark_held(track_id, at, gripper=self.arm.geometry.gripper)
 
     def _released(self, track_id: str, spot: list[float]) -> None:
         """A place knows where it let go; the belief is told, not left to infer it later."""
@@ -734,7 +739,9 @@ class EgoRuntime:
             "t": round(es.stamp, 3),
             "self": {"x": round(p["p"][0], 3), "y": round(p["p"][1], 3),
                      "yawDeg": round(math.degrees(yaw_from_quat(p["q"])), 1),
-                     "holding": held, "joints": {j.id: round(j.q.value[0], 3) for j in me.rigid.joints if j.q.value}},
+                     "holding": held, "joints": {k: round(v, 3) for k, v in self.arm.joints_of(
+                         {j.id: j.q.value[0] for j in me.rigid.joints if j.q.value},
+                         {"x": p["p"][0], "y": p["p"][1], "yaw": yaw_from_quat(p["q"])}).items()}},
             "objects": objects,
             "dropped": dropped,
             "currentSkill": job,
@@ -1173,7 +1180,9 @@ class EgoRuntime:
         heading = (math.cos(plan["yaw"]), math.sin(plan["yaw"]))
         backoff = math.hypot(plan["dock"][0] - plan["predock"][0], plan["dock"][1] - plan["predock"][1])
         reach = float(plan.get("reach", 0.35)) + self.esim.tool_offset
-        dock = [float(track.pos[0]) - heading[0] * reach, float(track.pos[1]) - heading[1] * reach]
+        side = self.esim.lateral  # the arm's line is that far left of the base centre
+        dock = [float(track.pos[0]) - heading[0] * reach + heading[1] * side,
+                float(track.pos[1]) - heading[1] * reach - heading[0] * side]
         predock = [dock[0] - heading[0] * backoff, dock[1] - heading[1] * backoff]
         plan.update({"targetP": [float(v) for v in track.pos], "dock": dock, "predock": predock})
         if plan.get("path"):

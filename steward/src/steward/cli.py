@@ -43,12 +43,6 @@ COBOT_ROBOT_PORT = 7440
 COBOT_MISSIONS = ("bowl-on-plate", "nest-bowls", "carry-to-counter")
 
 
-def _robot_model() -> dict:
-    from steward.assets.generators import steward_bot
-
-    return steward_bot().to_dict()
-
-
 def _tableware(ent) -> bool:
     """A movable object on the scene: everything an object that is not itself a support surface."""
     if ent.role != "object":
@@ -166,11 +160,15 @@ def _segmenter(config: str, root: str):
     return Segmenter.from_files(Path(config), cache_dir=Path(root) / "ego" / "segmentation")
 
 
-def _start_ego(robot_url: str, api_port: int, out_dir: Path, bind_wait_s: float = 0.0, segmenter=None):
+def _start_ego(robot_url: str, api_port: int, out_dir: Path, bind_wait_s: float = 0.0, segmenter=None,
+               body: str = "steward-bot"):
+    from steward.ego.bodies import body_arm, robot_model, runtime_config
     from steward.ego.runtime import EgoRuntime, RobotLink
     from steward.ego.server import ego_api
 
-    runtime = EgoRuntime(RobotLink(robot_url), _robot_model(), out_dir=out_dir, segmenter=segmenter)
+    model = robot_model(body)
+    runtime = EgoRuntime(RobotLink(robot_url), model, runtime_config(body), out_dir=out_dir, segmenter=segmenter,
+                         arm=body_arm(body, model))
     runtime.start()
     api = ego_api(runtime, port=api_port, bind_wait_s=bind_wait_s).start()
     return runtime, api
@@ -179,7 +177,7 @@ def _start_ego(robot_url: str, api_port: int, out_dir: Path, bind_wait_s: float 
 def cmd_ego(args) -> int:
     out_dir = Path(args.out_dir) if args.out_dir else Path(args.root) / "ego" / "observations"
     runtime, api = _start_ego(args.robot_url, args.api_port, out_dir, args.bind_wait,
-                              _segmenter(args.segmentation_config, args.root))
+                              _segmenter(args.segmentation_config, args.root), body=args.body)
     print(json.dumps({"egoApi": api.url, "robot": args.robot_url}), flush=True)
     if args.parent_pid:
         _exit_with_parent(args.parent_pid)
@@ -258,8 +256,8 @@ class _EgoProcess:
             cmd += ["--task", task]
         if self.mission_config:
             cmd += ["--mission-config", json.dumps(self.mission_config, ensure_ascii=False)]
-        if body["ego"] == "ego":  # only the mobile robot's runtime segments by itself
-            cmd += ["--segmentation-config", args.segmentation_config]
+        if body["ego"] == "ego":  # the shared runtime segments by itself and drives the named body
+            cmd += ["--segmentation-config", args.segmentation_config, "--body", embodiment]
         # The child writes its piped stdout in the locale encoding (GBK on Chinese Windows) unless told
         # otherwise; the reader decodes UTF-8, so a locale decode error cannot kill it and backpressure the child.
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, encoding="utf-8",
@@ -905,6 +903,8 @@ def main(argv: list[str] | None = None) -> int:
         if name == "ego":
             p.add_argument("--segmentation-config", default=str(SEGMENTATION_CONFIG),
                            help="robot-side segmenter settings, used at phase levels without world masks; '' disables it")
+            p.add_argument("--body", choices=list(EMBODIMENTS), default="steward-bot",
+                           help="the registered embodiment the runtime drives (its model, arm and motion settings)")
         if name == "cobot-ego":
             p.add_argument("--task", choices=COBOT_MISSIONS, default=None,
                            help="scripted mission the twin runs in its scene, round after round, each new "

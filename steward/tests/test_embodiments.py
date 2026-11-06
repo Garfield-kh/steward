@@ -7,7 +7,7 @@ import shutil
 import threading
 import types
 
-from steward.authoring.service import COBOT_ERRAND_MISSION, AuthoringService, build_cobot_kitchen
+from steward.authoring.service import AuthoringService, build_cobot_kitchen
 from steward.ego.perception import decode_rgbd
 from steward.embodiments import EMBODIMENTS, describe, embodiment_of, scenario_embodiments
 from steward.net import call
@@ -158,24 +158,19 @@ def test_the_runtime_keeper_runs_one_process_of_the_right_kind_per_robot(kitchen
         switch("cobot-kitchen")
         assert order == ["depart", "start"]
         assert stopped == [started[0]], "the mobile robot's runtime goes with its scenario"
-        assert (started[1].embodiment, started[1].api_port, started[1].task) == ("cobot-magic", 7420, "nest-bowls"), \
-            "the twin's runtime takes over the fixed port and the scenario's mission"
+        assert (started[1].embodiment, started[1].api_port, started[1].task) == ("cobot-magic", 7420, None), \
+            "the twin's runtime takes over the fixed port; its tasks come from the Ego Harness, as the kitchen robot's"
         assert host.ego_apis == {"w:cobot-1": started[1].url}
 
-        # Another cobot scenario is another mission with its own stations: the process is not
-        # kept, because a runtime is built around its mission and its belief.
         switch("cobot-errand")
-        errand = started[-1]
-        assert stopped[-1] is started[1], "a different mission on the same body restarts the runtime"
-        assert (errand.embodiment, errand.task) == ("cobot-magic", "carry-to-counter")
-        assert errand.mission_config["drive"]["at"] == COBOT_ERRAND_MISSION["drive"]["at"]
-        assert host.ego_apis == {"w:cobot-1": errand.url}
+        assert len(started) == 2 and stopped == [started[0]], "same robot, same body: the runtime is kept"
+        assert host.ego_apis == {"w:cobot-1": started[1].url}
 
         switch("phase0-shuttle")
-        assert stopped[-1] is errand and started[-1].embodiment == "steward-bot"
+        assert stopped[-1] is started[1] and started[-1].embodiment == "steward-bot"
 
         switch("phase0-kitchen")
-        assert len(started) == 4 and len(stopped) == 3, "same robot, same body: the runtime is kept and reboots itself"
+        assert len(started) == 3 and len(stopped) == 2, "same robot, same body: the runtime is kept and reboots itself"
     finally:
         keeper.stop()
         host.stop()

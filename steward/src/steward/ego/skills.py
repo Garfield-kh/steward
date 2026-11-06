@@ -407,17 +407,20 @@ class SkillExecutor:
         job.log.append("docked")
 
     def _gripper_xy(self) -> np.ndarray:
-        """Gripper position from the robot's own odometry and reach encoder."""
+        """Gripper position from the robot's own odometry and reach encoder, on the arm's line
+        (``armLateral`` left of the base centre)."""
         st = self._state()
         o = st["odometry"]
-        ahead = st["toolOffset"] + st["joints"]["reach"]
-        return np.array([o["x"] + ahead * math.cos(o["yaw"]), o["y"] + ahead * math.sin(o["yaw"])])
+        ahead, side = st["toolOffset"] + st["joints"]["reach"], st.get("armLateral", 0.0)
+        c, s = math.cos(o["yaw"]), math.sin(o["yaw"])
+        return np.array([o["x"] + ahead * c - side * s, o["y"] + ahead * s + side * c])
 
     def _align_lateral(self, target_xy: list[float]) -> None:
         """Shift the base sideways so the target lies on the arm's line of reach."""
-        o = self._state()["odometry"]
+        st = self._state()
+        o = st["odometry"]
         left = np.array([-math.sin(o["yaw"]), math.cos(o["yaw"])])
-        lateral = float((np.array(target_xy) - np.array([o["x"], o["y"]])) @ left)
+        lateral = float((np.array(target_xy) - np.array([o["x"], o["y"]])) @ left) - st.get("armLateral", 0.0)
         if self.config.align_min < abs(lateral) <= self.config.align_max:
             self._translate_to(o["x"] + lateral * left[0], o["y"] + lateral * left[1], o["yaw"])
 

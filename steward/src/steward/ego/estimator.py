@@ -81,7 +81,8 @@ class Track:
     bottom_seen: bool = False  # some view showed its base (not cut by the image edge or hidden)
     label: str | None = None  # a category named by the robot's agent; it outranks the classifier
     annotated_affordances: list[str] | None = None  # affordances named with it, in place of the category prior
-    held_yaw: float = 0.0  # while held: its heading relative to the base heading plus the wrist yaw
+    held_yaw: float = 0.0  # while held: its heading relative to the gripper link's heading
+    held_up: np.ndarray | None = None  # while held: the gripper-link axis that was vertical at the grasp
     carried_offset: np.ndarray | None = None  # while inside the held container: its offset from that container
     yaw_conflicts: int = 0  # views in a row at a clearly different heading from its settled one
     absent_views: list[tuple[float, float, float, float]] = field(default_factory=list)
@@ -350,13 +351,20 @@ class EgoEstimator:
     def _camera_link(self) -> str:
         return self.cameras[self.primary_camera][0]
 
+    def _grasp_link(self, gripper_link: str | None) -> str:
+        if gripper_link is not None:
+            return gripper_link
+        return next(link["id"] for link in self.robot_model["body"]["links"]
+                    if any((a if isinstance(a, str) else a.get("value")) == "grasp-point" for a in link.get("affordances", [])))
+
+    def gripper_rotation(self, gripper_link: str | None = None) -> np.ndarray:
+        """World rotation matrix of a gripper link, from the robot's own kinematics."""
+        return matrix_from_quat(self.link_pose(self._grasp_link(gripper_link))["q"])
+
     def gripper_position(self, gripper_link: str | None = None, joints: dict | None = None) -> np.ndarray:
         """Pinch point of a gripper, from the robot's own kinematics."""
         tree = self.robot_model["body"]
-        if gripper_link is None:
-            gripper_link = next(link["id"] for link in tree["links"]
-                                if any((a if isinstance(a, str) else a.get("value")) == "grasp-point"
-                                       for a in link.get("affordances", [])))
+        gripper_link = self._grasp_link(gripper_link)
         pose = self.link_pose(gripper_link, joints)
         link = next(link for link in tree["links"] if link["id"] == gripper_link)
         for affordance in link.get("affordances", []):
@@ -1339,7 +1347,9 @@ class EgoEstimator:
         closed_at = self.gripper_position(gripper) if at is None else np.asarray(at, dtype=float)
         track.held = True
         track.held_offset = track.pos - closed_at
-        track.held_yaw = wrap_angle(track.yaw - self.odometry["yaw"] - self.joints.get("wrist_yaw", 0.0))
+        rot = self.gripper_rotation(gripper)
+        track.held_yaw = wrap_angle(track.yaw - math.atan2(rot[1, 0], rot[0, 0]))
+        track.held_up = rot.T @ np.array([0.0, 0.0, 1.0])
         track.recent.clear()  # it will be put down elsewhere
         self.held_id = track_id
         return track_id
@@ -1438,8 +1448,11 @@ class EgoEstimator:
             return
         track = self.tracks[self.held_id]
         track.pos = self.gripper_position(self.held_gripper) + track.held_offset
-        track.yaw = wrap_angle(self.odometry["yaw"] + self.joints.get("wrist_yaw", 0.0) + track.held_yaw)
-        poured = abs(self.joints.get("wrist_roll", 0.0)) > self.config.poured_roll
+        rot = self.gripper_rotation(self.held_gripper)
+        track.yaw = wrap_angle(math.atan2(rot[1, 0], rot[0, 0]) + track.held_yaw)
+        # Tipped this far from how it was taken, whatever the body's wrist: what lies in it falls out.
+        up = rot @ track.held_up if track.held_up is not None else np.array([0.0, 0.0, 1.0])
+        poured = math.acos(min(1.0, max(-1.0, float(up[2])))) > self.config.poured_roll
         for content in [t for t in self.tracks.values() if t.carried]:
             if poured:
                 self._drop(content, f"poured out of {track.id}: perceived afresh where it lands")

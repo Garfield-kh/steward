@@ -268,7 +268,7 @@ def _park_both(skills: CobotSkills, log: list[str]) -> None:
 
 
 def _park(skills: CobotSkills, grip: str, log: list[str]) -> None:
-    """Take the arm out of the overhead camera's way before the next look.
+    """Take the arm out of the head cameras' view before the next look.
 
     A failed attempt leaves the hand where it gave up — typically over the plate it was lowering
     onto — so the camera sees a forearm instead of the tabletop. Parking first is what makes the

@@ -525,7 +525,7 @@ def cmd_cobot(args) -> int:
     host.attach_ego_api(robot_id, ego.url, skills=False)
 
     def sensed_frame() -> dict:
-        return decode_rgbd(sim.rgbd(robot_id, "top_camera")) if rgbd else sim.sensors(robot_id)
+        return decode_rgbd(sim.rgbd(robot_id, "wide_camera")) if rgbd else sim.sensors(robot_id)
 
     print(json.dumps({"console": f"{host.wca.url}/console", "wca": host.wca.url,
                       "robot": host.robot_servers[robot_id].url, "egoApi": ego.url,
@@ -542,14 +542,14 @@ def cmd_cobot(args) -> int:
         robot look again.
 
         Parking first is not cosmetic: a round ends with a hand over the object it just placed, and
-        the overhead camera then sees a forearm instead of the tabletop -- the next round would
+        the head cameras then see a forearm instead of the tabletop -- the next round would
         start blind. The objects' moves are world edits by the round driver, so the belief is told
         to start over rather than being left to decide on its own that they teleported."""
         from steward.assets.cobot import HOME
 
         try:
             # Command the park and let physics settle rather than waiting for a skill to converge:
-            # the point is only to get the forearms out of the overhead camera's way, and the next
+            # the point is only to get the forearms out of the head cameras' view, and the next
             # motion re-seeds its IK from the encoders anyway.
             for arm in ("L", "R"):
                 sim.command(robot_id, {"joints": dict(zip(skills.ik.joint_names(arm), HOME, strict=True))})

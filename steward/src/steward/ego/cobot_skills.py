@@ -437,7 +437,7 @@ class CobotSkills:
         self.move_to(job, arm, at, orientation or _tool_down(), line=bool(plan.get("line", False)))
 
     def park(self, job: Job, plan: dict) -> None:
-        """Return one arm to the twin's rest posture, out of the overhead camera's view.
+        """Return one arm to the twin's rest posture, out of the head cameras' view.
 
         A mission that gives up while holding something over the table leaves its own forearm in
         the camera; parking is a verb because "look again" needs a clear view first."""

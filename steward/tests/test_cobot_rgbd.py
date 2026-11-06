@@ -24,7 +24,7 @@ def rig():
     skills = CobotSkills(command=lambda cmd: sim.command("w:cobot", cmd),
                          state=lambda: sim.sensors("w:cobot"), config=MotionConfig(tick_s=0.01))
     est = EgoEstimator(robot_model=cobot_magic().to_dict())
-    frame = lambda: decode_rgbd(sim.rgbd("w:cobot", "top_camera"))  # noqa: E731
+    frame = lambda: decode_rgbd(sim.rgbd("w:cobot", "wide_camera"))  # noqa: E731
     try:
         yield sim, est, skills, frame
     finally:
@@ -40,7 +40,7 @@ def test_rgbd_frames_carry_no_labels(rig) -> None:
     sim, _, _, frame = rig
     payload = frame()
     assert set(payload) == {"camera", "rgb", "depth", "mask", "fovy", "header"}
-    assert payload["camera"] == "top_camera", "a sensor id, not a label"
+    assert payload["camera"] == "wide_camera", "a sensor id, not a label"
     assert "detections" not in payload["header"]
     assert payload["mask"].dtype == np.uint8
     assert payload["depth"].dtype == np.float32
@@ -55,8 +55,10 @@ def test_the_twin_measures_tableware_from_rgbd(rig) -> None:
         truth = np.asarray(_truth(sim, entity))
         error = float(np.linalg.norm(seen[name].pos[:2] - truth[:2]))
         assert error < 0.02, f"{name} believed {seen[name].pos} vs truth {truth} ({error*100:.1f} cm)"
-    # The table is seen but must not be mistaken for tableware.
-    assert "table" not in seen or seen["table"].existence < 0.9
+    # The head's work camera sees the whole table, which is known as a table, not as tableware.
+    table = seen["table"]
+    assert np.linalg.norm(table.pos[:2] - np.asarray(_truth(sim, "w:table"))[:2]) < 0.05
+    assert {"bowl", "plate"}.isdisjoint({s.category for s in seen.values() if s.track_id == table.track_id})
 
 
 def test_mission_runs_on_rgbd_perception(rig) -> None:

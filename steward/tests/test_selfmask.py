@@ -48,9 +48,9 @@ def _robot_pixels(sim: WorldSim, robot_id: str, sensor_id: str) -> np.ndarray:
 def test_mask_covers_the_body_it_can_see(rig) -> None:
     sim, est = rig
     est.update(sim.sensors("w:cobot"))
-    pose, sensor = sim.camera_pose("w:cobot", "top_camera")
+    pose, sensor = sim.camera_pose("w:cobot", "wide_camera")
     mask = self_pixels(est.robot_model, est.link_pose, pose, sensor["intrinsics"])
-    truth = _robot_pixels(sim, "w:cobot", "top_camera")
+    truth = _robot_pixels(sim, "w:cobot", "wide_camera")
     assert truth.sum() > 5000, "the overhead camera must see a substantial part of the twin"
     recall = float((mask & truth).sum()) / float(truth.sum())
     assert recall > 0.95, f"the mask missed {100 * (1 - recall):.1f}% of the robot"
@@ -59,7 +59,7 @@ def test_mask_covers_the_body_it_can_see(rig) -> None:
 def test_mask_does_not_swallow_the_tableware(rig) -> None:
     sim, est = rig
     est.update(sim.sensors("w:cobot"))
-    pose, sensor = sim.camera_pose("w:cobot", "top_camera")
+    pose, sensor = sim.camera_pose("w:cobot", "wide_camera")
     mask = self_pixels(est.robot_model, est.link_pose, pose, sensor["intrinsics"])
     for entity in ("w:bowl-1", "w:plate-1"):
         where = sim.world_state() and next(e for e in sim.world_state()["entities"] if e["id"] == entity)["pose"]["value"]["p"][:2]
@@ -70,7 +70,7 @@ def test_mask_does_not_swallow_the_tableware(rig) -> None:
 
 def test_mask_follows_the_arm(rig) -> None:
     sim, est = rig
-    pose, sensor = sim.camera_pose("w:cobot", "top_camera")
+    pose, sensor = sim.camera_pose("w:cobot", "wide_camera")
     est.update(sim.sensors("w:cobot"))
     before = self_pixels(est.robot_model, est.link_pose, pose, sensor["intrinsics"])
     sim.command("w:cobot", {"joints": {"L_joint2": 0.3, "L_joint3": -2.4}})
@@ -79,7 +79,7 @@ def test_mask_follows_the_arm(rig) -> None:
     after = self_pixels(est.robot_model, est.link_pose, pose, sensor["intrinsics"])
     changed = int((before ^ after).sum())
     assert changed > 2000, f"moving the arm barely changed the silhouette ({changed} px)"
-    truth = _robot_pixels(sim, "w:cobot", "top_camera")
+    truth = _robot_pixels(sim, "w:cobot", "wide_camera")
     recall = float((after & truth).sum()) / float(truth.sum())
     assert recall > 0.95, f"after the move the mask missed {100 * (1 - recall):.1f}% of the robot"
 

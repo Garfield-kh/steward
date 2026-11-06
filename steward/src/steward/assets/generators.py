@@ -393,6 +393,31 @@ def chair(seat: float = 0.46, seat_height: float = 0.46, back_height: float = 0.
     return _entity("chair", "object", "free", [link])
 
 
+HEAD_HEIGHT_M = 1.50  # head mount above the floor; the bodies' perception is tuned for this view
+
+
+def head_link(camera_pitch_deg: float = 30.0, camera_fovy_deg: float = 60.0, wide_camera: bool = True,
+              wide_pitch_deg: float = 45.0, wide_fovy_deg: float = 100.0,
+              wide_size: tuple[int, int] = (480, 360)) -> Link:
+    """The robot head both bodies carry: ``head_camera`` (survey view, 320x240) and, 5 cm below
+    it, the short-focal-length ``wide_camera`` (work view down to the robot's own front). Fixed
+    on the base, not on a lift, so what the robot sees does not depend on its working height."""
+    pitch = math.radians(camera_pitch_deg)
+    return Link(
+        id="head", name="head",
+        geometry={"visual": [primitive("box", [0.08, 0.16, 0.08], None, [0.15, 0.15, 0.15, 1.0])]},
+        inertial=exact({"mass": 0.5}),
+        sensors=[{
+            "id": "head_camera", "kind": "rgbd", "mount": pose([0.05, 0, 0], quat_from_axis_angle([0, 1, 0], pitch)),
+            "intrinsics": {"width": 320, "height": 240, "fovy": camera_fovy_deg}, "rateHz": 10,
+        }] + ([{
+            "id": "wide_camera", "kind": "rgbd",
+            "mount": pose([0.05, 0, -0.05], quat_from_axis_angle([0, 1, 0], math.radians(wide_pitch_deg))),
+            "intrinsics": {"width": wide_size[0], "height": wide_size[1], "fovy": wide_fovy_deg}, "rateHz": 10,
+        }] if wide_camera else []),
+    )
+
+
 def steward_bot(camera_pitch_deg: float = 30.0, camera_fovy_deg: float = 60.0, wide_camera: bool = True,
                 wide_pitch_deg: float = 45.0, wide_fovy_deg: float = 100.0, wide_size: tuple[int, int] = (480, 360)) -> Entity:
     """Phase 0 mobile manipulator: planar base, vertical lift, horizontal reach, a two-axis wrist
@@ -428,20 +453,7 @@ def steward_bot(camera_pitch_deg: float = 30.0, camera_fovy_deg: float = 60.0, w
         },
         inertial=exact({"mass": 60.0}),
     )
-    pitch = math.radians(camera_pitch_deg)
-    head = Link(
-        id="head", name="head",
-        geometry={"visual": [primitive("box", [0.08, 0.16, 0.08], None, [0.15, 0.15, 0.15, 1.0])]},
-        inertial=exact({"mass": 0.5}),
-        sensors=[{
-            "id": "head_camera", "kind": "rgbd", "mount": pose([0.05, 0, 0], quat_from_axis_angle([0, 1, 0], pitch)),
-            "intrinsics": {"width": 320, "height": 240, "fovy": camera_fovy_deg}, "rateHz": 10,
-        }] + ([{
-            "id": "wide_camera", "kind": "rgbd",
-            "mount": pose([0.05, 0, -0.05], quat_from_axis_angle([0, 1, 0], math.radians(wide_pitch_deg))),
-            "intrinsics": {"width": wide_size[0], "height": wide_size[1], "fovy": wide_fovy_deg}, "rateHz": 10,
-        }] if wide_camera else []),
-    )
+    head = head_link(camera_pitch_deg, camera_fovy_deg, wide_camera, wide_pitch_deg, wide_fovy_deg, wide_size)
     carriage = Link(id="carriage", name="carriage",
                     geometry={"visual": [primitive("box", [0.08, 0.16, 0.05], None, STEEL)]},
                     inertial=exact({"mass": 2.0}))
@@ -456,7 +468,7 @@ def steward_bot(camera_pitch_deg: float = 30.0, camera_fovy_deg: float = 60.0, w
                    ]},
                    inertial=exact({"mass": 0.5}), affordances=[exact("grasp-point")])
     joints = [
-        _fixed("head_mount", "base", "head", pose([0.16, 0, 1.50])),
+        _fixed("head_mount", "base", "head", pose([0.16, 0, HEAD_HEIGHT_M])),
         Joint(id="lift", parent="base", child="carriage", type=exact("prismatic"), origin=exact(pose([0.22, 0, 0])),
               axis=exact([0.0, 0.0, 1.0]), limits=exact({"lo": 0.0, "hi": 1.30}), q=exact([0.60]), qd=exact([0.0]),
               dynamics=exact({"damping": 250.0}),

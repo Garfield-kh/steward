@@ -2,15 +2,14 @@
 #
 # steward's robot embodiment = AgileX Cobot Magic. The real machine is a Mobile-ALOHA-style
 # platform: a TRACER 2.0 differential-drive chassis carrying a height-adjustable torso with four
-# Piper arms (two leader arms for teleoperation, two follower arms that autonomy uses), two wrist
-# cameras and one overhead depth camera. The twin models the autonomous half: planar base, lift,
-# the two follower arms. The same profile drives WSim and the real machine (HAL swaps the
+# Piper arms (two leader arms for teleoperation, two follower arms that autonomy uses). The twin
+# models the autonomous half: planar base, lift, the two follower arms, and a two-camera head. The same profile drives WSim and the real machine (HAL swaps the
 # backend, never the verbs). Fields marked MEASURE are placeholders pending the physical survey
 # of the agilex workstation; they are safe defaults until then. Arm kinematics are the vendored
 # URDF, not this file: third_party/piper_description/urdf/ (see PROVENANCE.md).
 
 id: cobot-magic
-display: AgileX Cobot Magic (TRACER 2.0 base + dual Piper + 3x Orbbec cameras)
+display: AgileX Cobot Magic (TRACER 2.0 base + dual Piper + two-camera head)
 
 mechanical:
   base: planar           # TRACER 2.0 differential drive: position control on x, y, yaw
@@ -20,7 +19,7 @@ mechanical:
     height_m: 0.155
     mass_kg: 30
     drive: differential
-  torso:                 # MEASURE: height-adjustable carriage carrying the arms and the top camera
+  torso:                 # MEASURE: height-adjustable carriage carrying the arms
     joint: lift          # prismatic, z
     travel_m: [0.35, 1.05]   # carriage height above the chassis top
     home_m: 0.70             # arms at 0.855 m: a hand's width above a 0.75 m table
@@ -52,35 +51,31 @@ mechanical:
   leader_arms: 2         # teleoperation only; autonomy uses the two follower arms
 
 sensors:
+  # The mobile kitchen robot's head (generators.head_link) on a mast fixed to the chassis, so both
+  # bodies perceive alike and either one can take any scenario. MEASURE: the real Orbbec mounts.
   cameras:
-    - id: top            # MEASURE: mount pose on frame/ceiling bracket
+    - id: head_camera
       kind: rgbd
-      mount_link: base
-      mount: {p: [0.0, 0.0, 1.2], q: [1, 0, 0, 0]}   # MEASURE
-      intrinsics: {width: 640, height: 480, fovy: 60}  # MEASURE: from Astra calibration
+      mount_link: head    # head fixed on the chassis at [0.16, 0, 1.50]; does not ride the lift
+      mount: {p: [0.05, 0, 0], pitch_deg: 30}
+      intrinsics: {width: 320, height: 240, fovy: 60}
       role: survey
-    - id: wrist_left
+    - id: wide_camera
       kind: rgbd
-      mount_link: left_gripper     # hand_camera_joint in URDF
-      mount: {p: [0.04, 0, 0], q: [1, 0, 0, 0]}     # MEASURE: exact from with_camera xacro
-      intrinsics: {width: 640, height: 480, fovy: 60}
-      role: work
-    - id: wrist_right
-      kind: rgbd
-      mount_link: right_gripper
-      mount: {p: [0.04, 0, 0], q: [1, 0, 0, 0]}     # MEASURE
-      intrinsics: {width: 640, height: 480, fovy: 60}
-      role: work
+      mount_link: head
+      mount: {p: [0.05, 0, -0.05], pitch_deg: 45}
+      intrinsics: {width: 480, height: 360, fovy: 100}
+      role: work          # sees both arms' workspace down to the chassis front
   visibility_contract:
-    sees_own_gripper: wrist cameras (work view); top camera (survey view)
-    near_field_blind: wrist cam dominated by own gripper -> FK-projection self-filter
+    sees_own_gripper: wide_camera (work view); head_camera (survey view) loses the hands at a tabletop pick
+    near_field_blind: arms in front of the head -> FK-projection self-filter
     invisible_materials: transparent glass (Astra structured light + SAM3 both fail; task subset avoids)
 
 self_model:
   kinematics: {source: third_party/piper_description/urdf, format: urdf, sim: mjcf-converted}
   ik: {solver: mink, note: "6-DoF; PyRoki rejects 6-DoF (YAM precedent)"}   # ASPIRE yam_real is the porting reference
   collision: primitive approximation per link (upgrade to meshes when vendored)
-  camera_fk: any-link FK chain (wrist cameras move with the arm)
+  camera_fk: any-link FK chain (head fixed on the chassis)
   actuator: position control, joint velocity limits MEASURE from Piper spec
 
 control_face:            # what EH sees; implementation per backend
@@ -96,8 +91,8 @@ execution_stack:         # all services run locally on the agilex workstation RT
 sim2real:
   real_backend: piper_sdk   # pip package, SocketCAN can0 @1Mbps; no ROS dependency
   safety: [hardware e-stop REQUIRED before any motion, "--allow-motion" software interlock, joint velocity caps]
-  calibration: [3x Astra intrinsics, hand-eye extrinsics, arm mount transforms]  # MEASURE, replaces placeholders above
-  observer_gt: apriltag + top camera
+  calibration: [head camera intrinsics, head-to-arm extrinsics, arm mount transforms]  # MEASURE, replaces placeholders above
+  observer_gt: apriltag + head camera
   wh_role: operator console; human perturbations
 
 tasks:

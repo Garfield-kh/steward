@@ -50,11 +50,9 @@ def test_compiles_and_steps() -> None:
     # Planar root (2 slides + hinge), the lift, and 2 arms x (6 revolute + 2 prismatic fingers).
     assert model.njnt == 20
     assert model.nu == 20
-    # Top camera plus one wrist camera per arm.
+    # The mobile kitchen robot's head: a survey camera and a short-focal-length work camera.
     cam_names = {mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_CAMERA, i) for i in range(model.ncam)}
-    assert any(n.endswith("top_camera") for n in cam_names)
-    assert any(n.endswith("L_wrist_camera") for n in cam_names)
-    assert any(n.endswith("R_wrist_camera") for n in cam_names)
+    assert sorted(n.rsplit("::", 1)[-1] for n in cam_names) == ["head_camera", "wide_camera"]
     # Holds the zero pose (targets default to qpos) without blowing up.
     for _ in range(200):
         mujoco.mj_step(model, data)
@@ -114,10 +112,10 @@ def test_sim_generic_joints_and_dual_gripper_grasp() -> None:
 
 def test_sim_rgbd_per_camera() -> None:
     sim = WorldSim(_cobot_scene())
-    for camera, expect in ((None, "top_camera"), ("L_wrist_camera", "L_wrist_camera")):
+    for camera, expect, shape in ((None, "head_camera", (240, 320)), ("wide_camera", "wide_camera", (360, 480))):
         blob = sim.rgbd("w:cobot", camera)
         frame = np.load(io.BytesIO(blob))
-        assert frame["rgb"].shape == (480, 640, 3)
-        assert frame["depth"].shape == (480, 640)
-        assert frame["mask"].shape == (480, 640)
+        assert frame["rgb"].shape == (*shape, 3)
+        assert frame["depth"].shape == shape
+        assert frame["mask"].shape == shape
         assert str(frame["camera"]) == expect

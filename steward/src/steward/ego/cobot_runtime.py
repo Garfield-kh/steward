@@ -1,7 +1,7 @@
 """The Cobot Magic twin's Ego Runtime as a process of its own.
 
 Everything the twin knows arrives through its robot port: encoders and gripper states, the
-overhead camera's RGB-D frames (or labelled detections at phase 0), and the effect of the joint
+head cameras' RGB-D frames (or labelled detections at phase 0), and the effect of the joint
 commands it sends. The belief, the skills and the scenario's scripted mission run here, and the
 Ego API serves the belief to the console -- the same shape as the mobile robot's
 :class:`~steward.ego.runtime.EgoRuntime`, which is what lets `steward up` put either body behind
@@ -37,7 +37,8 @@ MISSIONS: dict[str, Callable] = {
     "nest-bowls": nest_bowls,
     "carry-to-counter": carry_to_station,
 }
-SURVEY_CAMERA = "top_camera"
+# The short-focal-length head camera sees both arms' workspace on the table in front.
+SURVEY_CAMERA = "wide_camera"
 IDLE_LOOK_S = 2.0
 RESET_POLL_S = 0.5
 TELEMETRY_S = 1.0

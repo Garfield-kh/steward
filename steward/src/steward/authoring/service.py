@@ -597,7 +597,7 @@ def cobot_kitchen_spec() -> dict:
             {"id": "w:bowl-green", "asset": "bowl-green-medium", "on": "w:table-1", "offset": [-0.45, 0.38]},
             {"id": "w:bowl-blue", "asset": "bowl-blue-small", "on": "w:table-1", "offset": [-0.44, -0.28]},
             # The glass and the mug are left alone by this task: they stand on the far half, out of
-            # the arms' strip but inside the overhead camera's view.
+            # the arms' strip but inside the head cameras' view.
             {"id": "w:wine-glass", "asset": "wine-glass", "on": "w:table-1", "offset": [0.20, -0.30]},
             {"id": "w:mug", "asset": "black-mug", "on": "w:table-1", "offset": [0.20, 0.30]},
         ],
@@ -660,8 +660,8 @@ def build_cobot_kitchen(service: AuthoringService) -> dict:
     assets = {
         "kitchen-room": KITCHEN_ASSETS["kitchen-room"],
         "cobot-magic": ("cobot_magic", {}),
-        # 0.8 x 0.8 under the overhead camera's cone: the whole top has to be inside the frame,
-        # or the table never becomes a track (see assets/cobot.py's top_camera note).
+        # Small enough that the whole top is inside the work camera's frame from where the robot
+        # parks: a region cut by the image border never becomes a track.
         "cobot-kitchen-table": ("dining_table", {"width": 1.2, "depth": 1.0}),
         "bowl-red-large": KITCHEN_ASSETS["bowl-red-large"],
         "bowl-green-medium": KITCHEN_ASSETS["bowl-green-medium"],

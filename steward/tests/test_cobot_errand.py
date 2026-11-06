@@ -60,7 +60,7 @@ def test_the_counter_is_metres_away_and_higher_than_the_table(rig) -> None:
 def test_the_twin_carries_the_bowl_to_the_counter(rig) -> None:
     """Perception for the bowl, the map for the drop: the whole live path, including the drive."""
     sim, robot, skills, est = rig
-    frame = lambda: decode_rgbd(sim.rgbd(robot, "top_camera"))
+    frame = lambda: decode_rgbd(sim.rgbd(robot, "wide_camera"))
     result = carry_to_station(est, skills, frame, rgbd=True, retries=1, **COBOT_ERRAND_MISSION)
     assert result["ok"], "\n".join(result["log"])
     sim.step(150)  # let the released bowl settle

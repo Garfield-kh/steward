@@ -12,8 +12,10 @@ def ik() -> CobotIK:
 
 
 def test_arms_are_mirrored_across_the_mount_separation(ik: CobotIK) -> None:
-    left, right = ik.fk("L"), ik.fk("R")
-    # Neutral posture is identical per arm, so the arms differ only by the mount offset.
+    from steward.assets.cobot import HOME
+
+    left, right = ik.fk("L", list(HOME)), ik.fk("R", list(HOME))
+    # The same posture on either arm, so the arms differ only by the mount offset.
     assert left["p"][0] == pytest.approx(right["p"][0], abs=1e-6)
     assert left["p"][1] == pytest.approx(-right["p"][1], abs=0.01)
     assert left["p"][2] == pytest.approx(right["p"][2], abs=1e-6)
@@ -110,7 +112,9 @@ def test_tilted_tool_keeps_the_pinch_point_where_it_was_asked(ik: CobotIK) -> No
     the solver has to tilt, and before it compensated, the fingers landed ~5 cm away from the
     target while every report still read "at the target" -- a place that missed.
     """
-    pinch = [0.50, 0.10, 0.82]
+    from steward.assets.cobot import ARM_MOUNT_X
+
+    pinch = [0.50 + ARM_MOUNT_X, 0.10, 0.82]  # 0.5 m ahead of the arm mount
     wrist, tool = _wrist_for(pinch, [0.0, 1.0, 0.0, 0.0])  # tool pointing down
     joints, tilt = ik.solve_tool("L", wrist, tool, max_tilt=0.7, q_init=ik.neutral("L"))
     assert tilt > 0.0, "this pose is expected to need a tilt (otherwise the case is not exercised)"

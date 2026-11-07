@@ -55,6 +55,12 @@ class Arm:
         command for the body."""
         return cmd
 
+    def reachable(self, lift: float, reach: float, wrist_yaw: float = 0.0, wrist_roll: float = 0.0) -> bool:
+        """Whether the arm can hold its grasp point at ``lift`` and ``reach`` turned and tipped so."""
+        g = self.geometry
+        return (g.lift_min <= lift <= g.lift_max and g.reach_min <= reach <= g.reach_max
+                and abs(wrist_yaw) <= g.wrist_yaw_max and abs(wrist_roll) <= g.wrist_roll_max)
+
     def joints_of(self, joints: dict, odometry: dict) -> dict:
         """The virtual joints for encoder readings ``joints`` at ``odometry`` (planning reads the
         Ego-State's self entity this way)."""

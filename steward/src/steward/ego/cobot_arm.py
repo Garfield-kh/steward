@@ -4,8 +4,9 @@ The virtual joints place the pinch point in the robot's own frame -- ``tool_offs
 ahead of the base centre on the arm's own line (``lateral`` = the arm mount's y), ``lift`` above
 the floor -- with the tool pointing down, turned ``wrist_yaw`` about the vertical and tipped
 ``wrist_roll`` about the forward axis. A command on them is solved by inverse kinematics in the
-base frame (so odometry noise never enters the arm), at the first torso height that admits a
-solution, the current one first: the torso moves only when the arm alone cannot get there.
+base frame (so odometry noise never enters the arm), at the torso height the target ``lift``
+sets, so the torso moves as smoothly as the skill moves the pinch point; other heights are tried
+only where the arm cannot reach from that one.
 
 Encoder readings are turned back into virtual joints by forward kinematics, except that an arm
 standing within servo tolerance of the joints solved for the last command reports that command:
@@ -33,7 +34,8 @@ TOOL_DOWN = [0.0, 1.0, 0.0, 0.0]  # link6 +z (through the pinch point) along wor
 @dataclass
 class PiperArmConfig:
     arm: str = "L"  # the arm that works; the other stays parked
-    # Shoulder heights above the pinch point tried for the torso, after the current torso height.
+    # Shoulder heights above the pinch point tried for the torso: the first sets it, the others
+    # (after the current torso height) are tried only where the arm cannot reach from there.
     shoulder_above: tuple[float, ...] = (0.15, 0.25, 0.05, 0.35, -0.05)
     reach: tuple[float, float] = (0.22, 0.50)  # pinch point ahead of the arm mount, tool down
     lift: tuple[float, float] = (0.30, 1.15)  # pinch point above the floor, tool down
@@ -103,36 +105,63 @@ class PiperArm(Arm):
             if target is None:
                 if not all(n in joints for n in self.names) or "lift" not in joints:
                     raise SkillFailed("the arm's encoders have not been read yet")
-                # From the parked posture the first command starts with the tool pointing down, as
-                # the kitchen robot's wrist starts at zero: the parked tool is folded sideways.
-                target = {**self._fk(float(joints["lift"]), [float(joints[n]) for n in self.names]),
-                          "wrist_yaw": 0.0, "wrist_roll": 0.0}
+                # From the resting posture the first command starts with the tool pointing down, as
+                # the kitchen robot's wrist starts at zero, and inside the workspace: the resting arm
+                # stands folded upright, its tool sideways and above the highest working point.
+                g = self.geometry
+                here = self._fk(float(joints["lift"]), [float(joints[n]) for n in self.names])
+                target = {"lift": min(max(here["lift"], g.lift_min), g.lift_max),
+                          "reach": min(max(here["reach"], g.reach_min), g.reach_max), "wrist_yaw": 0.0, "wrist_roll": 0.0}
             target.update(wanted)
-            tcp = [self.geometry.tool_offset + target["reach"], self.geometry.lateral, target["lift"]]
-            tool = quat_mul(quat_mul(quat_from_axis_angle([0.0, 0.0, 1.0], target["wrist_yaw"]),
-                                     quat_from_axis_angle([1.0, 0.0, 0.0], target["wrist_roll"])), TOOL_DOWN)
-            wrist = pose_compose({"p": tcp, "q": tool}, pose_inverse({"p": TCP_OFFSET, "q": [1.0, 0.0, 0.0, 0.0]}))
-            seed = [float(joints[n]) for n in self.names] if all(n in joints for n in self.names) else None
-            now = float(joints["lift"]) if "lift" in joints else None
-            last: IkError | None = None
-            for torso in self._torso_heights(target["lift"], now):
-                self.ik.set_base(0.0, 0.0, 0.0, torso)
-                try:
-                    arm = self.ik.solve(self.config.arm, wrist["p"], wrist["q"], q_init=seed, orientation_tolerance=0.02)
-                except IkError as exc:
-                    last = exc
-                    continue
-                self._target, self._solved = target, (torso, arm)
-                return torso, arm
+            solved, last = self._ik(target, joints)
+            if solved is not None:
+                self._target, self._solved = target, solved
+                return solved
         raise SkillFailed(f"the {self.config.arm} arm cannot put its gripper {target['reach']:.2f} m ahead at "
                           f"{target['lift']:.2f} m height (wrist yaw {target['wrist_yaw']:.2f}, roll "
                           f"{target['wrist_roll']:.2f}) at any torso height: {last}")
 
+    def _ik(self, target: dict, joints: dict) -> tuple[tuple[float, list[float]] | None, IkError | None]:
+        """Torso height and arm joints for virtual joints ``target``, seeded from ``joints``; the
+        caller holds the lock."""
+        tcp = [self.geometry.tool_offset + target["reach"], self.geometry.lateral, target["lift"]]
+        tool = quat_mul(quat_mul(quat_from_axis_angle([0.0, 0.0, 1.0], target["wrist_yaw"]),
+                                 quat_from_axis_angle([1.0, 0.0, 0.0], target["wrist_roll"])), TOOL_DOWN)
+        wrist = pose_compose({"p": tcp, "q": tool}, pose_inverse({"p": TCP_OFFSET, "q": [1.0, 0.0, 0.0, 0.0]}))
+        # The encoders first (the solution nearest where the arm is), then the working posture: from
+        # the resting arm, folded upright and turned aside, a solve rarely finds the table.
+        seeds = ([[float(joints[n]) for n in self.names]] if all(n in joints for n in self.names) else []) + [list(HOME)]
+        now = float(joints["lift"]) if "lift" in joints else None
+        last: IkError | None = None
+        for torso in self._torso_heights(target["lift"], now):
+            self.ik.set_base(0.0, 0.0, 0.0, torso)
+            for seed in seeds:
+                try:
+                    return (torso, self.ik.solve(self.config.arm, wrist["p"], wrist["q"], q_init=seed,
+                                                 orientation_tolerance=0.02)), None
+                except IkError as exc:
+                    last = exc
+        return None, last
+
+    def reachable(self, lift: float, reach: float, wrist_yaw: float = 0.0, wrist_roll: float = 0.0) -> bool:
+        if not super().reachable(lift, reach, wrist_yaw, wrist_roll):
+            return False
+        with self._lock:
+            solved, _ = self._ik({"lift": lift, "reach": reach, "wrist_yaw": wrist_yaw, "wrist_roll": wrist_roll},
+                                 self._last.get("joints") or {})
+        return solved is not None
+
     def _torso_heights(self, lift: float, now: float | None) -> list[float]:
+        """Torso heights to try for a pinch point at ``lift``: the one the first ``shoulder_above``
+        gives, so the torso moves as smoothly as the pinch point does (a skill ramps its lift, and
+        a torso that jumped to another height while the arm holds a container flings its contents
+        out), then the current one and the other preferences."""
         lo, hi = LIFT_RANGE
-        out = [] if now is None else [min(max(now, lo), hi)]
-        for above in self.config.shoulder_above:
-            q = min(max(lift + above - CHASSIS["height"], lo), hi)
+        first = [min(max(lift + self.config.shoulder_above[0] - CHASSIS["height"], lo), hi)]
+        rest = ([] if now is None else [min(max(now, lo), hi)]) + [
+            min(max(lift + above - CHASSIS["height"], lo), hi) for above in self.config.shoulder_above[1:]]
+        out = first
+        for q in rest:
             if all(abs(q - o) > 0.02 for o in out):
                 out.append(q)
         return out

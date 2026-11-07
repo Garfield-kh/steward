@@ -71,10 +71,21 @@ TCP_OFFSET = [0.0, 0.0, 0.135]   # in the link6 frame, for either arm
 FINGER_OPEN = 0.05               # per finger, metres from closed
 FINGER_CLOSED = 0.0
 
-# A natural parked posture (joint1..joint6): the arm folds forward and slightly up, clear of the
-# table. The all-zero URDF posture is a folded singularity where IK has no useful gradient, so the
-# twin starts here instead; joints 7/8 start open.
+# A working posture (joint1..joint6): the arm folds forward and slightly up, clear of the table.
+# The all-zero URDF posture is a folded singularity where IK has no useful gradient, so solves
+# are seeded here; joints 7/8 start open. It stands in front of the head cameras, so it is not
+# where an arm rests.
 HOME = [0.0, 1.57, -1.35, 0.0, 0.0, 0.0]
+# Where an arm rests (the left arm; the right turns the other way): turned out a quarter turn and
+# folded upright over its mount, inside the chassis width, so neither head camera sees more of it
+# than the mount (measured: the arms covered 6 % of the survey camera's frame and 23 % of the work
+# camera's at HOME, none and 5 % here).
+PARK = [1.57, 0.9, -2.6, 0.0, 1.0, 0.0]
+
+
+def park(arm: str) -> list[float]:
+    """The rest posture of arm ``L`` or ``R`` (joint1..joint6)."""
+    return list(PARK) if arm == "L" else [-PARK[0], *PARK[1:]]
 
 # TRACER 2.0 platform (product sheet: 685 x 570 x 155 mm, 100 kg payload, 1.6 m/s). MEASURE:
 # only the envelope is taken from the datasheet; mass and the sim's actuator gains are tuned to
@@ -176,7 +187,7 @@ def _piper_arm(prefix: str, mount_p: list[float]) -> tuple[list[Link], list[Join
             id=f"{prefix}_{j['jid']}", parent=f"{prefix}_{j['parent']}", child=f"{prefix}_{j['child']}",
             type=exact("revolute"), origin=exact(pose(j["xyz"], _rpy_quat(j["rpy"]))),
             axis=exact([0.0, 0.0, 1.0]), limits=exact({"lo": j["lo"], "hi": j["hi"]}),
-            q=exact([HOME[index]]), qd=exact([0.0]), dynamics=exact({"damping": 60.0}),
+            q=exact([park(prefix)[index]]), qd=exact([0.0]), dynamics=exact({"damping": 60.0}),
             actuator={"kind": "position", "limits": {"effort": 100.0, "velocity": 3.0}, "gains": {"kp": 1500.0}}))
     for name, spec in _PIPER_LINKS.items():
         if name not in ("link7", "link8"):
@@ -228,7 +239,9 @@ def cobot_magic(separation: float = 0.62, mount_height: float = 0.855) -> Entity
         # 0.2-0.35 m out, so the torso must stay behind that band.
         # Kept clear of the arm mounts: plates that start at the mount face collide with the folded
         # arm (measured: the shoulder could not return to HOME, held 0.04 rad short by a contact).
-        geometry={"collision": [primitive("box", [0.12, separation + 0.55, 0.45],
+        # Between the mounts and inside the chassis width: the planner keeps the chassis footprint
+        # clear, and a plate wider than it struck walls the base was cleared to pass.
+        geometry={"collision": [primitive("box", [0.12, min(separation - 0.12, CHASSIS["width"]), 0.45],
                                           pose([-0.13, 0.0, 0.20]), ROBOT_BODY)]},
         inertial=exact({"mass": 40.0}),
     )

@@ -56,10 +56,13 @@ def _bowl(sim: WorldSim) -> list[float]:
 
 
 def test_tcp_sits_between_the_finger_bodies(rig) -> None:
-    sim, skills = rig
-    tcp = np.asarray(skills.tcp("L"))
-    left = np.asarray(sim.data.xpos[sim.model.body("w:cobot/L_link7").id])
-    right = np.asarray(sim.data.xpos[sim.model.body("w:cobot/L_link8").id])
+    sim, _ = rig
+    # The declared tool offset, applied to the true wrist pose (the encoders' noise is another
+    # test's business: tests/test_cobot_perception.py), in one locked read of the world.
+    with sim.lock:
+        tcp = np.asarray(sim.grasp_point("w:cobot", "L_link6")["p"])
+        left = np.asarray(sim.data.xpos[sim.model.body("w:cobot/L_link7").id])
+        right = np.asarray(sim.data.xpos[sim.model.body("w:cobot/L_link8").id])
     assert np.linalg.norm(tcp - (left + right) / 2) < 5e-3, "TCP must be the finger midpoint"
     assert np.linalg.norm(np.asarray(TCP_OFFSET)) == pytest.approx(0.135, abs=1e-6)
 
@@ -90,11 +93,14 @@ def test_pick_and_place_moves_the_object(rig) -> None:
 
 def test_pick_where_there_is_nothing_reports_a_failed_grasp(rig) -> None:
     sim, skills = rig
-    # Table top, midway between the bowl and the plate: reachable with a vertical tool, and both
-    # are farther than the 6 cm capture radius (computed, so a layout change cannot invalidate it).
-    empty = [(BOWL_AT[0] + PLATE_AT[0]) / 2, (BOWL_AT[1] + PLATE_AT[1]) / 2, TABLE_TOP]
-    assert min(np.hypot(empty[0] - BOWL_AT[0], empty[1] - BOWL_AT[1]),
-               np.hypot(empty[0] - PLATE_AT[0], empty[1] - PLATE_AT[1])) > 0.07
+    # Table top beside the bowl, on the arm's side away from the plate: reachable with a vertical
+    # tool, and clear of both objects' extents by more than the capture radius (computed against
+    # the World State, so a layout change cannot invalidate it).
+    empty = [BOWL_AT[0], BOWL_AT[1] - 0.22, TABLE_TOP]
+    for entity in ("w:bowl-1", "w:plate-1"):
+        obb = sim.entity_obb(entity)
+        gap = np.maximum(np.abs(np.asarray(empty) - np.asarray(obb.center))[:2] - np.asarray(obb.size)[:2] / 2, 0.0)
+        assert np.linalg.norm(gap) > 0.07, entity
     job = skills.start("pick", {"id": "r3", "plan": {"arm": "L", "at": empty}})
     done = skills.wait(job.id, timeout=90)
     assert done.state == "failed"
@@ -122,14 +128,14 @@ def test_joint_target_outside_the_urdf_range_is_refused(rig) -> None:
 
 
 def test_park_verb_returns_the_arm_to_the_rest_posture(rig) -> None:
-    from steward.assets.cobot import HOME
+    from steward.assets.cobot import park
 
     sim, skills = rig
     job = skills.start("park", {"id": "r6", "plan": {"arm": "L"}})
     done = skills.wait(job.id, timeout=90)
     assert done.state == "succeeded", f"{done.message}\n" + "\n".join(done.log)
     joints = sim.sensors("w:cobot")["joints"]
-    for name, value in zip(skills.ik.joint_names("L"), HOME, strict=True):
+    for name, value in zip(skills.ik.joint_names("L"), park("L"), strict=True):
         assert joints[name] == pytest.approx(value, abs=0.06)
 
 

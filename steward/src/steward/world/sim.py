@@ -97,6 +97,18 @@ class GraspConfig:
     handle_kd: float = 120.0
 
 
+def _at_edge(obb, point: np.ndarray, band: float, finger: float = 0.015) -> bool:
+    """Whether fingers closing at ``point`` close on an oriented box's edge: inside it no deeper than
+    ``band`` from a side face (not on something inside it), or outside it by no more than a
+    finger's thickness."""
+    local = np.abs(matrix_from_quat(obb.quat).T @ (np.asarray(point, float) - np.asarray(obb.center)))
+    half = np.asarray(obb.size) / 2
+    outside = float(np.linalg.norm(np.maximum(local - half, 0.0)))
+    if outside > 0.0:
+        return outside <= finger
+    return float(np.min(half[:2] - local[:2])) <= band
+
+
 def _under(obb, point: np.ndarray) -> bool:
     """Whether ``point`` lies over the footprint of an oriented box."""
     local = matrix_from_quat(obb.quat).T @ (np.asarray(point, float) - np.asarray(obb.center))
@@ -699,13 +711,14 @@ class WorldSim:
         return pose
 
     def _try_attach(self, rs: _RobotState, g: _GripState, gripper_link: str) -> None:
-        """Ideal grasp: attach the nearest free object within capture range that has nothing resting
-        on or in it (the top of a stack) or is a pourable container (carried with what lies in it), or else
+        """Ideal grasp: attach the nearest free object within capture range of the pinch point (inside
+        it, or that close to its box: a large object is taken by its edge) that has nothing resting on or
+        in it (the top of a stack) or is a pourable container (carried with what lies in it), or else
         grasp the nearest drawer handle."""
         grip = np.asarray(self.grasp_point(rs.entity_id, gripper_link)["p"])
         supporting = {r.b["entity"] for r in self._relations()
                       if r.type == "supported-by" and self.template.entity(r.a["entity"]).rigid.root.value == "free"}
-        best, best_d, best_top = None, self.grasp.capture_radius, -math.inf
+        best, best_d, best_top = None, math.inf, -math.inf
         for ent in self.template.entities:
             if ent.role != "object" or ent.rigid.root.value != "free":
                 continue
@@ -715,7 +728,7 @@ class WorldSim:
                 continue
             obb = entity_obb(self.model, self.data, self.build.names[ent.id])
             d = float(np.linalg.norm(np.asarray(obb.center) - grip))
-            if d > self.grasp.capture_radius:
+            if d > self.grasp.capture_radius and not _at_edge(obb, grip, self.grasp.capture_radius):
                 continue
             # Closing from above, the gripper meets the topmost object under it first (a lid before
             # the pieces in the box); elsewhere the nearest object.

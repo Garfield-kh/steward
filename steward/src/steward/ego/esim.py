@@ -38,6 +38,11 @@ from steward.scene.schema import Entity, SceneState
 @dataclass
 class EsimConfig:
     capture_radius: float = 0.05
+    edge_grasp_min_m: float = 0.25  # an object this large may be taken by an edge when its centre is out of reach
+    edge_grasp_inset: float = 0.04  # how far inside its (2-sigma shrunk) extent the edge grasp closes
+    # Take a large object by its edge even when its centre is in reach: held so, it hangs ahead of
+    # the gripper and can be set down (or poured) deeper on a surface than an arm of short reach gets.
+    edge_grasp_first: bool = False
     receipt_ttl: float = 60.0
     dock_gap: float = 0.07
     predock_backoff: float = 0.35
@@ -74,6 +79,7 @@ class EsimConfig:
     wrist_yaw_max: float = 3.1
     wrist_roll_max: float = 2.5
     pour_roll: float = 1.9
+    pour_roll_min: float = 0.6  # tipped less, the contents stay in the container
     pour_clearance: float = 0.02
     pour_spill: float = 0.25  # how far beyond the container poured contents may slide; the spot keeps that from every edge
     pour_hold_s: float = 1.5
@@ -218,22 +224,32 @@ class Esim:
         }
 
     # -------------------------------------------------------------- approach
-    def _approach(self, es: SceneState, support: Entity, target_xy: tuple[float, float], height: float,
+    def _approach(self, es: SceneState, support: Entity,
+                  target_xy: tuple[float, float] | Callable[[float], tuple[float, float]], height: float,
                   exclude: set[str], load: Entity | None = None,
                   heading_issue: Callable[[float], str | None] | None = None) -> dict:
         """Choose the support side to dock at; return path, dock pose and reach, or raise.
 
-        With ``load`` (a floor-standing object about to be picked) a side is only accepted when the
-        robot can still turn at the pre-dock pose while carrying the load in front of it, so a
-        pick never leaves the robot boxed in. ``heading_issue`` rejects a side by the base heading
-        docked there (a wrist turn beyond its travel), with the reason it returns."""
+        ``target_xy`` is where the gripper goes, or a function of the docked base heading giving it
+        (a held object taken off-centre hangs off the gripper in a direction that turns with the
+        base). With ``load`` (a floor-standing object about to be picked) a side is only accepted
+        when the robot can still turn at the pre-dock pose while carrying the load in front of it,
+        so a pick never leaves the robot boxed in. ``heading_issue`` rejects a side by the base
+        heading docked there (a wrist turn beyond its travel), with the reason it returns."""
         sbox, _, _ = entity_box(support)
         rx, ry, _ = self._robot_xy_yaw(es)
         c, s = math.cos(sbox.yaw), math.sin(sbox.yaw)
-        dx, dy = target_xy[0] - sbox.cx, target_xy[1] - sbox.cy
-        tx, ty = c * dx + s * dy, -s * dx + c * dy
-        candidates = [((sbox.hx, ty), (1.0, 0.0), sbox.hx - tx), ((-sbox.hx, ty), (-1.0, 0.0), sbox.hx + tx),
-                      ((tx, sbox.hy), (0.0, 1.0), sbox.hy - ty), ((tx, -sbox.hy), (0.0, -1.0), sbox.hy + ty)]
+        candidates = []
+        for normal in ((1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)):
+            heading = math.atan2(-(s * normal[0] + c * normal[1]), -(c * normal[0] - s * normal[1]))
+            txy = target_xy(heading) if callable(target_xy) else target_xy
+            dx, dy = txy[0] - sbox.cx, txy[1] - sbox.cy
+            tx, ty = c * dx + s * dy, -s * dx + c * dy
+            if normal[0]:
+                candidates.append(((normal[0] * sbox.hx, ty), normal, sbox.hx - normal[0] * tx, txy))
+            else:
+                candidates.append(((tx, normal[1] * sbox.hy), normal, sbox.hy - normal[1] * ty, txy))
+        target_xy = candidates[0][3]
         cfg = self.config
         obstacles_all = self._floor_obstacles(es, exclude)
         # A floor-standing load stays an obstacle for the path to it (only its own back-out ignores it).
@@ -245,7 +261,7 @@ class Esim:
         best, reasons = None, []
         if not (self.lift_min <= height <= self.lift_max):
             raise PredictionError(f"height {height:.2f} m is outside the lift range [{self.lift_min}, {self.lift_max}]")
-        for edge, normal, depth in candidates:
+        for edge, normal, depth, _ in candidates:
             # A target nearer the edge than the arm's shortest reach is worked from farther back.
             standoff = max(self.half_x + cfg.dock_gap, self.reach_min + self.tool_offset - depth)
             reach = standoff + depth - self.tool_offset
@@ -312,6 +328,27 @@ class Esim:
             hint = self._boxed_in(es, obstacles_all, carry)
             raise PredictionError("no feasible approach: " + "; ".join(reasons) + (f"; {hint}" if hint else ""))
         return best
+
+    def _grasp_points(self, es: SceneState, target: Entity, tp: list[float]) -> list[tuple[tuple[float, float], tuple[float, float]]]:
+        """Where a pick may close on ``target``: ``(xy, offset from its centre)``, its centre first,
+        then -- for an object ``edge_grasp_min_m`` or larger -- the middle of each side,
+        ``edge_grasp_inset`` inside its extent, the side nearest the robot first; with
+        ``edge_grasp_first`` the sides come before the centre."""
+        cfg = self.config
+        points = [((tp[0], tp[1]), (0.0, 0.0))]
+        box, _, _ = entity_box(target)
+        if 2 * max(box.hx, box.hy) < cfg.edge_grasp_min_m:
+            return points
+        rx, ry, _ = self._robot_xy_yaw(es)
+        sigma2 = 2 * self._sigma_xy(target)
+        c, s = math.cos(box.yaw), math.sin(box.yaw)
+        edges = []
+        for lx, ly in ((box.hx, 0.0), (-box.hx, 0.0), (0.0, box.hy), (0.0, -box.hy)):
+            scale = max(math.hypot(lx, ly) - sigma2 - cfg.edge_grasp_inset, 0.0) / math.hypot(lx, ly)
+            dx, dy = (c * lx - s * ly) * scale, (s * lx + c * ly) * scale
+            edges.append(((tp[0] + dx, tp[1] + dy), (dx, dy)))
+        edges.sort(key=lambda e: math.hypot(e[0][0] - rx, e[0][1] - ry))
+        return edges + points if cfg.edge_grasp_first else points + edges
 
     def _turn_blocked(self, obstacles: list[Box2D], xy: tuple[float, float], radius: float | None = None) -> str | None:
         """The robot turns in place at the pre-dock pose, sweeping its circumscribed circle (or the
@@ -560,6 +597,8 @@ class Esim:
             issues.append(f"path passes within {clearance:.2f} m of an obstacle")
             risk = 0.2
         plan = {"path": [list(p) for p in path], "yaw": yaw, "pathLength": path_length(path)}
+        if held is not None and self._affords(held, "pourable"):
+            plan["gentle"] = True  # a container with its contents: driven fast, they slide out
         return self._receipt(es, "navigate", params, risk, issues, plan)
 
     def _floor_obstacles(self, es: SceneState, exclude: set[str]) -> list[Box2D]:
@@ -589,6 +628,11 @@ class Esim:
         if on_floor:
             # Resting on the floor, its base is at floor level whatever the noisy height estimate says.
             tp[2] = max((target_top - target_bottom) / 2, self.lift_min)
+        elif support is not None and self._affords(support, "support-surface"):
+            # Resting on a surface, its centre is no lower than the top plus half its height: a grasp
+            # closed below that presses what it holds into the surface and tips it (an edge grasp
+            # tips a box enough to spill what lies in it).
+            tp[2] = max(tp[2], entity_box(support)[2] + (target_top - target_bottom) / 2)
         contents = self._contents(es, target)
         if self._affords(target, "pourable"):
             covering = self._covering(es, target)
@@ -597,8 +641,18 @@ class Esim:
         elif contents and self._affords(target, "receptacle"):
             raise PredictionError(f"{target.id} holds {', '.join(e.id for e in contents)}; take those out first")
         anchor = target if (on_floor or blind) else self._anchor(es, support)
-        approach = self._approach(es, anchor, (tp[0], tp[1]), tp[2], {target.id},
-                                  load=target if carried_low else None)
+        approach, grasp_offset = None, None
+        first: PredictionError | None = None
+        for xy, offset in self._grasp_points(es, target, tp):
+            try:
+                approach = self._approach(es, anchor, xy, tp[2], {target.id}, load=target if carried_low else None)
+            except PredictionError as exc:
+                first = first or exc
+                continue
+            grasp_offset = offset
+            break
+        if approach is None:
+            raise first
         sigma = math.hypot(self._sigma_xy(target), self._sigma_xy(self._self(es)))
         r = self.config.capture_radius
         p_miss = math.exp(-(r * r) / (2 * sigma * sigma)) if sigma > 0 else 0.0
@@ -642,6 +696,9 @@ class Esim:
                 "carryLift": min(self.lift_max, carry_lift), "keepReach": carried_low,
                 "captureRadius": self.config.capture_radius,
                 "gentle": self._affords(target, "pourable")}
+        if grasp_offset is not None and any(grasp_offset):
+            plan["graspOffset"] = list(grasp_offset)
+            issues.append(f"{target.id} is taken by its edge, {math.hypot(*grasp_offset):.2f} m from its centre")
         return self._receipt(es, "pick", params, risk, issues, plan)
 
     def _predict_place(self, es: SceneState, params: dict) -> dict:
@@ -694,11 +751,18 @@ class Esim:
                 except PredictionError as exc:
                     return str(exc)
                 return None
-        approach = self._approach(es, self._anchor(es, support), spot, height, {held.id}, heading_issue=turn)
+        flip = bool(params.get("flip"))
+
+        def wrist_turn(dock_yaw: float) -> float:
+            if params.get("yaw") is None:
+                return 0.0
+            return self._wrist_for(es, held, float(params["yaw"]), dock_yaw, flip) - self._arm_joints(es).get("wrist_yaw", 0.0)
+
+        approach, grip = self._grip_approach(es, self._anchor(es, support), held, spot, height, wrist_turn, flip, turn)
         fragility = (held.rigid.links[0].material.value or {}).get("fragility", 0.0) if held.rigid.links[0].material else 0.0
         risk = 1.0 - (1.0 - risk) * (1.0 - 0.05 * fragility)
-        plan = {**approach, "object": held.id, "support": support.id, "spot": list(spot), "lift": height,
-                "supportBox": {"cx": area.cx, "cy": area.cy, "yaw": area.yaw, "hx": area.hx, "hy": area.hy},
+        plan = {**approach, "object": held.id, "support": support.id, "spot": list(spot), "gripSpot": list(grip),
+                "lift": height, "supportBox": {"cx": area.cx, "cy": area.cy, "yaw": area.yaw, "hx": area.hx, "hy": area.hy},
                 "heldHalf": held_half}
         if params.get("yaw") is not None:
             plan["wristYaw"] = self._wrist_for(es, held, float(params["yaw"]), approach["yaw"], bool(params.get("flip")))
@@ -706,6 +770,34 @@ class Esim:
             plan["wristRoll"] = math.pi  # turned over about the arm axis before it is set down
         plan["gentle"] = self._affords(held, "pourable")
         return self._receipt(es, "place", params, risk, issues, plan)
+
+    def _grip_spot(self, es: SceneState, spot: tuple[float, float], dock_yaw: float, wrist_turn: float,
+                   flip: bool) -> tuple[float, float]:
+        """Where the gripper goes for the held object's centre to land on ``spot`` with the base at
+        ``dock_yaw`` and the wrist turned ``wrist_turn`` further: an object taken off-centre (a lid
+        by its edge) hangs off the gripper by an offset that turns with the base and the wrist, and
+        turning it over (``flip``) mirrors it across the arm."""
+        lx, ly, _, _, _ = self._held_relative(es)
+        ox, oy = lx - (self.tool_offset + self._arm_joints(es).get("reach", 0.0)), ly - self.lateral
+        if flip:
+            oy = -oy
+        a = dock_yaw + wrist_turn
+        return spot[0] - (math.cos(a) * ox - math.sin(a) * oy), spot[1] - (math.sin(a) * ox + math.cos(a) * oy)
+
+    def _grip_approach(self, es: SceneState, anchor: Entity, held: Entity, spot: tuple[float, float], height: float,
+                       wrist_turn: Callable[[float], float], flip: bool,
+                       heading_issue: Callable[[float], str | None] | None = None) -> tuple[dict, tuple[float, float]]:
+        """The approach that brings the held object's centre over ``spot``, and the gripper's spot
+        for it: on each side of the support, where the gripper goes for the heading docked there."""
+        def grip_at(heading: float) -> tuple[float, float]:
+            try:
+                turn = wrist_turn(heading)
+            except PredictionError:
+                turn = 0.0  # a side the wrist cannot turn at is refused by heading_issue
+            return self._grip_spot(es, spot, heading, turn, flip)
+
+        approach = self._approach(es, anchor, grip_at, height, {held.id}, heading_issue=heading_issue)
+        return approach, grip_at(approach["yaw"])
 
     def _wrist_for(self, es: SceneState, held: Entity, yaw: float, dock_yaw: float, flip: bool = False) -> float:
         """Wrist yaw that sets the held object down at heading ``yaw`` with the base at ``dock_yaw``.
@@ -741,7 +833,7 @@ class Esim:
         spot, issues = self._choose_spot(es, support, sbox, held, held_box, params.get("offset"), held_box.yaw,
                                          float(params.get("clearance", 0.015)), edge_keep=spill)
         height = top + (ht - hb) / 2 + self.config.pour_clearance
-        approach = self._approach(es, self._anchor(es, support), spot, height, {held.id})
+        approach, grip = self._grip_approach(es, self._anchor(es, support), held, spot, height, lambda _: 0.0, False)
         roll = float(params.get("roll", self.config.pour_roll))
         if not (0.3 <= abs(roll) <= self.arm.geometry.wrist_roll_max):
             raise PredictionError(f"roll {roll:.2f} rad is outside [0.3, {self.arm.geometry.wrist_roll_max}]")
@@ -751,8 +843,24 @@ class Esim:
         if height + pivot > self.lift_max:
             raise PredictionError(f"tipping {held.id} about its edge needs a lift of {height + pivot:.2f} m, "
                                   f"above {self.lift_max} m")
-        plan = {**approach, "object": held.id, "support": support.id, "spot": list(spot), "lift": height,
-                "roll": roll, "pivot": pivot, "pourS": self.config.pour_hold_s, "gentle": True}
+        # How far the wrist can tip it depends on where the arm holds it: tip as far as the whole
+        # motion (the lift rising with the tip, see the skill) stays within the arm's reach.
+        sign = 1.0 if roll >= 0 else -1.0
+
+        def tips(r: float) -> bool:
+            return all(self.arm.reachable(height + pivot * abs(math.sin(r * k / 4)), approach["reach"], 0.0, r * k / 4)
+                       for k in range(1, 5))
+
+        wanted = roll
+        while abs(roll) >= self.config.pour_roll_min and not tips(roll):
+            roll -= sign * 0.1
+        if abs(roll) < self.config.pour_roll_min:
+            raise PredictionError(f"holding {held.id} {approach['reach']:.2f} m out, the wrist cannot tip it "
+                                  f"{self.config.pour_roll_min:.1f} rad to pour; pour onto a spot nearer the edge")
+        if abs(wanted - roll) > 1e-6:
+            issues.append(f"the wrist tips {held.id} only {roll:.1f} rad here (asked {wanted:.1f})")
+        plan = {**approach, "object": held.id, "support": support.id, "spot": list(spot), "gripSpot": list(grip),
+                "lift": height, "roll": roll, "pivot": pivot, "pourS": self.config.pour_hold_s, "gentle": True}
         return self._receipt(es, "pour", params, 0.1, issues, plan)
 
     def _predict_floor_place(self, es: SceneState, held: Entity, params: dict) -> dict:
@@ -980,6 +1088,11 @@ class Esim:
                                   f"{reach:.2f} m of it")
         rx, ry, _ = self._robot_xy_yaw(es)
         margin = max(cfg.place_edge_margin + max(held_box.hx, held_box.hy), keep)
+        # How deep into a surface the held object's centre can go from a docked base: the arm's
+        # longest reach past the dock, plus how far the object hangs ahead of the gripper.
+        lx0, ly0, _, _, _ = self._held_relative(es) or (0.0, 0.0, 0.0, 0.0, 0.0)
+        hang = math.hypot(lx0 - self.tool_offset - self._arm_joints(es).get("reach", 0.0), ly0 - self.lateral)
+        deepest = self.reach_max + self.tool_offset - self.half_x - cfg.dock_gap + hang
         best, best_cost = None, math.inf
         for lx in np.arange(-sbox.hx + margin, sbox.hx - margin + 1e-9, 0.05):
             for ly in np.arange(-sbox.hy + margin, sbox.hy - margin + 1e-9, 0.05):
@@ -988,7 +1101,9 @@ class Esim:
                        < max(cfg.place_clearance, max(held_box.hx, held_box.hy) + max(o.hx, o.hy) + 0.02) for o in others):
                     continue
                 edge = min(sbox.hx - abs(lx), sbox.hy - abs(ly))
-                cost = 0.3 * math.hypot(spot[0] - rx, spot[1] - ry) - 2.0 * edge
+                # Far from the edges is safer, but only as deep as the arm reaches.
+                cost = 0.3 * math.hypot(spot[0] - rx, spot[1] - ry) - 2.0 * min(edge, deepest) \
+                    + (10.0 if edge > deepest else 0.0)
                 if cost < best_cost:
                     best, best_cost = spot, cost
         if best is None:

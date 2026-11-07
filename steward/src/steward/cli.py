@@ -543,14 +543,14 @@ def cmd_cobot(args) -> int:
         the head cameras then see a forearm instead of the tabletop -- the next round would
         start blind. The objects' moves are world edits by the round driver, so the belief is told
         to start over rather than being left to decide on its own that they teleported."""
-        from steward.assets.cobot import HOME
+        from steward.assets.cobot import park
 
         try:
             # Command the park and let physics settle rather than waiting for a skill to converge:
             # the point is only to get the forearms out of the head cameras' view, and the next
             # motion re-seeds its IK from the encoders anyway.
             for arm in ("L", "R"):
-                sim.command(robot_id, {"joints": dict(zip(skills.ik.joint_names(arm), HOME, strict=True))})
+                sim.command(robot_id, {"joints": dict(zip(skills.ik.joint_names(arm), park(arm), strict=True))})
             for entity_id, at in homes.items():
                 sim.edit_move(entity_id, {"at": {"x": at[0], "y": at[1], "z": at[2]}})
             sim.step_seconds(1.2)

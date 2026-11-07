@@ -70,7 +70,7 @@ class Track:
     last_seen: float
     existence: float = 0.5
     held: bool = False
-    held_offset: np.ndarray | None = None
+    held_offset: np.ndarray | None = None  # while held: its centre from the pinch point, in the gripper's frame
     color_counts: dict[str, float] = field(default_factory=dict)
     voxels: np.ndarray | None = None  # 1 cm voxels of every surface seen of this object (RGB-D mode)
     span: np.ndarray | None = None  # corners of each view's full-resolution box; the voxel cloud is only a sample
@@ -83,7 +83,7 @@ class Track:
     annotated_affordances: list[str] | None = None  # affordances named with it, in place of the category prior
     held_yaw: float = 0.0  # while held: its heading relative to the gripper link's heading
     held_up: np.ndarray | None = None  # while held: the gripper-link axis that was vertical at the grasp
-    carried_offset: np.ndarray | None = None  # while inside the held container: its offset from that container
+    carried_offset: np.ndarray | None = None  # while inside the held container: its offset from that container, in the gripper's frame
     yaw_conflicts: int = 0  # views in a row at a clearly different heading from its settled one
     absent_views: list[tuple[float, float, float, float]] = field(default_factory=list)
     # (t, camera x, camera y, camera yaw) of views that saw through its place since it was last observed
@@ -163,9 +163,13 @@ class EstimatorConfig:
     yaw_confirm_views: int = 3
     """Views in a row at a heading more than YAW_MOVED from a settled track's that turn the track:
     fewer are taken for detections of a neighbour lying at another heading."""
-    poured_roll: float = 1.0
-    """Wrist roll (rad) beyond which the contents of the held container have slid out: their tracks
-    are dropped, and the contents are perceived afresh where they land."""
+    lost_content_s: float = 4.0
+    """Seconds a track carried in the held container may go unseen while the container is seen
+    before it is taken to have fallen out (:meth:`EgoEstimator._drop_lost_contents`)."""
+    poured_roll: float = 0.55
+    """Tilt (rad) of the held container from how it was taken beyond which its contents have slid
+    out: their tracks are dropped, and the contents are perceived afresh where they land. Below the
+    least tip a pour uses (ESim's ``pour_roll_min``)."""
     wall_like_top: float = 1.25
     """Robot knowledge of the home: nothing but walls reaches this high, so a region topping it is
     part of a wall whatever its own classification says, and a non-wall track this tall is not real."""
@@ -357,9 +361,9 @@ class EgoEstimator:
         return next(link["id"] for link in self.robot_model["body"]["links"]
                     if any((a if isinstance(a, str) else a.get("value")) == "grasp-point" for a in link.get("affordances", [])))
 
-    def gripper_rotation(self, gripper_link: str | None = None) -> np.ndarray:
+    def gripper_rotation(self, gripper_link: str | None = None, joints: dict | None = None) -> np.ndarray:
         """World rotation matrix of a gripper link, from the robot's own kinematics."""
-        return matrix_from_quat(self.link_pose(self._grasp_link(gripper_link))["q"])
+        return matrix_from_quat(self.link_pose(self._grasp_link(gripper_link), joints)["q"])
 
     def gripper_position(self, gripper_link: str | None = None, joints: dict | None = None) -> np.ndarray:
         """Pinch point of a gripper, from the robot's own kinematics."""
@@ -412,9 +416,21 @@ class EgoEstimator:
             else:
                 matched.add(self._new_track(det, pos, yaw, sigma).id)
         self._decay_unseen(cams, matched)
+        self._drop_lost_contents(matched)
         self._merge_duplicates()
         self._follow_held()
         self.version += 1
+
+    def _drop_lost_contents(self, matched: set[str]) -> None:
+        """What was in the carried container but has not been seen in it for ``lost_content_s``
+        while the container itself is in view has fallen out on the way: it is forgotten, and
+        perceived afresh where it lies."""
+        container = self.tracks.get(self.held_id) if self.held_id else None
+        if container is None or container.id not in matched:
+            return
+        for track in [t for t in self.tracks.values() if t.carried]:
+            if self.stamp - track.last_seen > self.config.lost_content_s:
+                self._drop(track, f"no longer seen in {container.id}: fell out while it was carried")
 
     def update_body(self, header: dict) -> None:
         """Follow the robot's own state (stamp, odometry, joints, gripper) from a sensor header
@@ -1140,9 +1156,13 @@ class EgoEstimator:
 
     def _gate(self, track: Track, sigma: float) -> float:
         """Association gate: measurement and track uncertainty, widened for large objects whose
-        detected box centre moves with the visible portion."""
+        detected box centre moves with the visible portion, and for what lies in the held
+        container: it slides about in there while the container is carried."""
         gate = max(self.config.gate_m, 3.0 * math.sqrt(float(np.mean(track.var)) + sigma**2),
                    self.config.size_gate_ratio * float(max(track.size[0], track.size[1])))
+        if track.carried and self.held_id in self.tracks:
+            container = self.tracks[self.held_id]
+            gate = max(gate, 0.5 * float(max(container.size[0], container.size[1])))
         return max(gate, 0.45) if track.held else gate
 
     def _size_match(self, a: float, b: float) -> bool:
@@ -1231,7 +1251,15 @@ class EgoEstimator:
         track.last_seen = self.stamp
         track.existence = min(1.0, track.existence + 0.2 * (1.0 - track.existence))
         track.absent_views.clear()
-        if track.held or track.carried:
+        if track.held:
+            return
+        if track.carried:
+            # Inside the carried container it may have slid: it follows the view, and keeps its
+            # new place in the container (in the gripper's frame, as the container moves).
+            container = self.tracks.get(self.held_id) if self.held_id else None
+            if container is not None:
+                track.pos = track.pos + 0.5 * (pos - track.pos)
+                track.carried_offset = self.gripper_rotation(self.held_gripper).T @ (track.pos - container.pos)
             return
         r = sigma**2
         prior_var = track.var + self.config.process_noise
@@ -1337,17 +1365,19 @@ class EgoEstimator:
                 raise KeyError(f"{track_id} is no longer in the ego state and nothing else is in the gripper")
             track_id = near.id
         track = self.tracks[track_id]
+        # Offsets are kept in the gripper's frame: what it holds turns with it (a lid taken by its
+        # edge swings round the hand when the base turns), and so does what lies in that.
+        rot = self.gripper_rotation(gripper)
         for other in self.tracks.values():
             if other is not track and not other.held and self.support_of(other) is track:
-                other.carried_offset = other.pos - track.pos
+                other.carried_offset = rot.T @ (other.pos - track.pos)
                 other.voxels = None
                 other.span = None
         self.held_since = max(self.stamp, float(since) if since is not None else self.stamp)
         self.held_gripper = gripper
         closed_at = self.gripper_position(gripper) if at is None else np.asarray(at, dtype=float)
         track.held = True
-        track.held_offset = track.pos - closed_at
-        rot = self.gripper_rotation(gripper)
+        track.held_offset = rot.T @ (track.pos - closed_at)
         track.held_yaw = wrap_angle(track.yaw - math.atan2(rot[1, 0], rot[0, 0]))
         track.held_up = rot.T @ np.array([0.0, 0.0, 1.0])
         track.recent.clear()  # it will be put down elsewhere
@@ -1440,15 +1470,15 @@ class EgoEstimator:
         # across the table, and a look taken after the release must recognise it there rather
         # than find a second bowl at the old place.
         if track is not None and track.held_offset is not None:
-            track.pos = self.gripper_position(self.held_gripper) + track.held_offset
+            track.pos = self.gripper_position(self.held_gripper) + self.gripper_rotation(self.held_gripper) @ track.held_offset
         self._unmark_held(track)
 
     def _follow_held(self) -> None:
         if not (self.held_id and self.held_id in self.tracks):
             return
         track = self.tracks[self.held_id]
-        track.pos = self.gripper_position(self.held_gripper) + track.held_offset
         rot = self.gripper_rotation(self.held_gripper)
+        track.pos = self.gripper_position(self.held_gripper) + rot @ track.held_offset
         track.yaw = wrap_angle(math.atan2(rot[1, 0], rot[0, 0]) + track.held_yaw)
         # Tipped this far from how it was taken, whatever the body's wrist: what lies in it falls out.
         up = rot @ track.held_up if track.held_up is not None else np.array([0.0, 0.0, 1.0])
@@ -1457,7 +1487,7 @@ class EgoEstimator:
             if poured:
                 self._drop(content, f"poured out of {track.id}: perceived afresh where it lands")
             else:
-                content.pos = track.pos + content.carried_offset
+                content.pos = track.pos + rot @ content.carried_offset
 
     def held_position(self, joints: dict | None = None):
         """Where the load is, for the given joint state: in the gripper that took it."""
@@ -1466,7 +1496,7 @@ class EgoEstimator:
         track = self.tracks[self.held_id]
         if track.held_offset is None:
             return np.asarray(track.pos, dtype=float)
-        return self.gripper_position(self.held_gripper, joints) + track.held_offset
+        return self.gripper_position(self.held_gripper, joints) + self.gripper_rotation(self.held_gripper, joints) @ track.held_offset
 
     # ------------------------------------------------------------------ output
     def support_of(self, track: Track) -> Track | None:

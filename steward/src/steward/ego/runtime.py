@@ -1181,8 +1181,9 @@ class EgoRuntime:
         backoff = math.hypot(plan["dock"][0] - plan["predock"][0], plan["dock"][1] - plan["predock"][1])
         reach = float(plan.get("reach", 0.35)) + self.esim.tool_offset
         side = self.esim.lateral  # the arm's line is that far left of the base centre
-        dock = [float(track.pos[0]) - heading[0] * reach + heading[1] * side,
-                float(track.pos[1]) - heading[1] * reach - heading[0] * side]
+        ox, oy = plan.get("graspOffset") or (0.0, 0.0)  # an edge grasp closes off the centre
+        dock = [float(track.pos[0]) + ox - heading[0] * reach + heading[1] * side,
+                float(track.pos[1]) + oy - heading[1] * reach - heading[0] * side]
         predock = [dock[0] - heading[0] * backoff, dock[1] - heading[1] * backoff]
         plan.update({"targetP": [float(v) for v in track.pos], "dock": dock, "predock": predock})
         if plan.get("path"):

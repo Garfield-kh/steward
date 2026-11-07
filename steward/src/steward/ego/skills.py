@@ -440,9 +440,11 @@ class SkillExecutor:
         return min(self.config.reach_max, float(rel @ heading) - st["toolOffset"])
 
     def _over_support(self, plan: dict) -> bool:
-        """True when the held object's footprint at the gripper lies within the support top."""
+        """True when the held object's footprint lies within the support top: the object's centre is
+        where the gripper is, offset as the plan's ``spot`` is from its ``gripSpot``."""
         box = plan["supportBox"]
-        g = self._gripper_xy()
+        grip = plan.get("gripSpot", plan["spot"])
+        g = self._gripper_xy() + np.array([plan["spot"][0] - grip[0], plan["spot"][1] - grip[1]])
         dx, dy = g[0] - box["cx"], g[1] - box["cy"]
         c, s = math.cos(-box["yaw"]), math.sin(-box["yaw"])
         lx, ly = c * dx - s * dy, s * dx + c * dy
@@ -466,6 +468,13 @@ class SkillExecutor:
             target = {"p": list(plan["targetP"])}
         if target is None:
             raise SkillFailed(f"target {plan['target']} is no longer in the ego state")
+        # A large object may be taken by its edge (``graspOffset`` from its centre, in the world).
+        ox, oy = plan.get("graspOffset") or (0.0, 0.0)
+
+        def aimed(entity: dict) -> dict:
+            return {"p": [entity["p"][0] + ox, entity["p"][1] + oy, entity["p"][2]]}
+
+        target = aimed(target)
         self._align_lateral(target["p"][:2])
         # Off the floor the planned height (its base at floor level) outranks the noisy live estimate.
         self._set_joint("lift", plan["lift"] if plan.get("support") == "floor" else target["p"][2])
@@ -486,7 +495,8 @@ class SkillExecutor:
         probes += [(0.0, 0.0, dz) for dz in self.config.grasp_probe_z]
         grasped = False
         for n, (forward, sideways, dz) in enumerate(probes):
-            latest = self._state()["entities"].get(plan["target"]) or target
+            seen = self._state()["entities"].get(plan["target"])
+            latest = aimed(seen) if seen is not None else target
             o = self._state()["odometry"]
             heading = np.array([math.cos(o["yaw"]), math.sin(o["yaw"])])
             left = np.array([-heading[1], heading[0]])
@@ -532,9 +542,10 @@ class SkillExecutor:
             self._ramp_joint("wrist_yaw", plan["wristYaw"], self.config.wrist_turn_s)
         if "wristRoll" in plan:
             self._ramp_joint("wrist_roll", plan["wristRoll"], self.config.wrist_turn_s)
-        self._align_lateral(plan["spot"])
+        grip = plan.get("gripSpot", plan["spot"])
+        self._align_lateral(grip)
         self._set_joint("lift", plan["lift"])
-        self._set_joint("reach", max(0.05, self._reach_to(plan["spot"])))
+        self._set_joint("reach", max(0.05, self._reach_to(grip)))
         if not self._over_support(plan):
             self._set_joint("reach", self.config.retract_reach)
             self._backoff(plan)
@@ -556,9 +567,10 @@ class SkillExecutor:
         """Hold the container low over the spot, tip it slowly about the arm, wait for the contents
         to fall out, set it upright again and back away still holding it."""
         self._dock(job, plan)
-        self._align_lateral(plan["spot"])
+        grip = plan.get("gripSpot", plan["spot"])
+        self._align_lateral(grip)
         self._set_joint("lift", plan["lift"])
-        self._set_joint("reach", max(0.05, self._reach_to(plan["spot"])))
+        self._set_joint("reach", max(0.05, self._reach_to(grip)))
         self._tip(plan["lift"], plan["pivot"], 0.0, plan["roll"])
         self._wait(plan["pourS"])
         job.log.append(f"poured {plan['object']} over {plan['support']}")

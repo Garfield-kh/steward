@@ -372,6 +372,31 @@ function placeLabels(ctx, labels) {
   ctx.textBaseline = 'alphabetic';
 }
 const label = (category, id) => `${NAMES[category] || category}${id ? ' ' + id.replace('w:', '') : ''}`;
+// Many objects of one kind close together (puzzle pieces in their box, poured out on a table) get
+// one label at their middle: a label each cannot stay beside its object, and the ones pushed out
+// to free spots hang over the floor as if the pieces lay there.
+const GROUP_MIN = 4, GROUP_GAP_M = 0.35;
+function groupLabels(items) {
+  const groups = [], seen = new Set();
+  for (const it of items) {
+    if (seen.has(it)) continue;
+    const members = [it]; seen.add(it);
+    for (let i = 0; i < members.length; i++) {
+      for (const o of items) {
+        if (seen.has(o) || o.kind !== it.kind) continue;
+        const m = members[i];
+        if (Math.hypot(o.top[0] - m.top[0], o.top[1] - m.top[1]) <= GROUP_GAP_M && Math.abs(o.top[2] - m.top[2]) <= 0.2) {
+          members.push(o); seen.add(o);
+        }
+      }
+    }
+    groups.push(members);
+  }
+  return groups.flatMap(g => g.length < GROUP_MIN ? g : [{
+    top: [0, 1, 2].map(k => g.reduce((s, o) => s + o.top[k], 0) / g.length),
+    text: `${NAMES[g[0].kind] || g[0].kind} ×${g.length}`, color: g[0].color,
+  }]);
+}
 
 // ----------------------------------------------------------------- overlays
 function drawWorldOverlay() {
@@ -380,10 +405,10 @@ function drawWorldOverlay() {
   const cam = panes.world.rendered;
   if (!state || !state.loaded || !cam || !$('showGtLabels').checked) return;
   const p = painter(ctx, cameraFrame(cam));
-  for (const g of state.groundTruth) {
-    if (g.role === 'environment') continue;
-    p.text([g.center[0], g.center[1], g.center[2] + g.size[2] / 2 + 0.1], label(g.category, g.id), '#cfe6ff');
-  }
+  const items = state.groundTruth.filter(g => g.role !== 'environment').map(g => ({
+    kind: g.category, top: [g.center[0], g.center[1], g.center[2] + g.size[2] / 2 + 0.1],
+    text: label(g.category, g.id), color: '#cfe6ff' }));
+  for (const it of groupLabels(items)) p.text(it.top, it.text, it.color);
   p.flush();
 }
 function drawEgoOverlay() {
@@ -395,6 +420,7 @@ function drawEgoOverlay() {
   if (!cam || !ego) return;
   const p = painter(ctx, cameraFrame(cam));
   const gtById = Object.fromEntries(state.groundTruth.map(g => [g.id, g]));
+  const items = [];
   for (const o of ego.objects) {
     if (o.category === 'wall') continue;
     if ($('showSigma').checked && o.sigma > 0) {
@@ -408,9 +434,11 @@ function drawEgoOverlay() {
       const kind = o.role || o.category;
       const tint = o.color && COLOR_NAMES[o.color] && TABLEWARE.has(kind) ? COLOR_NAMES[o.color] : '';
       const seenAs = kind !== o.category ? `（感知为${NAMES[o.category] || o.category}）` : '';
-      p.text([o.center[0], o.center[1], o.center[2] + o.size[2] / 2 + 0.1], `${tint}${label(kind, o.id)}${seenAs}${conf}`, '#ffd2a6');
+      items.push({ kind, top: [o.center[0], o.center[1], o.center[2] + o.size[2] / 2 + 0.1],
+                   text: `${tint}${label(kind, o.id)}${seenAs}${conf}`, color: '#ffd2a6' });
     }
   }
+  for (const it of groupLabels(items)) p.text(it.top, it.text, it.color);
   if ($('showError').checked) {
     ctx.setLineDash([4, 4]); ctx.lineWidth = 2; ctx.strokeStyle = '#3ecf8e';
     for (const [egoId, gtId] of Object.entries(robot.matches || {})) {

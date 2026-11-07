@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from steward.assets.cobot import HOME, LIFT_RANGE, TCP_OFFSET
+from steward.assets.cobot import LIFT_RANGE, TCP_OFFSET, park
 from steward.ego.ik import CobotIK, IkError
 from steward.math3d import pose_compose, quat_from_axis_angle, wrap_angle
 
@@ -443,7 +443,7 @@ class CobotSkills:
         the camera; parking is a verb because "look again" needs a clear view first."""
         arm = self._arm(plan)
         self.move_joints(job, {"arm": arm,
-                               "joints": dict(zip(self.ik.joint_names(arm), HOME, strict=True))})
+                               "joints": dict(zip(self.ik.joint_names(arm), park(arm), strict=True))})
 
     def move_joints(self, job: Job, plan: dict) -> None:
         """Drive one arm's six joints to the requested posture."""

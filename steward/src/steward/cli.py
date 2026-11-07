@@ -86,6 +86,7 @@ def _host(args, run_dir: Path, start: bool = True):
                        phase=args.phase, fallback_phase=LATEST_PHASE, bind_wait_s=getattr(args, "bind_wait", 0.0),
                        pause_on_perception_fault=getattr(args, "pause_on_perception_fault", False),
                        freeze_idle=args.freeze_idle, body=getattr(args, "body", None),
+                       dispatch_task=getattr(args, "dispatch_task", False),
                        misnames=load_misnames(args.misnames_config) if getattr(args, "misnames_config", "") else None)
     return host.start() if start else host
 
@@ -414,6 +415,7 @@ def cmd_up(args) -> int:
                       "robots": {rid: {"url": host.robot_servers[rid].url, "embodiment": body["id"],
                                        "egoApi": host.ego_apis.get(rid)} for rid, body in host.embodiments.items()},
                       "runDir": str(run_dir), "task": host.scenario["task"]}, ensure_ascii=False), flush=True)
+    host.dispatch_scenario_task()
 
     def pump(timeout: float) -> None:
         host.pump(timeout)
@@ -875,6 +877,9 @@ def main(argv: list[str] | None = None) -> int:
                            help="Ego API of the robot, for robot tasks from the console chat")
         if name == "up":
             p.add_argument("--api-port", type=int, default=7420)
+            p.add_argument("--dispatch-task", action=argparse.BooleanOptionalAction, default=True,
+                           help="start the robot's Ego Harness on the scenario's task, in a new conversation, "
+                                "at start and whenever the console loads or resets an episode")
         if name != "world":
             p.add_argument("--segmentation-config", default=str(SEGMENTATION_CONFIG),
                            help="robot-side segmenter settings, used at phase levels without world masks; '' disables it")

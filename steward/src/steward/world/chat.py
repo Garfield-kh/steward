@@ -127,6 +127,7 @@ class ChatConfig:
     robot_home: Path | None = None
     ego_api: str | None = None
     timeout_s: float = 900.0
+    stop_wait_s: float = 15.0  # how long a stopped turn may take to end before a new task gives up on it
 
 
 @dataclass
@@ -268,6 +269,33 @@ class HarnessChat:
                 self._report(agent, f"停止机器人动作失败：{exc}")
         return {"stopped": True}
 
+    def stop_turn(self, key: str) -> None:
+        """Stop the running turn of ``key``, if any, and return once it has ended; raises
+        ``HttpError(504)`` when it is still running after ``stop_wait_s``."""
+        agent = self.agents.get(key)
+        if agent is None:
+            raise HttpError(400, f"unknown chat target {key!r}")
+        deadline = time.monotonic() + self.config.stop_wait_s
+        stopped = None
+        while agent.busy:
+            proc = agent.proc
+            if proc is not None and proc is not stopped:
+                self.cancel(key)
+                stopped = proc
+            if time.monotonic() > deadline:
+                raise HttpError(504, f"{agent.label} did not end its running turn within {self.config.stop_wait_s:g} s")
+            time.sleep(0.05)
+
+    def assign(self, key: str, text: str) -> dict:
+        """Give ``key`` the task ``text`` in a new conversation, its running turn stopped first.
+
+        Returns:
+            What :meth:`send` returns for the task message.
+        """
+        self.stop_turn(key)
+        self.reset(key)
+        return self.send(key, text)
+
     def stop(self) -> None:
         for agent in self.agents.values():
             proc = agent.proc
@@ -335,6 +363,12 @@ class HarnessChat:
         world found), so the operator reads every alert in the chat."""
         with self._lock:
             self._add(agent, "error", text)
+
+    def post_note(self, agent: str, text: str) -> None:
+        """Add a system line to the transcript under ``agent``: something the operator should know
+        that is not a fault."""
+        with self._lock:
+            self._add(agent, "system", text)
 
     def _report(self, agent: _Agent, text: str) -> None:
         with self._lock:

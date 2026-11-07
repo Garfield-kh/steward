@@ -165,6 +165,97 @@ def test_stopping_a_robot_turn_ends_the_run_and_releases_control(tmp_path):
     assert chat.cancel("robot") == {"stopped": False}
 
 
+def _recording_dsh(tmp_path):
+    """A stand-in launcher that records each turn (resumed or not, its stdin), prints a session and,
+    for a task marked ⏳, keeps running until stopped."""
+    return _launcher(tmp_path, (
+        "import json\n"
+        "args = sys.argv[1:]\n"
+        "text = sys.stdin.buffer.read().decode('utf-8')\n"
+        "with open(os.path.join(os.environ['DSH_HOME'], 'turns'), 'a', encoding='utf-8') as fh:\n"
+        "    fh.write(json.dumps({'resumed': '--session-id' in args, 'text': text}) + '\\n')\n"
+        "print(json.dumps({'type': 'session', 'sessionId': 's-1'}), flush=True)\n"
+        "if text.endswith('⏳'):\n"
+        "    time.sleep(30)\n"))
+
+
+def _turns(home: Path) -> list[dict]:
+    return [json.loads(line) for line in (home / "turns").read_text(encoding="utf-8").splitlines()]
+
+
+def _robot_ego(calls: list) -> JsonServer:
+    return JsonServer({("POST", "/ego/control"): lambda q, b: calls.append(b["action"]) or {"owner": None},
+                       ("GET", "/ego/control"): lambda q, b: {"owner": None},
+                       ("POST", "/skill/stop"): lambda q, b: calls.append("stop") or {"stopped": None}}).start()
+
+
+def test_a_task_given_anew_stops_the_running_turn_and_starts_a_new_conversation(tmp_path):
+    robot = _home(tmp_path, "robot-1", "ego")
+    calls = []
+    ego = _robot_ego(calls)
+    try:
+        chat = HarnessChat(ChatConfig(dsh=_recording_dsh(tmp_path), cwd=tmp_path, env_file=tmp_path / ".env",
+                                      robot_home=robot, ego_api=ego.url), lambda: "unused")
+        chat.send("robot", "收拾餐桌⏳")
+        deadline = time.time() + 5
+        while chat.agents["robot"].session_id is None and time.time() < deadline:
+            time.sleep(0.02)
+        chat.assign("robot", "把拼图拼好")
+        _wait_idle(chat, "robot")
+    finally:
+        ego.stop()
+    turns = _turns(robot)
+    assert [t["resumed"] for t in turns] == [False, False], "the new task opens a new conversation"
+    assert turns[1]["text"].startswith("你是家用服务机器人") and turns[1]["text"].endswith("把拼图拼好")
+    assert calls == ["acquire", "stop", "release", "acquire", "release"]
+
+
+def test_the_host_gives_the_scenario_task_to_the_robot_whenever_an_episode_loads_or_resets(kitchen_root, tmp_path):
+    import threading
+
+    from steward.net import call
+
+    robot = _home(tmp_path, "robot-1", "ego")
+    calls = []
+    ego = _robot_ego(calls)
+
+    def over_wca(host: StewardHost, body: dict) -> dict:
+        out: dict = {}
+        worker = threading.Thread(target=lambda: out.update(call("POST", f"{host.wca.url}/wca/episode", body)))
+        worker.start()
+        while worker.is_alive():
+            host.pump(0.05)
+        _wait_idle(host.chat, "robot")
+        return out
+
+    def host(dispatch: bool) -> StewardHost:
+        config = ChatConfig(dsh=_recording_dsh(tmp_path), cwd=tmp_path, env_file=tmp_path / ".env",
+                            robot_home=robot, ego_api=ego.url)
+        return StewardHost(kitchen_root, scenario="phase0-kitchen", run_dir=tmp_path, chat=config,
+                           dispatch_task=dispatch).start()
+
+    try:
+        quiet = host(False)
+        try:
+            over_wca(quiet, {"action": "load", "scenario": "phase0-kitchen"})
+        finally:
+            quiet.stop()
+        assert not (robot / "turns").exists(), "without dispatch_task the robot waits for the operator"
+        steward = host(True)
+        try:
+            task = steward.scenario["task"]
+            over_wca(steward, {"action": "load", "scenario": "phase0-kitchen"})
+            over_wca(steward, {"action": "reset"})
+        finally:
+            steward.stop()
+    finally:
+        ego.stop()
+    turns = _turns(robot)
+    assert [t["resumed"] for t in turns] == [False, False], "each episode starts a new conversation"
+    assert all(t["text"].endswith(task) for t in turns)
+    assert calls == ["acquire", "release"] * 2
+
+
 def test_a_turn_ended_by_the_budget_reports_a_designed_stop_not_a_failure(tmp_path):
     """The wall-clock budget ends long turns by design: ``_terminate`` kills the harness process, and
     on Windows that exit is non-zero with a stderr tail holding only the node startup warning, which

@@ -15,7 +15,7 @@ Steward is an embodied robotics system built on DeepSeek Harness. See [steward.m
 ```sh
 uv sync
 .venv/bin/steward demo          # 构建厨房并运行「把杯子放到桌上」，按 World State 判定成败
-.venv/bin/steward up            # 常驻运行世界与机器人（默认循环搬运场景 phase0-shuttle）
+.venv/bin/steward up --scenario phase0-shuttle --no-dispatch-task   # 常驻运行世界与机器人，搬运交给下面的 shuttle
 open http://127.0.0.1:7400/console   # 浏览器控制台：斜视主视图、相机、地图、指标、控制
 .venv/bin/steward shuttle --api http://127.0.0.1:7420 --steps 0   # 在餐桌、柜子、餐边柜之间循环搬运
 ./scripts/check.sh              # Python 测试、DSH 插件编译与测试、组合配置快照比对
@@ -28,7 +28,7 @@ The robot has two head RGB-D cameras: `head_camera` looks ahead; the short-focal
 
 ```sh
 echo 'DEEPSEEK_API_KEY=sk-...' > .env     # 已被 Git 忽略，运行脚本自动加载
-.venv/bin/steward up                      # WCA :7400，机器人端口 :7410，Ego API :7420
+.venv/bin/steward up                      # WCA :7400，机器人端口 :7410，Ego API :7420；场景任务自动交给 Ego Harness
 .venv/bin/steward up --phase phase1-sam   # 机器人用 SAM 3.1 自行分割 RGB-D（设置在 config/segmentation.toml）
 ./scripts/setup-dsh-profiles.sh           # 构建插件，创建 ego、world、world-task profile
 ./scripts/run-ego.sh "把杯子放到桌上"       # 机器人智能体

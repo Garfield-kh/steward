@@ -84,7 +84,8 @@ class StewardHost:
                  run_dir: Path | None = None, wca_port: int = 0, robot_ports: dict[str, int] | None = None,
                  chat: ChatConfig | None = None, phase: str | None = None, fallback_phase: str = DEFAULT_PHASE,
                  bind_wait_s: float = 0.0, pause_on_perception_fault: bool = False, freeze_idle: bool = False,
-                 appearance: str = "flat", misnames: dict[str, str] | None = None, body: str | None = None):
+                 appearance: str = "flat", misnames: dict[str, str] | None = None, body: str | None = None,
+                 dispatch_task: bool = False):
         # ``phase`` pins the level for every episode; None: each scenario's declared level, or
         # ``fallback_phase`` for a scenario that declares none.
         phase_modules(phase or fallback_phase)
@@ -99,6 +100,9 @@ class StewardHost:
         self.phase = phase or fallback_phase
         self.authoring = AuthoringService(root)
         self.chat = HarnessChat(chat, lambda: self.wca.url)
+        # On: every episode the WCA loads or resets starts the robot's Ego Harness on the scenario's
+        # task (:meth:`dispatch_scenario_task`), and a turn still running is stopped before the world changes.
+        self.dispatch_task = dispatch_task
         self.speed = speed
         self.freeze_idle = freeze_idle
         self.appearance = appearance
@@ -277,6 +281,26 @@ class StewardHost:
         """Stop relaying ``robot``'s Ego-State view (its Ego Runtime is gone or being replaced)."""
         self.ego_apis.pop(robot, None)
 
+    def dispatch_scenario_task(self) -> None:
+        """With :attr:`dispatch_task` on, start the robot's Ego Harness on the loaded scenario's task
+        in a new conversation; what keeps it from starting is reported in the chat."""
+        if not self.dispatch_task or "robot" not in self.chat.agents or self.scenario is None:
+            return
+        label = self.chat.agents["robot"].label
+        task = self.scenario["task"].strip()
+        if not task:
+            self.chat.post_note("robot", f"场景 {self.scenario['name']} 没有任务，没有下发给 {label}")
+            return
+        try:
+            self.chat.assign("robot", task)
+        except HttpError as exc:
+            self.chat.post_error("robot", f"未能把场景任务下发给 {label}：{exc}")
+
+    def _stop_robot_turn(self) -> None:
+        """With :attr:`dispatch_task` on, end the robot's running turn before the world it acts in changes."""
+        if self.dispatch_task and "robot" in self.chat.agents:
+            self.chat.stop_turn("robot")
+
     def start(self) -> StewardHost:
         self.wca.start()
         self.world_view.start()
@@ -313,6 +337,7 @@ class StewardHost:
             if action == "load":
                 if "body" in b:
                     self.set_body(b["body"] or None)
+                self._stop_robot_turn()
 
                 def load() -> dict:
                     if self.before_episode_load is not None:
@@ -327,12 +352,15 @@ class StewardHost:
                     except Exception as exc:  # noqa: BLE001 - the world is up; say what is not
                         raise HttpError(500, f"the episode is loaded but its robot runtime is not: "
                                              f"{type(exc).__name__}: {exc}") from exc
+                self.dispatch_scenario_task()
                 return result
             if action == "reset":
                 sim = self._require_sim()
+                self._stop_robot_turn()
                 self.sensor_cameras.recordings.interrupt("Scene reset; start a new RGB recording")
                 self.on_main(sim.reset)
                 self.observer.reset()
+                self.dispatch_scenario_task()
                 return {"reset": True}
             raise HttpError(400, "action must be load or reset")
 

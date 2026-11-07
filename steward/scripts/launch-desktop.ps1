@@ -1,5 +1,6 @@
-﻿# Launch Steward + Ego Harness and open the control panel in the browser; the Windows counterpart
-# of launch-desktop.sh.
+﻿# Launch Steward and open the control panel in the browser; `steward up` gives the scenario's task
+# to the robot's Ego Harness, whose conversation the console shows. The Windows counterpart of
+# launch-desktop.sh.
 # Usage: launch-desktop.ps1 [scenario]
 #   With no scenario argument, shows a chooser (or uses STEWARD_SCENARIO).
 param([string]$Scenario = '')
@@ -78,13 +79,7 @@ if (-not (Test-Path -LiteralPath $DshLauncher)) { Stop-Launch '找不到 dsh。�
 
 $picked = Select-Scenario
 Write-Log "scenario=$picked"
-$scenarioFile = Join-Path $StewardRoot "var\steward\scenarios\$picked.json"
-if (-not (Test-Path -LiteralPath $scenarioFile)) { Stop-Launch "找不到场景文件：$scenarioFile" }
 Stop-Existing
-
-$task = (Get-Content -LiteralPath $scenarioFile -Raw -Encoding UTF8 | ConvertFrom-Json).task
-$prompt = & $StewardPython -c 'import sys; from steward.world.chat import ROBOT_BRIEF; sys.stdout.write(ROBOT_BRIEF + sys.argv[1])' $task
-if ($LASTEXITCODE -ne 0) { Stop-Launch '无法生成机器人任务提示。' }
 
 Import-StewardEnv
 $steward = Start-Process -FilePath $StewardExe -WorkingDirectory $StewardRoot -WindowStyle Hidden -PassThru `
@@ -93,18 +88,6 @@ $steward = Start-Process -FilePath $StewardExe -WorkingDirectory $StewardRoot -W
 Write-Log "steward_pid=$($steward.Id)"
 Wait-Http "$wcaUrl/console" '控制台'
 Wait-Http "$egoUrl/ego/state" 'Ego API'
-
-# The prompt spans lines, which a .CMD launcher cannot take as an argument: dsh reads it from stdin ("-").
-$homeDir = Join-Path $DshVar 'robot-1'
-$workspace = Join-Path $homeDir 'workspace'
-New-Item -ItemType Directory -Force -Path $workspace | Out-Null
-$promptFile = Join-Path $logDir 'ego-prompt.txt'
-[IO.File]::WriteAllText($promptFile, ($prompt -join "`n"), $Utf8)
-$env:DSH_HOME = $homeDir
-$ego = Start-Process -FilePath $DshLauncher -WorkingDirectory $workspace -WindowStyle Hidden -PassThru `
-    -ArgumentList @('--profile', 'ego', '-') -RedirectStandardInput $promptFile `
-    -RedirectStandardOutput (Join-Path $logDir 'ego.out.log') -RedirectStandardError (Join-Path $logDir 'ego.err.log')
-Write-Log "ego_pid=$($ego.Id)"
 
 Start-Process $consoleUrl
 Write-Log "opened $consoleUrl"

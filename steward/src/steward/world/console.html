@@ -229,6 +229,31 @@
 </div>
 <script>
 const $ = (id) => document.getElementById(id);
+// Text stays selectable and copyable while the console refreshes: a box is rewritten only when its
+// content changes, and not while the pointer is held in it or a selection touches it, because a
+// rewrite drops the selection.
+let pressed = null;
+document.addEventListener('pointerdown', (e) => { pressed = e.target; });
+document.addEventListener('pointerup', () => { pressed = null; });
+window.addEventListener('blur', () => { pressed = null; });
+function selecting(el) {
+  if (pressed && (el.contains(pressed) || pressed.contains(el))) return true;
+  const sel = getSelection();
+  return !!sel && !sel.isCollapsed && sel.containsNode(el, true);
+}
+const shownHtml = new WeakMap();
+function setText(el, text) {
+  if (el.textContent === text || selecting(el)) return false;
+  el.textContent = text;
+  shownHtml.delete(el);
+  return true;
+}
+function setHtml(el, html) {
+  if (shownHtml.get(el) === html || selecting(el)) return false;
+  el.innerHTML = html;
+  shownHtml.set(el, html);
+  return true;
+}
 const COLORS = { table: '#c9a46b', counter: '#8a6a4a', cabinet: '#a07850', sideboard: '#b08860', cup: '#7fd3ff',
   bowl: '#e8e8ea', plate: '#f2f2f2', 'steward-bot': '#4aa3ff', wall: '#5b6570', floor: '#1c2128', drawer: '#ccab80',
   wine_glass: '#cfeaf7', mug: '#2a2a2e', teddy_bear: '#94613a', scissors: '#b5b8bf', toy_airplane: '#f2c71a',
@@ -298,7 +323,7 @@ async function api(method, path, body) {
   if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   return data;
 }
-function showError(e) { $('error').textContent = e ? String(e.message || e) : ''; }
+function showError(e) { setText($('error'), e ? String(e.message || e) : ''); }
 
 // ------------------------------------------------------------------ camera
 const rad = (d) => d * Math.PI / 180;
@@ -468,7 +493,7 @@ async function pullFrame(name) {
     if (res.status === 204) return;
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
-      $(pane.label).textContent = `· ${data.error || `HTTP ${res.status}`}`;
+      setText($(pane.label), `· ${data.error || `HTTP ${res.status}`}`);
       return;
     }
     const index = Number(res.headers.get('X-Frame-Index'));
@@ -476,7 +501,7 @@ async function pullFrame(name) {
     pane.shown = await showBlob(img, res, pane.shown);
     pane.index = index;
     pane.rendered = { ...camera, fovy: view.fovy };
-    $(pane.label).textContent = `· ${Number(res.headers.get('X-Render-Fps')).toFixed(1)} fps · 帧 #${index % 100000}`;
+    setText($(pane.label), `· ${Number(res.headers.get('X-Render-Fps')).toFixed(1)} fps · 帧 #${index % 100000}`);
     if (name === 'ego') $('egoEmpty').style.display = 'none';
     drawOverlays();
   } finally {
@@ -528,28 +553,26 @@ document.querySelectorAll('[data-view]').forEach(btn => btn.onclick = () => {
 // ------------------------------------------------------------------ refresh
 function renderThinking() {
   const t = state.thinking && state.thinking[robotId];
-  if (!t) { $('thinkMeta').textContent = ''; $('thinkBody').textContent = '尚无思考记录'; return; }
-  if (t.error) { $('thinkMeta').textContent = '读取失败'; $('thinkBody').textContent = t.error; return; }
+  if (!t) { setText($('thinkMeta'), ''); setText($('thinkBody'), '尚无思考记录'); return; }
+  if (t.error) { setText($('thinkMeta'), '读取失败'); setText($('thinkBody'), t.error); return; }
   const entries = t.entries || [];
-  $('thinkMeta').textContent = entries.length
-    ? `　Ego Harness · 第 ${entries[entries.length - 1].step} 步${entries.some(e => e.active) ? ' · 思考中' : ''}` : '　Ego Harness';
-  const box = $('thinkBody');
-  box.innerHTML = entries.map(e => `<div class="${e.active ? 'plan-trouble' : ''}" style="margin:4px 0">${esc(e.text)}`
+  setText($('thinkMeta'), entries.length
+    ? `　Ego Harness · 第 ${entries[entries.length - 1].step} 步${entries.some(e => e.active) ? ' · 思考中' : ''}` : '　Ego Harness');
+  setHtml($('thinkBody'), entries.map(e => `<div class="${e.active ? 'plan-trouble' : ''}" style="margin:4px 0">${esc(e.text)}`
     + (e.conclusion && e.conclusion.length ? `<div style="color:var(--muted);font-size:12px">结论：调用 ${e.conclusion.map(esc).join('、')}</div>` : '')
-    + `</div>`).join('') || '尚无思考记录';
-  box.scrollTop = box.scrollHeight;
+    + `</div>`).join('') || '尚无思考记录');
 }
 
 async function refresh() {
   try {
     state = await api('GET', '/console/state');
     showError(null);
-    if (!state.loaded) { $('clock').textContent = '未加载 Episode'; return; }
+    if (!state.loaded) { setText($('clock'), '未加载 Episode'); return; }
     robotId = robotId && state.robots[robotId] ? robotId : Object.keys(state.robots)[0];
     const key = `${state.scenario}|${state.view.lookat}|${state.view.distance}`;
     if (key !== viewKey) { viewKey = key; view = presetView('south'); panes.world.rendered = panes.ego.rendered = null;
       postView(); document.querySelectorAll('[data-view]').forEach(b => b.classList.toggle('on', b.dataset.view === 'south')); }
-    $('clock').textContent = `t = ${state.t.toFixed(1)} s`;
+    setText($('clock'), `t = ${state.t.toFixed(1)} s`);
     perceptionAlerts = state.perceptionAlerts || [];
     renderAlerts();
     renderPhase(state.phase);
@@ -557,11 +580,11 @@ async function refresh() {
     renderRobotTarget();
     const goal = state.goal;
     const progress = goal ? ` · 目标进度：最大拼合 ${goal.largestGroup}/${goal.entities}，相邻关系 ${goal.satisfied}/${goal.total}${goal.complete ? '（完成）' : ''}` : '';
-    $('task').textContent = state.task ? `任务：${state.task}${progress}` : '';
+    setText($('task'), state.task ? `任务：${state.task}${progress}` : '');
     $('pause').textContent = state.paused ? '继续' : '暂停';
     if (document.activeElement !== $('speed')) $('speed').value = String(state.speed);
     const ego = state.robots[robotId] && state.robots[robotId].ego;
-    $('egoSub').textContent = ego ? `${robotId} 的自我态 · ES 版本 ${ego.version}` : '机器人自我态';
+    setText($('egoSub'), ego ? `${robotId} 的自我态 · ES 版本 ${ego.version}` : '机器人自我态');
     if (!ego) $('egoEmpty').style.display = 'grid';
     drawOverlays(); drawMap(); drawMetrics(); drawEvents();
     renderThinking();
@@ -617,7 +640,7 @@ function drawMetrics() {
     ['NEES（三维理论值 3）', m.meanNees3 == null ? '–' : m.meanNees3.toFixed(2)], ['类别准确率', pct(m.categoryAccuracy)],
     ['自定位误差', cm(m.selfPositionErrorM)], ['夹爪', `${holding.gripper || '–'}${holding.holding ? '，持有 ' + holding.holding : ''}`],
   ];
-  $('metrics').innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join('');
+  setHtml($('metrics'), rows.map(([k, v]) => `<tr><td>${k}</td><td>${v}</td></tr>`).join(''));
   const cv = $('chart'), ctx = cv.getContext('2d');
   ctx.clearRect(0, 0, cv.width, cv.height);
   ctx.font = '12px -apple-system, sans-serif'; ctx.textAlign = 'left';
@@ -672,9 +695,9 @@ function drawEvents() {
   const names = { 'grasp/attach': '抓取', 'grasp/release': '放下', 'grasp/miss': '抓空', 'episode/reset': 'Episode 重置',
     'grasp/handle': '握住抽屉把手', 'grasp/handle-release': '松开抽屉把手', 'phase/switch': '切换功能级别' };
   const edits = { move: '世界修改·移动', spawn: '世界修改·新增', remove: '世界修改·删除' };
-  $('events').innerHTML = state.events.slice().reverse().map(e =>
+  setHtml($('events'), state.events.slice().reverse().map(e =>
     `<li>t=${e.t.toFixed(1)} s　${(e.type === 'world/edit' && edits[e.action]) || names[e.type] || e.type}${e.entity ? '　' + e.entity : ''}${e.level ? '　' + e.level : ''}${e.robot ? '（' + e.robot + '）' : ''}</li>`
-  ).join('') || '<li>暂无</li>';
+  ).join('') || '<li>暂无</li>');
 }
 
 // --------------------------------------------------------------------- chat
@@ -691,7 +714,7 @@ const TARGETS = {
     empty: '给机器人下达新任务；本轮对话期间机器人由操作员接管，后台循环搬运暂停，结束后自动继续。机器人只能依靠自己的感知（Ego State）。' },
 };
 const esc = (s) => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-let chatSig = '', chatState = null, chatTarget = 'world';
+let chatSig = '', chatState = null, chatTarget = 'world', chatFollow = true;
 function toolSummary(m) {
   const input = m.input && typeof m.input === 'object' ? m.input : {};
   let brief = '';
@@ -702,20 +725,24 @@ function toolSummary(m) {
   const mark = m.status === 'completed' ? '<span class="ok">✓</span>' : m.status === 'error' ? '<span class="bad">✗</span>' : '<span class="run">…</span>';
   return `${mark} ${esc(TOOL_NAMES[m.tool] || m.tool)}${brief ? '　' + esc(brief) : ''}`;
 }
+// Returns false when the transcript was left as it is because the operator is selecting text in it.
 function renderChat(chat) {
   const box = $('chatMsgs');
   const open = new Set([...box.querySelectorAll('details[open]')].map(d => d.dataset.id));
   const label = (m) => (chat.agents[m.agent] || {}).label || m.agent;
-  box.innerHTML = chat.messages.map(m => {
+  const follow = chatFollow || box.scrollHeight - box.scrollTop - box.clientHeight < 30;
+  const html = chat.messages.map(m => {
     if (m.role === 'tool') return `<details class="tool ${m.agent}" data-id="${m.id}"${open.has(String(m.id)) ? ' open' : ''}>`
       + `<summary>${toolSummary(m)}</summary><pre>${esc(JSON.stringify(m.input, null, 1))}</pre>${m.text ? `<pre>${esc(m.text)}</pre>` : ''}</details>`;
     const who = m.role === 'user' ? `→ ${TARGETS[m.agent] ? TARGETS[m.agent].name : m.agent}` : m.role === 'assistant' ? label(m) : '';
     return `<div class="msg ${m.role} ${m.agent}">${who ? `<span class="who">${esc(who)}</span>` : ''}${esc(m.text)}</div>`;
   }).join('') || `<div class="msg system">${esc(TARGETS[chatTarget].empty)}</div>`;
-  for (const [key, a] of Object.entries(chat.agents)) {
-    if (a.busy) box.insertAdjacentHTML('beforeend', `<div class="msg system">${esc(a.label)} 正在处理…</div>`);
-  }
-  box.scrollTop = box.scrollHeight;  // new input or output is always brought into view
+  const busy = Object.values(chat.agents).filter(a => a.busy).map(a => `<div class="msg system">${esc(a.label)} 正在处理…</div>`);
+  if (!setHtml(box, html + busy.join(''))) return false;
+  // New output comes into view unless the operator scrolled up to read; their own input always does.
+  if (follow) box.scrollTop = box.scrollHeight;
+  chatFollow = false;
+  return true;
 }
 function renderTarget() {
   const t = TARGETS[chatTarget];
@@ -727,10 +754,10 @@ function renderTarget() {
 }
 function renderStatus() {
   const a = chatState && chatState.agents[chatTarget];
-  if (!a) { $('chatStatus').textContent = ''; return; }
+  if (!a) { setText($('chatStatus'), ''); return; }
   const robot = chatState.agents.robot;
   const control = robot && robot.control ? `　机器人由 ${robot.control} 接管` : '';
-  $('chatStatus').textContent = (!a.available ? '不可用' : a.busy ? '处理中' : a.sessionId ? '会话进行中' : '新会话') + control;
+  setText($('chatStatus'), (!a.available ? '不可用' : a.busy ? '处理中' : a.sessionId ? '会话进行中' : '新会话') + control);
   $('chatStatus').title = a.reason || a.sessionId || '';
   $('chatSend').disabled = a.busy || !a.available;
   $('chatStop').disabled = !a.busy;
@@ -764,23 +791,23 @@ function renderPlan(chat) {
   const view = robot.plan, todos = agentTodos(chat);
   const skill = view && view.skill ? `${view.skill.skill}（已执行 ${Math.max(0, (view.t - view.skill.started)).toFixed(0)} s）` : '无';
   if (todos) {
-    $('planState').textContent = '操作员任务'; $('planState').className = 'pill running';
-    $('planMeta').textContent = '　机器人智能体（Ego Harness）的待办计划';
-    $('planBody').innerHTML = `<div class="plan-steps">${todos.map(t => `<span class="plan-step ${t.status === 'completed' ? 'done' : t.status === 'in_progress' ? 'active' : ''}">`
+    setText($('planState'), '操作员任务'); $('planState').className = 'pill running';
+    setText($('planMeta'), '　机器人智能体（Ego Harness）的待办计划');
+    setHtml($('planBody'), `<div class="plan-steps">${todos.map(t => `<span class="plan-step ${t.status === 'completed' ? 'done' : t.status === 'in_progress' ? 'active' : ''}">`
       + `${STEP_MARKS[t.status] || ''} ${esc(t.content)}</span>`).join('')}</div>`
-      + `<div class="plan-now"><span class="label">正在执行的技能：</span>${esc(skill)}</div>`;
+      + `<div class="plan-now"><span class="label">正在执行的技能：</span>${esc(skill)}</div>`);
     return;
   }
   const plan = view && view.plan;
-  if (!plan) { $('planState').textContent = ''; $('planMeta').textContent = ''; $('planBody').textContent = '机器人尚未发布计划'; return; }
-  $('planState').textContent = PLAN_STATES[plan.state] || plan.state;
+  if (!plan) { setText($('planState'), ''); setText($('planMeta'), ''); setText($('planBody'), '机器人尚未发布计划'); return; }
+  setText($('planState'), PLAN_STATES[plan.state] || plan.state);
   $('planState').className = `pill ${plan.state}`;
-  $('planMeta').textContent = `　${plan.source}${plan.round ? ` · 第 ${plan.round} 轮` : ''} · 更新于 t = ${plan.t.toFixed(0)} s`;
-  $('planBody').innerHTML = `<div class="plan-goal">目标：${esc(plan.goal)}</div>`
+  setText($('planMeta'), `　${plan.source}${plan.round ? ` · 第 ${plan.round} 轮` : ''} · 更新于 t = ${plan.t.toFixed(0)} s`);
+  setHtml($('planBody'), `<div class="plan-goal">目标：${esc(plan.goal)}</div>`
     + `<div class="plan-steps">${plan.steps.map((st, i) => `<span class="plan-step ${st.status}">${STEP_MARKS[st.status] || ''} ${i + 1}. ${esc(st.name)}</span>`).join('')}</div>`
     + `<div class="plan-now"><span class="label">当前步骤：</span>${esc(plan.current || '–')}</div>`
     + `<div class="plan-now"><span class="label">正在执行的技能：</span>${esc(skill)}</div>`
-    + (plan.difficulty ? `<div class="plan-trouble ${plan.state === 'waiting-operator' || plan.state === 'escaping' ? 'stuck' : ''}">遇到的困难：${esc(plan.difficulty)}</div>` : '');
+    + (plan.difficulty ? `<div class="plan-trouble ${plan.state === 'waiting-operator' || plan.state === 'escaping' ? 'stuck' : ''}">遇到的困难：${esc(plan.difficulty)}</div>` : ''));
 }
 const ACTIVITY_KINDS = { step: '步骤', skill: '技能', difficulty: '困难', state: '状态', alert: '告警', reflection: '反思', think: '思考' };
 let activityLast = 0, thinkLast = 0;
@@ -801,12 +828,13 @@ function renderRobotStatus(chat) {
     macro = `${active ? active.name : plan.goal}${plan.round ? `（第 ${plan.round} 轮` : '（'}· ${PLAN_STATES[plan.state] || plan.state}）`;
     micro = plan.current || '–';
   }
-  $('rsNow').innerHTML = (view ? `<div><span class="label">宏观步骤：</span>${esc(macro)}</div>`
+  setHtml($('rsNow'), view ? `<div><span class="label">宏观步骤：</span>${esc(macro)}</div>`
     + `<div><span class="label">微观步骤：</span>${esc(micro)}</div><div><span class="label">技能：</span>${esc(skill)}</div>`
     : '机器人尚未发布计划');
   if (!view) return;
   const box = $('rsHistory');
   if ((view.activityLast || 0) < activityLast) { activityLast = 0; thinkLast = 0; box.innerHTML = ''; }  // the runtime restarted
+  if (selecting(box)) return;  // the rows not added now come again with the next poll
   const fresh = (view.activity || []).filter(e => e.id > activityLast);
   const thoughts = (chat.messages || []).filter(m => m.agent === 'robot' && m.role === 'assistant' && m.id > thinkLast);
   if (!fresh.length && !thoughts.length) return;
@@ -829,9 +857,9 @@ async function refreshChat() {
     renderPlan(chatState);
     renderStatus();
     const sig = JSON.stringify([chatTarget, Object.values(chatState.agents).map(a => a.busy), chatState.messages]);
-    if (sig !== chatSig) { chatSig = sig; renderChat(chatState); }
+    if (sig !== chatSig && renderChat(chatState)) chatSig = sig;
     const a = chatState.agents[chatTarget];
-    if (a && !a.available && !chatState.messages.length) $('chatMsgs').innerHTML = `<div class="msg error">${esc(a.reason)}</div>`;
+    if (a && !a.available && !chatState.messages.length) setHtml($('chatMsgs'), `<div class="msg error">${esc(a.reason)}</div>`);
   } catch (e) { showError(e); }
 }
 async function sendChat() {
@@ -841,6 +869,7 @@ async function sendChat() {
   try {
     await api('POST', '/console/chat', { agent: chatTarget, message: text });
     $('chatInput').value = '';
+    chatFollow = true;
     refreshChat();
   } catch (e) { showError(e); }
 }
@@ -867,18 +896,18 @@ async function refreshCameraImage(sensor) {
   const res = await fetch(`/wca/render?camera=${encodeURIComponent('robot:' + robotId)}&sensor=${sensor}&width=480&height=360&format=jpeg`,
     { cache: 'no-store' });
   if (res.status === 404) {
-    $('camCaption-' + sensor).textContent = `${cameraCaption[sensor]} · ${robotId} 没有这台相机（场景按旧的机器人模型构建，运行 steward build-kitchen 重建）`;
+    setText($('camCaption-' + sensor), `${cameraCaption[sensor]} · ${robotId} 没有这台相机（场景按旧的机器人模型构建，运行 steward build-kitchen 重建）`);
     $('camRobot-' + sensor).removeAttribute('src');
     return;
   }
   if (!res.ok) return;
   cameraShown[sensor] = await showBlob($('camRobot-' + sensor), res, cameraShown[sensor]);
-  $('camCaption-' + sensor).textContent = cameraCaption[sensor];
+  setText($('camCaption-' + sensor), cameraCaption[sensor]);
 }
 async function refreshRobotCamera() {
   if (!robotId) return;
   await Promise.all(ROBOT_CAMERAS.map(refreshCameraImage));
-  $('robotCamLabel').textContent = `机器人相机 · ${robotId} · ${cameraMeter().toFixed(1)} fps`;
+  setText($('robotCamLabel'), `机器人相机 · ${robotId} · ${cameraMeter().toFixed(1)} fps`);
 }
 
 // ------------------------------------------------------------------ scenarios & bodies
@@ -982,7 +1011,7 @@ $('load').onclick = async () => {
   const next = (bodies.find(b => b.id === body) || {}).label;
   if (now && next && loadedBody() !== body && !confirm(
     `切换本体：${now} → ${next}\n\n本体编译在世界模型里，这不是热切换：会重开 Episode，停掉当前机器人的运行时，再拉起新本体的运行时。继续？`)) return;
-  if (target && !target.built) $('clock').textContent = '正在构建场景…';
+  if (target && !target.built) setText($('clock'), '正在构建场景…');
   try { await api('POST', '/wca/episode', { action: 'load', scenario: name, body }); viewKey = ''; refresh(); loadScenarios(); } catch (e) { showError(e); }
 };
 $('reset').onclick = async () => { try { await api('POST', '/wca/episode', { action: 'reset' }); refresh(); } catch (e) { showError(e); } };

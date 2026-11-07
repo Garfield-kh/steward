@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Launch Steward + Ego Harness and open the control panel in the browser.
+# Launch Steward and open the control panel in the browser; `steward up` gives the scenario's task
+# to the robot's Ego Harness, whose conversation the console shows.
 # Usage: launch-desktop.sh [scenario]
 #   With no scenario argument, shows a macOS chooser (or uses STEWARD_SCENARIO).
 set -euo pipefail
@@ -91,24 +92,6 @@ stop_existing() {
   sleep 1
 }
 
-scenario_task() {
-  local name="$1"
-  local file="$STEWARD/var/steward/scenarios/${name}.json"
-  if [[ ! -f "$file" ]]; then
-    fail "找不到场景文件：$file"
-  fi
-  "$STEWARD/.venv/bin/python" -c 'import json,sys; print(json.load(open(sys.argv[1],encoding="utf-8"))["task"])' "$file"
-}
-
-robot_prompt() {
-  local task="$1"
-  "$STEWARD/.venv/bin/python" -c '
-from steward.world.chat import ROBOT_BRIEF
-import sys
-print(ROBOT_BRIEF + sys.argv[1])
-' "$task"
-}
-
 main() {
   {
     echo "----- $(date '+%Y-%m-%d %H:%M:%S') -----"
@@ -128,10 +111,6 @@ main() {
 
   stop_existing
 
-  local task prompt
-  task="$(scenario_task "$scenario")"
-  prompt="$(robot_prompt "$task")"
-
   (
     cd "$STEWARD"
     # shellcheck disable=SC1091
@@ -143,12 +122,6 @@ main() {
 
   wait_http "$WCA_URL/console" "控制台" 90
   wait_http "$EGO_URL/ego/state" "Ego API" 90
-
-  (
-    cd "$STEWARD"
-    exec ./scripts/run-ego.sh "$prompt"
-  ) >>"$LOG" 2>&1 &
-  log "ego_pid=$!"
 
   /usr/bin/open "$CONSOLE_URL"
   notify "Steward 已启动 · 控制面板已打开"

@@ -623,7 +623,7 @@ class SkillExecutor:
 
     def _pour(self, job: Job, plan: dict) -> None:
         """Hold the container low over the spot, tip it slowly about the arm, wait for the contents
-        to fall out, set it upright again and back away still holding it."""
+        to fall out, raise it ``rise`` off the pile, set it upright again and back away still holding it."""
         self._dock(job, plan)
         grip = plan.get("gripSpot", plan["spot"])
         self._align_lateral(grip)
@@ -632,7 +632,9 @@ class SkillExecutor:
         self._tip(plan["lift"], plan["pivot"], 0.0, plan["roll"])
         self._wait(plan["pourS"])
         job.log.append(f"poured {plan['object']} over {plan['support']}")
-        self._tip(plan["lift"], plan["pivot"], plan["roll"], 0.0)
+        raised = plan["lift"] + plan["rise"]
+        self._set_joint("lift", raised + plan["pivot"] * abs(math.sin(plan["roll"])))
+        self._tip(raised, plan["pivot"], plan["roll"], 0.0)
         self._retract(plan)
         self._set_joint("lift", max(plan["lift"], self.config.stow_lift))
         self._backoff(plan)

@@ -82,8 +82,9 @@ class Arm:
                 and 0.0 <= wrist_pitch <= g.wrist_pitch_max)
 
     def pitch_for(self, lift: float, reach: float, wrist_yaw: float = 0.0, wrist_roll: float = 0.0) -> float | None:
-        """The least forward tilt of the tool at which the arm holds its grasp point at ``lift`` and
-        ``reach`` turned and tipped so; None where no tilt does. A tool that always points down: 0."""
+        """A forward tilt of the tool at which the arm holds its grasp point at ``lift`` and ``reach``
+        turned and tipped so: none where it holds it pointing down, else a little more than the least
+        that does (the body's margin); None where no tilt does. A tool that always points down: 0."""
         return 0.0 if self.reachable(lift, reach, wrist_yaw, wrist_roll) else None
 
     def reachable_path(self, targets: Sequence[dict]) -> bool:

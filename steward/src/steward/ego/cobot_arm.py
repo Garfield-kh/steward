@@ -7,9 +7,11 @@ about the vertical and tipped ``wrist_roll`` about the forward axis. The Piper's
 +-70 deg (joint5), so with the tool straight down the arm reaches 0.50 m ahead of its mount and
 tips a container less than 1 rad out there; tilted 60 deg forward it reaches 0.70 m and turns
 the tool about its own axis instead (joint6, a full turn). A command on them is solved by inverse kinematics in the
-base frame (so odometry noise never enters the arm), at the torso height the target ``lift``
-sets, so the torso moves as smoothly as the skill moves the pinch point; other heights are tried
-only where the arm cannot reach from that one.
+base frame (so odometry noise never enters the arm), with the torso drawn to the height the target
+``lift`` sets, so the torso moves as smoothly as the skill moves the pinch point. A pose the
+solver misses from the arm's own posture is approached in steps from one near the working posture.
+Planning (``reachable``, ``pitch_for``) solves from the target alone, so what it finds reachable
+the command reaches wherever the arm stands by then.
 
 Encoder readings are turned back into virtual joints by forward kinematics, except that an arm
 standing within servo tolerance of the joints solved for the last command reports that command:
@@ -44,7 +46,16 @@ class PiperArmConfig:
     shoulder_above: float = 0.15
     shoulder_drop_per_pitch: float = 0.38
     pitch_tolerance: float = 0.03  # how close ``pitch_for`` comes to the least tilt that holds the grasp point
+    # ``pitch_for`` tilts this much beyond the least tilt, where it does not stand on the edge of
+    # the workspace a grasp point re-estimated a few millimetres away would cross.
+    pitch_margin: float = 0.1
     torso_seed_inset: float = 0.05  # the low and high torso seeds stand this far inside its travel
+    # A pose that the solver does not reach from the seeds is approached from one it reaches from
+    # the working posture -- this far ahead, the tool down -- in this many steps of reach and tilt,
+    # each seeded by the last (measured: seeded from the working posture alone it misses a third of
+    # the poses the arm reaches, and which ones depends on where the arm stands).
+    continuation_reach: float = 0.35
+    continuation_steps: int = 6
     # Pinch point ahead of the arm mount: tool down 0.50, tilted 60 deg 0.70; planned short of that,
     # where a small step does not make the solver turn the wrist over.
     reach: tuple[float, float] = (0.22, 0.66)
@@ -56,11 +67,14 @@ class PiperArmConfig:
     wrist_pitch_max: float = 1.05
     pitch_unseen_cos: float = 0.1  # |cos roll| below which the tool pitch cannot be read from the posture
     # Holding something, a small step of the grasp point (a ramp, a tip) that the solver can only
-    # follow by turning the wrist over to another posture -- a joint moving this far, or the torso
-    # this far -- is refused: the arm would swing what it holds about on the way (measured: tipping
-    # a held box past 1.4 rad, joint4 meets its limit and the solution jumps 3.5 rad).
+    # follow by turning the wrist over to another posture -- a joint moving this far, or the pinch
+    # point leaving the step by this much halfway between the two postures -- is refused: the arm
+    # would swing what it holds about on the way (measured: tipping a held box past 1.4 rad, joint4
+    # meets its limit and the solution jumps 3.5 rad). The torso alone may move any distance: the
+    # arm joints keep the pinch point on the step (measured: retracting 5 cm with the tool tilted,
+    # the redundant torso sinks 0.12 m).
     max_joint_step: float = 0.6
-    max_torso_step: float = 0.06
+    max_swing_m: float = 0.03
     small_step: tuple[float, float] = (0.05, 0.2)  # metres, radians: a command this close to the last is a step
     arrived_rad: float = 0.04  # encoders this close to the last solution report its command
     arrived_lift_m: float = 0.01
@@ -174,72 +188,114 @@ class PiperArm(Arm):
 
     def _jumps(self, a: tuple[float, list[float]], b: tuple[float, list[float]]) -> bool:
         """Whether going from solution ``a`` to ``b`` (torso, arm joints) turns the arm over."""
-        return (abs(a[0] - b[0]) > self.config.max_torso_step
-                or max(abs(x - y) for x, y in zip(a[1], b[1], strict=True)) > self.config.max_joint_step)
+        if max(abs(x - y) for x, y in zip(a[1], b[1], strict=True)) > self.config.max_joint_step:
+            return True
+        halfway = ((a[0] + b[0]) / 2, [(x + y) / 2 for x, y in zip(a[1], b[1], strict=True)])
+        swing = self._pinch(*halfway) - (self._pinch(*a) + self._pinch(*b)) / 2
+        return float(np.linalg.norm(swing)) > self.config.max_swing_m
+
+    def _pinch(self, torso: float, arm: list[float]) -> np.ndarray:
+        """The pinch point (base frame) of the arm at ``torso`` height with joints ``arm``."""
+        self.ik.set_base(0.0, 0.0, 0.0, torso)
+        return np.asarray(pose_compose(self.ik.fk(self.config.arm, arm), {"p": TCP_OFFSET, "q": [1.0, 0.0, 0.0, 0.0]})["p"])
 
     def _ik(self, target: dict, joints: dict, prior: tuple[float, list[float]] | None = None
             ) -> tuple[tuple[float, list[float]] | None, IkError | None]:
         """Torso height and arm joints for virtual joints ``target`` in one whole-body solve, seeded
-        from ``prior`` (the last solution, so a motion keeps one posture), then ``joints``, then the
-        working posture. The caller holds the lock."""
+        from ``prior`` (the last solution, so a motion keeps one posture), then ``joints``, then
+        approached from the working posture (:meth:`_approached`); then the working posture itself.
+        Without ``prior`` and ``joints`` the answer depends on ``target`` alone. The caller holds the lock."""
+        encoders = ([(float(joints["lift"]), [float(joints[n]) for n in self.names])]
+                    if "lift" in joints and all(n in joints for n in self.names) else [])
+        last: IkError | None = None
+        self.ik.set_base(0.0, 0.0, 0.0, None)
+        for seed in ([prior] if prior is not None else []) + encoders:
+            solved, last = self._solve_from(target, [seed])
+            if solved is not None:
+                return solved, None
+        solved = self._approached(target)
+        if solved is not None:
+            return solved, None
+        solved, last = self._solve_from(target, self._working_seeds(target))
+        return solved, (None if solved is not None else last)
+
+    def _approached(self, target: dict) -> tuple[float, list[float]] | None:
+        """``target`` solved by stepping reach and tilt to it from ``continuation_reach`` ahead with
+        the tool down, each step seeded by the last; None where a step misses."""
         cfg = self.config
-        pitch = target["wrist_pitch"]
+        start = {**target, "reach": cfg.continuation_reach, "wrist_pitch": 0.0}
+        solved, _ = self._solve_from(start, self._working_seeds(start))
+        for k in range(1, cfg.continuation_steps + 1):
+            if solved is None:
+                return None
+            share = k / cfg.continuation_steps
+            step = {**target, "reach": start["reach"] + (target["reach"] - start["reach"]) * share,
+                    "wrist_pitch": target["wrist_pitch"] * share}
+            solved, _ = self._solve_from(step, [solved])
+        return solved
+
+    def _working_seeds(self, target: dict) -> list[tuple[float, list[float]]]:
+        """The working posture at the torso height ``target`` prefers and near either end of the
+        torso's travel: one solve moves the torso only so far from where it starts."""
+        lo, hi = LIFT_RANGE
+        inset = self.config.torso_seed_inset
+        return [(min(max(h, lo), hi), list(HOME)) for h in (self._prefer(target), lo + inset, hi - inset)]
+
+    def _prefer(self, target: dict) -> float:
+        """The torso height ``target`` draws the torso to."""
+        cfg = self.config
+        return target["lift"] + cfg.shoulder_above - cfg.shoulder_drop_per_pitch * target["wrist_pitch"] - CHASSIS["height"]
+
+    def _solve_from(self, target: dict, seeds: list[tuple[float, list[float]]]
+                    ) -> tuple[tuple[float, list[float]] | None, IkError | None]:
+        """``target`` solved from the first of ``seeds`` (torso, arm joints) that reaches it."""
         tcp = [self.geometry.tool_offset + target["reach"], self.geometry.lateral, target["lift"]]
         tool = quat_mul(quat_mul(quat_from_axis_angle([0.0, 0.0, 1.0], target["wrist_yaw"]),
                                  quat_from_axis_angle([1.0, 0.0, 0.0], target["wrist_roll"])),
-                        quat_mul(quat_from_axis_angle([0.0, 1.0, 0.0], -pitch), TOOL_DOWN))
-        prefer = target["lift"] + cfg.shoulder_above - cfg.shoulder_drop_per_pitch * pitch - CHASSIS["height"]
-        encoders = ([(float(joints["lift"]), [float(joints[n]) for n in self.names])]
-                    if "lift" in joints and all(n in joints for n in self.names) else [])
-        # Then the working posture at the preferred torso height and near either end of the torso's
-        # travel: one solve moves the torso only so far from where it starts.
-        lo, hi = LIFT_RANGE
-        seeds = ([prior] if prior is not None else []) + encoders + [
-            (min(max(h, lo), hi), list(HOME)) for h in (prefer, lo + cfg.torso_seed_inset, hi - cfg.torso_seed_inset)]
+                        quat_mul(quat_from_axis_angle([0.0, 1.0, 0.0], -target["wrist_pitch"]), TOOL_DOWN))
         last: IkError | None = None
-        self.ik.set_base(0.0, 0.0, 0.0, None)
         for lift, q in seeds:
             try:
-                solved = self.ik.solve_body(cfg.arm, tcp, tool, q, lift, prefer)
+                return self.ik.solve_body(self.config.arm, tcp, tool, q, lift, self._prefer(target)), None
             except IkError as exc:
                 last = exc
-                continue
-            return solved, None
         return None, last
 
     def reachable(self, lift: float, reach: float, wrist_yaw: float = 0.0, wrist_roll: float = 0.0,
                   wrist_pitch: float = 0.0) -> bool:
+        # Solved from the target alone: a plan holds wherever the arm stands when it runs, and the
+        # command it plans is solved from these seeds too if the arm's own ones miss.
         if not super().reachable(lift, reach, wrist_yaw, wrist_roll, wrist_pitch):
             return False
         with self._lock:
             solved, _ = self._ik({"lift": lift, "reach": reach, "wrist_yaw": wrist_yaw, "wrist_roll": wrist_roll,
-                                  "wrist_pitch": wrist_pitch}, self._last.get("joints") or {})
+                                  "wrist_pitch": wrist_pitch}, {})
         return solved is not None
 
     def pitch_for(self, lift: float, reach: float, wrist_yaw: float = 0.0, wrist_roll: float = 0.0) -> float | None:
         g = self.geometry
         if not super().reachable(lift, reach, wrist_yaw, wrist_roll, 0.0):
             return None
-        joints = self._last.get("joints") or {}
         at = {"lift": lift, "reach": reach, "wrist_yaw": wrist_yaw, "wrist_roll": wrist_roll}
         with self._lock:
-            if self._ik({**at, "wrist_pitch": 0.0}, joints)[0] is not None:
+            if self._ik({**at, "wrist_pitch": 0.0}, {})[0] is not None:
                 return 0.0
             # A tilt that holds it there, from the most down; the least one lies between it and none.
             lo, hi = 0.0, None
             for share in (1.0, 0.75, 0.5):
-                if self._ik({**at, "wrist_pitch": g.wrist_pitch_max * share}, joints)[0] is not None:
+                if self._ik({**at, "wrist_pitch": g.wrist_pitch_max * share}, {})[0] is not None:
                     hi = g.wrist_pitch_max * share
                     break
             if hi is None:
                 return None
             while hi - lo > self.config.pitch_tolerance:
                 mid = (lo + hi) / 2
-                if self._ik({**at, "wrist_pitch": mid}, joints)[0] is not None:
+                if self._ik({**at, "wrist_pitch": mid}, {})[0] is not None:
                     hi = mid
                 else:
                     lo = mid
-            return hi
+            wide = min(g.wrist_pitch_max, hi + self.config.pitch_margin)
+            return wide if self._ik({**at, "wrist_pitch": wide}, {})[0] is not None else hi
 
     def reachable_path(self, targets) -> bool:
         if not super().reachable_path(targets):

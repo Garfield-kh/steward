@@ -114,6 +114,29 @@ def test_the_piper_tilts_its_tool_forward_to_reach_past_where_it_reaches_pointin
     assert measured["wrist_pitch"] == pytest.approx(1.05, abs=0.03) and measured["wrist_roll"] == pytest.approx(0.0, abs=0.03)
 
 
+def test_what_the_piper_plans_to_reach_it_reaches_from_wherever_its_arm_stands():
+    """A local solver seeded only from where the arm stands missed a third of the poses it reaches,
+    and which third depended on the posture; planned from the pose alone, the tilt a reach needs
+    grows with the reach, and the command it plans is solved from a posture far from the plan's."""
+    arm = _home_arm()
+    reaches = (0.50, 0.55, 0.60, 0.65)
+    pitches = [arm.pitch_for(0.81, r) for r in reaches]
+    assert pitches == sorted(pitches) and pitches[0] == 0.0 and pitches[-1] > 0.5
+    stretched = PiperArm(robot_model("cobot-magic"))
+    stretched.virtualize({"joints": {"lift": 0.4, **dict(zip(stretched.names, [0.0, 2.7, -2.4, 0.0, 0.9, 1.57], strict=True))},
+                          "odometry": {"x": 0.0, "y": 0.0, "yaw": 0.0}})
+    for reach, pitch in zip(reaches, pitches, strict=True):
+        stretched._target = stretched._solved = None
+        assert stretched.command({"lift": 0.81, "reach": reach, "wrist_pitch": pitch})["joints"]
+
+
+def test_the_piper_draws_a_tilted_tool_back_while_its_torso_sinks():
+    """Drawing back with the tool tilted, the redundant torso sinks 0.12 m in one 5 cm step while the
+    arm joints keep the pinch point on the way: the arm swings nothing it holds, so it is no jump."""
+    arm = _home_arm()
+    assert arm.reachable_path([{"lift": 0.8, "reach": 0.63 - 0.05 * k, "wrist_pitch": 0.58} for k in range(8)])
+
+
 def test_the_torso_and_all_six_joints_tip_a_held_box_past_upright_in_one_motion():
     """Solved for the arm alone at a few torso heights, the tip turned the wrist over at 1.4 rad
     (joint4 at its limit); solved with the torso, step after step from the last posture, the arm
@@ -250,11 +273,12 @@ def test_the_twin_takes_the_puzzle_box_by_its_rim_tilted_and_pours_it_out_onto_t
     assert taken["wristPitch"] == pytest.approx(1.05), "a container to be poured is taken with the wrist tilted most"
     assert taken["graspDz"] > 0, "on its rim, above its centre"
     assert poured["roll"] >= 1.7
-    box = np.asarray(host.sim._entity_pose("w:box")["p"])
-    pieces = [np.asarray(e["pose"]["value"]["p"]) for e in host.sim.world_state()["entities"] if e["id"].startswith("w:piece")]
-    still_in = [q for q in pieces if np.all(np.abs(q[:2] - box[:2]) < 0.27) and abs(q[2] - box[2]) < 0.04]
-    assert not still_in, f"{len(still_in)} pieces stayed in the box"
-    assert sum(q[2] > 0.7 for q in pieces) >= len(pieces) - 2, "the pieces land on the table"
+    world = host.sim.world_state()
+    rest = {r["a"]["entity"]: r["b"]["entity"] for r in world["relations"] if r["type"] == "supported-by"}
+    pieces = {e["id"]: e["pose"]["value"]["p"] for e in world["entities"] if e["id"].startswith("w:piece")}
+    still_in = [p for p in pieces if rest.get(p) == "w:box"]
+    assert not still_in, f"{still_in} stayed in the box"
+    assert sum(p[2] > 0.7 for p in pieces.values()) >= len(pieces) - 2, "the pieces land on the table"
 
 
 def test_the_twin_lifts_puzzle_pieces_out_of_the_box_over_its_wall(cobot_in):

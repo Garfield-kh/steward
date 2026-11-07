@@ -39,7 +39,7 @@ from steward.scene.schema import Entity, SceneState
 class EsimConfig:
     capture_radius: float = 0.05
     edge_grasp_min_m: float = 0.25  # an object this large may be taken by an edge when its centre is out of reach
-    edge_grasp_inset: float = 0.04  # how far inside its (2-sigma shrunk) extent the edge grasp closes
+    edge_grasp_inset: float = 0.015  # how far inside its (2-sigma shrunk) extent the edge grasp closes: on its rim
     # Take a large object by its edge even when its centre is in reach: held so, it hangs ahead of
     # the gripper and can be set down (or poured) deeper on a surface than an arm of short reach gets.
     edge_grasp_first: bool = False

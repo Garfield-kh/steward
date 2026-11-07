@@ -97,10 +97,10 @@ class GraspConfig:
     handle_kd: float = 120.0
 
 
-def _at_edge(obb, point: np.ndarray, band: float, finger: float = 0.015) -> bool:
-    """Whether fingers closing at ``point`` close on an oriented box's edge: inside it no deeper than
-    ``band`` from a side face (not on something inside it), or outside it by no more than a
-    finger's thickness."""
+def _at_edge(obb, point: np.ndarray, band: float = 0.03, finger: float = 0.015) -> bool:
+    """Whether fingers closing at ``point`` close on an oriented box's edge, the wall between them:
+    inside it no deeper than ``band`` (a gripper's width) from a side face -- deeper, they close on
+    what lies inside it -- or outside it by no more than a finger's thickness."""
     local = np.abs(matrix_from_quat(obb.quat).T @ (np.asarray(point, float) - np.asarray(obb.center)))
     half = np.asarray(obb.size) / 2
     outside = float(np.linalg.norm(np.maximum(local - half, 0.0)))
@@ -716,9 +716,10 @@ class WorldSim:
         in it (the top of a stack) or is a pourable container (carried with what lies in it), or else
         grasp the nearest drawer handle."""
         grip = np.asarray(self.grasp_point(rs.entity_id, gripper_link)["p"])
-        supporting = {r.b["entity"] for r in self._relations()
-                      if r.type == "supported-by" and self.template.entity(r.a["entity"]).rigid.root.value == "free"}
-        best, best_d, best_top = None, math.inf, -math.inf
+        relations = [r for r in self._relations() if r.type == "supported-by"]
+        supporting = {r.b["entity"] for r in relations if self.template.entity(r.a["entity"]).rigid.root.value == "free"}
+        container = {r.a["entity"]: r.b["entity"] for r in relations}
+        best, best_rank = None, None
         for ent in self.template.entities:
             if ent.role != "object" or ent.rigid.root.value != "free":
                 continue
@@ -727,14 +728,22 @@ class WorldSim:
             if any(other.holding_any(ent.id) for other in self.robots.values()):
                 continue
             obb = entity_obb(self.model, self.data, self.build.names[ent.id])
+            holder = container.get(ent.id)
+            if holder is not None and _is_pourable(self.template.entity(holder)) and self._covered(holder):
+                box = self.entity_obb(holder)
+                if obb.center[2] - obb.size[2] / 2 < box.center[2] + box.size[2] / 2 - 0.01:
+                    continue  # inside a closed box: the fingers meet its lid
             d = float(np.linalg.norm(np.asarray(obb.center) - grip))
-            if d > self.grasp.capture_radius and not _at_edge(obb, grip, self.grasp.capture_radius):
+            centred = d <= self.grasp.capture_radius
+            if not centred and not _at_edge(obb, grip):
                 continue
-            # Closing from above, the gripper meets the topmost object under it first (a lid before
-            # the pieces in the box); elsewhere the nearest object.
+            # Fingers closing on an object's middle take it before the rim of another they are near
+            # (a piece in its box, not the box); closing from above, the gripper meets the topmost
+            # object under it first (a lid before the pieces in the box); elsewhere the nearest one.
             top = obb.center[2] + obb.size[2] / 2 if _under(obb, grip) else -math.inf
-            if (top, -d) > (best_top, -best_d):
-                best, best_d, best_top = ent.id, d, top
+            rank = (centred, top, -d)
+            if best_rank is None or rank > best_rank:
+                best, best_rank = ent.id, rank
         if best is None:
             handle = self._nearest_handle(grip)
             if handle is not None:

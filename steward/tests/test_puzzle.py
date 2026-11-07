@@ -133,6 +133,30 @@ def test_a_pourable_box_is_grasped_with_its_contents_only_without_its_lid_and_ca
         "the pieces rise with the box"
 
 
+def test_fingers_take_a_piece_beside_the_box_wall_the_box_by_its_rim_and_nothing_through_a_lid(kitchen_root):
+    sim = WorldSim(_scenario(kitchen_root)["sceneState"])
+    sim.step_seconds(0.5)  # settled: what rests on what comes from the contacts
+    rs = sim.robots["w:robot-1"]
+    link, g = next(iter(rs.grippers.items()))
+
+    def close_at(point) -> str | None:
+        sim.grasp_point = lambda robot, gripper=None: {"p": list(point), "q": [1.0, 0.0, 0.0, 0.0]}
+        g.attached = g.handle = None
+        sim._try_attach(rs, g, link)
+        return g.attached
+
+    box = sim.entity_obb("w:box")
+    corner = min((f"w:piece-{r}{c}" for r in range(3) for c in range(3)),
+                 key=lambda p: sim._entity_pose(p)["p"][0])  # one of the pieces nearest the box's -x wall
+    piece = sim._entity_pose(corner)["p"]
+    assert close_at(piece) is None, "under the lid nothing in the box can be taken"
+    sim.edit_move("w:lid", {"at": {"x": 2.0, "y": 1.5}})
+    sim.step_seconds(0.5)
+    assert close_at(sim._entity_pose(corner)["p"]) == corner, "on a piece's middle by the wall: the piece, not the box"
+    rim = [box.center[0] - box.size[0] / 2 + 0.015, box.center[1], box.center[2]]
+    assert close_at(rim) == "w:box", "on the rim, the wall between the fingers: the box"
+
+
 def _track(oid, category, pos, size, observations=10, yaw=0.0):
     return Track(id=oid, category_counts={category: 5.0}, pos=np.array(pos, float), var=np.full(3, 1e-4), yaw=yaw,
                  yaw_var=1e-3, size=np.array(size, float), observations=observations, first_seen=0.0, last_seen=0.0,

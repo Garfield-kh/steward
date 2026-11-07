@@ -82,3 +82,11 @@ def test_the_twin_picks_a_bowl_and_puts_it_down_elsewhere_on_the_table_through_r
     want = np.asarray(table["position"][:2]) + np.array([[math.cos(yaw), -math.sin(yaw)], [math.sin(yaw), math.cos(yaw)]]) @ [-0.30, -0.15]
     assert np.linalg.norm(np.asarray(bowl[:2]) - want) < 0.06, (bowl, want)
     assert bowl[2] > 0.74, "on the table, not on the floor"
+
+
+def test_the_twins_cameras_are_captured_with_the_pose_of_the_gripper_its_arm_works_with(cobot):
+    _, api = cobot
+    packet = call("POST", f"{api}/ego/cameras/capture", {})
+    assert set(packet["views"]) == {"head_camera", "wide_camera"}
+    assert packet["gripper_pose"]["gripper_frame"] == "L_link6"
+    assert call("GET", f"{api}/ego/gripper/pose")["gripper_frame"] == "L_link6"

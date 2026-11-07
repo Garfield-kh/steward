@@ -59,20 +59,28 @@ def reference_to_odometry(model: dict, packet: dict) -> np.ndarray:
     return base_odom @ camera_base @ flu_from_cv
 
 
-def gripper_pose(model: dict, packet: dict) -> dict:
+def grasp_link(model: dict) -> str:
+    """The model's first grasp-point link (the kitchen robot's ``gripper``, the twin's ``L_link6``)."""
+    return next(link["id"] for link in model["body"]["links"]
+                if any((a if isinstance(a, str) else a.get("value")) == "grasp-point" for a in link.get("affordances", [])))
+
+
+def gripper_pose(model: dict, packet: dict, gripper: str | None = None) -> dict:
     """Return gripper-link-to-base and gripper-link-to-camera matrices in metres.
 
-    Body links use x forward, y left, z up; camera frames use OpenCV x right, y down,
-    z forward. Only the robot body model, encoder sample and relative rig calibration
-    contribute. No odometry or simulator absolute pose is required.
+    ``gripper`` is the grasp-point link to report (default: :func:`grasp_link`). Body links use
+    x forward, y left, z up at their zero pose; camera frames use OpenCV x right, y down, z
+    forward. Only the robot body model, encoder sample and relative rig calibration contribute.
+    No odometry or simulator absolute pose is required.
     """
+    gripper = gripper or grasp_link(model)
     if (packet["reference_camera"] != "head_camera" or packet["camera_axes"] != CAMERA_AXES
             or packet["calibration_source"] != "rig_calibration"
             or not math.isfinite(packet["stamp"]) or packet["stamp"] < 0
             or "head_camera" not in packet["views"]):
         raise ValueError("Invalid robot kinematics packet")
     encoders = packet["joint_encoders"]
-    gripper_to_base = _matrix(_link_pose(model, encoders, "gripper"))
+    gripper_to_base = _matrix(_link_pose(model, encoders, gripper))
     camera_link, camera = next((link["id"], sensor) for link in model["body"]["links"]
                                for sensor in link.get("sensors", []) if sensor["id"] == "head_camera")
     reference_to_base = _matrix(pose_compose(_link_pose(model, encoders, camera_link), camera["mount"]))
@@ -88,6 +96,6 @@ def gripper_pose(model: dict, packet: dict) -> dict:
             raise ValueError("Invalid camera rig calibration")
         relative[camera_id] = (np.linalg.inv(reference_to_base @ camera_to_reference) @ gripper_to_base).tolist()
     return {"stamp": packet["stamp"], "pose_source": "joint_encoders_and_robot_model",
-            "gripper_frame": "gripper", "gripper_axes": "x_forward_y_left_z_up", "camera_axes": CAMERA_AXES,
+            "gripper_frame": gripper, "gripper_axes": "x_forward_y_left_z_up", "camera_axes": CAMERA_AXES,
             "joint_positions": dict(encoders), "gripper_to_base": gripper_to_base.tolist(),
             "gripper_to_camera": relative}

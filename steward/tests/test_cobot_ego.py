@@ -71,7 +71,8 @@ def test_the_twin_picks_a_bowl_and_puts_it_down_elsewhere_on_the_table_through_r
         time.sleep(0.5)
     assert bowls and tables, [o["category"] for o in objects]
     summary = call("GET", f"{api}/ego/summary")
-    assert set(summary["self"]["joints"]) == {"lift", "reach", "wrist_yaw", "wrist_roll"}, "the planar arm, as on the kitchen robot"
+    assert set(summary["self"]["joints"]) == {"lift", "reach", "wrist_yaw", "wrist_roll", "wrist_pitch"}, \
+        "the kitchen robot's planar arm, and the tool tilt its gripper lacks"
     picked = _run(api, "pick", {"target": bowls[0]["id"]})
     assert picked["state"] == "succeeded", (picked["message"], picked["log"])
     table = tables[0]
@@ -92,3 +93,186 @@ def test_the_twins_cameras_are_captured_with_the_pose_of_the_gripper_its_arm_wor
     assert set(packet["views"]) == {"head_camera", "wide_camera"}
     assert packet["gripper_pose"]["gripper_frame"] == "L_link6"
     assert call("GET", f"{api}/ego/gripper/pose")["gripper_frame"] == "L_link6"
+
+
+def _home_arm() -> PiperArm:
+    from steward.assets.cobot import HOME, LIFT_HOME
+
+    arm = PiperArm(robot_model("cobot-magic"))
+    arm.virtualize({"joints": {"lift": LIFT_HOME, **dict(zip(arm.names, HOME, strict=True))},
+                    "odometry": {"x": 0.0, "y": 0.0, "yaw": 0.0}})
+    return arm
+
+
+def test_the_piper_tilts_its_tool_forward_to_reach_past_where_it_reaches_pointing_down():
+    arm = _home_arm()
+    assert not arm.reachable(0.6, 0.62), "the tool straight down reaches 0.50 m ahead of the mount"
+    assert arm.reachable(0.6, 0.62, wrist_pitch=1.05)
+    solved = arm.command({"lift": 0.9, "reach": 0.62, "wrist_pitch": 1.05})["joints"]
+    measured = arm._fk(solved["lift"], [solved[n] for n in arm.names])
+    assert measured["reach"] == pytest.approx(0.62, abs=0.006) and measured["lift"] == pytest.approx(0.9, abs=0.006)
+    assert measured["wrist_pitch"] == pytest.approx(1.05, abs=0.03) and measured["wrist_roll"] == pytest.approx(0.0, abs=0.03)
+
+
+def test_the_torso_and_all_six_joints_tip_a_held_box_past_upright_in_one_motion():
+    """Solved for the arm alone at a few torso heights, the tip turned the wrist over at 1.4 rad
+    (joint4 at its limit); solved with the torso, step after step from the last posture, the arm
+    tips the box the 1.9 rad its walls need without a jump."""
+    arm = _home_arm()
+
+    def tip(roll: float) -> list[dict]:
+        return [{"lift": 0.85 + 0.27 * abs(math.sin(roll * k / 20)), "reach": 0.5, "wrist_roll": roll * k / 20,
+                 "wrist_pitch": 1.05} for k in range(21)]
+
+    assert arm.reachable_path(tip(1.9)) and arm.reachable_path(tip(-1.9))
+    assert not arm.reachable_path(tip(1.9)[:1] + tip(-1.9)[-1:]), "a half-turn of the wrist in one step is a jump"
+
+
+def _pumped(host: StewardHost, work):
+    """Run ``work`` on a thread while the main thread serves the host's renders."""
+    import threading
+
+    out: dict = {}
+
+    def run() -> None:
+        try:
+            out["value"] = work()
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the main thread
+            out["error"] = exc
+
+    worker = threading.Thread(target=run)
+    worker.start()
+    while worker.is_alive():
+        host.pump(0.02)
+    if "error" in out:
+        raise out["error"]
+    return out["value"]
+
+
+@pytest.fixture
+def cobot_in(kitchen_root, tmp_path):
+    """The twin in a scenario of the kitchen root, driven by the shared Ego Runtime."""
+    started = []
+
+    def start(scenario: str):
+        host = StewardHost(kitchen_root, scenario=scenario, body="cobot-magic", speed=math.inf, seed=3,
+                           run_dir=tmp_path).start()
+        rid = next(iter(host.robot_servers))
+        model = robot_model("cobot-magic")
+        runtime = EgoRuntime(RobotLink(host.robot_servers[rid].url), model, runtime_config("cobot-magic"),
+                             arm=body_arm("cobot-magic", model))
+        runtime.start()
+        api = ego_api(runtime).start()
+        started.append((host, runtime, api))
+        _pumped(host, lambda: (time.sleep(2), _explore(api.url)))
+        return host, api.url
+
+    yield start
+    for host, runtime, api in started:
+        api.stop()
+        runtime.stop()
+        host.stop()
+
+
+def _explore(api: str) -> None:
+    job = call("POST", f"{api}/ego/explore", {})
+    call("POST", f"{api}/skill/wait", {"job": job["id"], "timeoutS": 120}, timeout=130)
+
+
+def _receipt(api: str, skill: str, params: dict) -> tuple[dict, dict]:
+    receipt = call("POST", f"{api}/ego/predict", {"skill": skill, "params": params})
+    assert receipt["feasible"] and receipt["withinRiskLimit"], (skill, receipt["issues"])
+    job = call("POST", f"{api}/skill/run", {"receipt": receipt["id"]})
+    done = call("POST", f"{api}/skill/wait", {"job": job["id"], "timeoutS": 150}, timeout=160)
+    assert done["state"] == "succeeded", (skill, done["message"], done["log"])
+    return receipt, done
+
+
+def test_the_twin_takes_things_out_of_both_drawers_deep_ones_with_its_tool_tilted(cobot_in):
+    """The cabinet drawer's bottle lies beyond where the tool reaches pointing down, so the pick tilts
+    it; the sideboard drawer's pistol lies below the drawer front, which the wrist would sweep shut
+    reaching in at that height, so the arm comes in over the front and goes straight down."""
+    host, api = cobot_in("phase0-chores")
+
+    def swap() -> dict:
+        objects = call("GET", f"{api}/ego/summary")["objects"]
+        drawers = {round(o["position"][0]) > 0: o for o in objects if o["category"] == "drawer"}
+        plans = {}
+        for cabinet_side, wanted in ((True, "pill_bottle"), (False, "pistol")):
+            drawer = drawers[cabinet_side]
+            _receipt(api, "open", {"target": drawer["id"]})
+            inside = [o for o in call("GET", f"{api}/ego/summary")["objects"]
+                      if o.get("on") == drawer["id"] and o["category"] == wanted]
+            assert inside, wanted
+            picked, _ = _receipt(api, "pick", {"target": inside[0]["id"]})
+            plans[wanted] = (picked["plan"], drawer["position"][2] + drawer["sizeM"][2] / 2)
+            _receipt(api, "place", {"on": drawer["id"]})
+            _receipt(api, "close", {"target": drawer["id"]})
+        return plans
+
+    plans = _pumped(host, swap)
+    bottle, _ = plans["pill_bottle"]
+    assert bottle.get("wristPitch", 0.0) > 0.0, "beyond 0.50 m the tool tilts"
+    pistol, front = plans["pistol"]
+    assert pistol["approachLift"] > front > pistol["lift"], "in over the drawer front, then down"
+    relations = host.sim.world_state()["relations"]
+    rest = {r["a"]["entity"]: r["b"] for r in relations if r["type"] == "supported-by"}
+    assert rest["w:pill-bottle"]["entity"] == "w:cabinet-1" and rest["w:pistol"]["entity"] == "w:sideboard-1"
+
+
+def _puzzle_ids(api: str) -> tuple[dict, dict, dict]:
+    objects = call("GET", f"{api}/ego/summary")["objects"]
+    lid = next(o for o in objects if o["category"] == "lid")
+    box = next(o for o in objects if o["category"] in ("box", "picture"))
+    table = next(o for o in objects if "table" in o["category"])
+    call("POST", f"{api}/ego/annotate", {"entity": lid["id"], "affordances": ["graspable", "flat"]})
+    call("POST", f"{api}/ego/annotate", {"entity": box["id"], "label": "box",
+                                        "affordances": ["graspable", "container", "receptacle", "pourable"]})
+    call("POST", f"{api}/ego/annotate", {"entity": table["id"], "label": "table", "affordances": ["support-surface"]})
+    return lid, box, table
+
+
+def test_the_twin_takes_the_puzzle_box_by_its_rim_tilted_and_pours_it_out_onto_the_table(cobot_in):
+    """The box's walls hold the pieces until it is past upright. The Piper's wrist alone turns over
+    at 1.4 rad; the torso and all six joints solved together tip it 1.9 rad in one motion, the
+    torso rising as its lower edge swings down."""
+    host, api = cobot_in("puzzle-dog")
+
+    def pour() -> tuple[dict, dict]:
+        lid, box, table = _puzzle_ids(api)
+        _receipt(api, "pick", {"target": lid["id"]})
+        _receipt(api, "place", {"on": table["id"], "offset": [0.75, 0.0]})
+        taken, _ = _receipt(api, "pick", {"target": box["id"]})
+        poured, _ = _receipt(api, "pour", {"on": table["id"]})
+        return taken["plan"], poured["plan"]
+
+    taken, poured = _pumped(host, pour)
+    assert taken["wristPitch"] == pytest.approx(1.05), "a container to be poured is taken with the wrist tilted most"
+    assert taken["graspDz"] > 0, "on its rim, above its centre"
+    assert poured["roll"] >= 1.7
+    box = np.asarray(host.sim._entity_pose("w:box")["p"])
+    pieces = [np.asarray(e["pose"]["value"]["p"]) for e in host.sim.world_state()["entities"] if e["id"].startswith("w:piece")]
+    still_in = [q for q in pieces if np.all(np.abs(q[:2] - box[:2]) < 0.27) and abs(q[2] - box[2]) < 0.04]
+    assert not still_in, f"{len(still_in)} pieces stayed in the box"
+    assert sum(q[2] > 0.7 for q in pieces) >= len(pieces) - 2, "the pieces land on the table"
+
+
+def test_the_twin_lifts_puzzle_pieces_out_of_the_box_over_its_wall(cobot_in):
+    host, api = cobot_in("puzzle-cat")
+
+    def lift_one() -> dict:
+        lid, box, table = _puzzle_ids(api)
+        _receipt(api, "pick", {"target": lid["id"]})
+        _receipt(api, "place", {"on": table["id"]})
+        time.sleep(1)
+        pieces = [o for o in call("GET", f"{api}/ego/summary")["objects"]
+                  if o["category"] == "puzzle_piece" and o.get("on") == box["id"]]
+        piece = next(o for o in pieces if call("POST", f"{api}/ego/predict",
+                                               {"skill": "pick", "params": {"target": o["id"]}})["feasible"])
+        lifted, _ = _receipt(api, "pick", {"target": piece["id"]})
+        _receipt(api, "place", {"on": table["id"], "offset": [0.3, 0.25]})
+        return lifted["plan"]
+
+    lifted = _pumped(host, lift_one)
+    assert lifted["approachLift"] > lifted["lift"], "a piece comes out over the box wall"
+    assert not [r for r in host.sim.world_state()["relations"] if r["type"] == "attached"]

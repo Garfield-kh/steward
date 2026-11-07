@@ -166,10 +166,11 @@ class EstimatorConfig:
     lost_content_s: float = 4.0
     """Seconds a track carried in the held container may go unseen while the container is seen
     before it is taken to have fallen out (:meth:`EgoEstimator._drop_lost_contents`)."""
-    poured_roll: float = 0.55
+    poured_roll: float = 1.5
     """Tilt (rad) of the held container from how it was taken beyond which its contents have slid
     out: their tracks are dropped, and the contents are perceived afresh where they land. Below the
-    least tip a pour uses (ESim's ``pour_roll_min``)."""
+    least tip a pour uses (ESim's ``pour_roll_min``); a walled box holds its contents until it is
+    nearly on its side (measured: at 1.5 rad nothing came out)."""
     wall_like_top: float = 1.25
     """Robot knowledge of the home: nothing but walls reaches this high, so a region topping it is
     part of a wall whatever its own classification says, and a non-wall track this tall is not real."""

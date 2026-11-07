@@ -7,13 +7,20 @@ height ``lift`` above the floor; ``wrist_yaw`` turns what the gripper holds abou
 own encoders (:meth:`Arm.virtualize`) and turns commands on them into commands for its own
 actuators (:meth:`Arm.command`). For the kitchen robot both are its real joints; a body with a
 6-DoF arm solves inverse kinematics instead (:mod:`steward.ego.cobot_arm`).
+
+Such an arm may also tilt its tool forward, ``wrist_pitch`` about the lateral axis
+(``ArmGeometry.wrist_pitch_max``; the kitchen robot's gripper always points down): the tool comes
+in at an angle, which reaches farther and leaves the wrist free to tip a container far. A grasp
+taken at a pitch is carried at it -- changing the pitch tilts what the gripper holds -- so only a
+pick chooses it.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 
-VIRTUAL_JOINTS = ("lift", "reach", "wrist_yaw", "wrist_roll")
+VIRTUAL_JOINTS = ("lift", "reach", "wrist_yaw", "wrist_roll", "wrist_pitch")
 
 
 @dataclass(frozen=True)
@@ -29,6 +36,8 @@ class ArmGeometry:
     wrist_yaw_max: float
     wrist_roll_max: float
     gripper: str  # the grasp-point link that holds what this arm carries
+    wrist_pitch_max: float = 0.0  # forward tilt of the tool; 0: it always points down
+
 
 
 class Arm:
@@ -40,10 +49,13 @@ class Arm:
 
     def virtualize(self, state: dict) -> dict:
         """``state`` (a sensor header: odometry, joints, gripper or grippers) in planar-arm terms:
-        ``joints`` holds the four virtual joints, ``gripper`` the arm's gripper, and ``toolOffset``
-        / ``armLateral`` its geometry. Remembers the header for :meth:`command`."""
+        ``joints`` holds the four virtual joints, ``gripper`` the arm's gripper, ``toolOffset`` /
+        ``armLateral`` its geometry, and ``armResting`` whether the arm stands in a rest posture
+        outside the planar arm's workspace (the next command takes it straight there). Remembers the
+        header for :meth:`command`."""
         joints = state.get("joints") or {}
         out = {**state, "toolOffset": self.geometry.tool_offset, "armLateral": self.geometry.lateral,
+               "armResting": self.resting(),
                "joints": {**joints, **{k: joints[k] for k in VIRTUAL_JOINTS if k in joints}}}
         grippers = state.get("grippers") or {}
         if self.geometry.gripper in grippers:
@@ -55,11 +67,31 @@ class Arm:
         command for the body."""
         return cmd
 
-    def reachable(self, lift: float, reach: float, wrist_yaw: float = 0.0, wrist_roll: float = 0.0) -> bool:
-        """Whether the arm can hold its grasp point at ``lift`` and ``reach`` turned and tipped so."""
+    def resting(self) -> bool:
+        """Whether the arm stands in a rest posture outside the planar arm's workspace: the slide's
+        joints are the planar arm, so never."""
+        return False
+
+    def reachable(self, lift: float, reach: float, wrist_yaw: float = 0.0, wrist_roll: float = 0.0,
+                  wrist_pitch: float = 0.0) -> bool:
+        """Whether the arm can hold its grasp point at ``lift`` and ``reach`` turned, tipped and
+        tilted so."""
         g = self.geometry
         return (g.lift_min <= lift <= g.lift_max and g.reach_min <= reach <= g.reach_max
-                and abs(wrist_yaw) <= g.wrist_yaw_max and abs(wrist_roll) <= g.wrist_roll_max)
+                and abs(wrist_yaw) <= g.wrist_yaw_max and abs(wrist_roll) <= g.wrist_roll_max
+                and 0.0 <= wrist_pitch <= g.wrist_pitch_max)
+
+    def pitch_for(self, lift: float, reach: float, wrist_yaw: float = 0.0, wrist_roll: float = 0.0) -> float | None:
+        """The least forward tilt of the tool at which the arm holds its grasp point at ``lift`` and
+        ``reach`` turned and tipped so; None where no tilt does. A tool that always points down: 0."""
+        return 0.0 if self.reachable(lift, reach, wrist_yaw, wrist_roll) else None
+
+    def reachable_path(self, targets: Sequence[dict]) -> bool:
+        """Whether the arm can move its grasp point through ``targets`` (virtual joints; turn, tip
+        and tilt default to 0) in order without a jump between two of them: the slide's joints
+        move straight through each."""
+        return all(self.reachable(t["lift"], t["reach"], t.get("wrist_yaw", 0.0), t.get("wrist_roll", 0.0),
+                                  t.get("wrist_pitch", 0.0)) for t in targets)
 
     def joints_of(self, joints: dict, odometry: dict) -> dict:
         """The virtual joints for encoder readings ``joints`` at ``odometry`` (planning reads the

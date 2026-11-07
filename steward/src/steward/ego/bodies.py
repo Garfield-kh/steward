@@ -35,12 +35,13 @@ def runtime_config(body: str, base: RuntimeConfig | None = None) -> RuntimeConfi
     if body != "cobot-magic":
         return cfg
     # The TRACER base is servoed at 0.5 m/s and 1 rad/s (assets.cobot.ROOT_ACTUATOR): commanded faster,
-    # it lags its setpoint and every docking misses. The Piper wrist tips a container to 1.2 rad,
-    # so it pours at 1.1; a retracted arm stays inside the reach its tool-down workspace has. Its
-    # reach is short, so a large object is taken by the edge nearest the robot (it then hangs ahead
-    # of the hand) and set down with a 5 cm margin inside the surface's edge.
+    # it lags its setpoint and every docking misses. The arm's joints, servoed straight to a solved
+    # posture, sweep the wrist off the line the grasp point is to move along, so its moves are
+    # ramped. A retracted arm stays inside the reach its tool-down workspace has; tilted, the tool
+    # reaches 0.70 m. Its reach is still short, so a large object is taken by the edge nearest the
+    # robot (it then hangs ahead of the hand) and set down with a 5 cm margin inside the surface's edge.
     motion = dataclasses.replace(cfg.motion, linear_speed=0.45, angular_speed=0.9, look_angular_speed=0.6,
-                                 gentle_speed=0.25, gentle_turn_speed=0.4, retract_reach=0.15, reach_max=0.48,
-                                 joint_tol=0.02)
-    esim = dataclasses.replace(cfg.esim, pour_roll=1.1, edge_grasp_first=True, place_edge_margin=0.05)
+                                 gentle_speed=0.25, gentle_turn_speed=0.4, retract_reach=0.15, reach_max=0.70,
+                                 joint_tol=0.02, arm_speed=0.3)
+    esim = dataclasses.replace(cfg.esim, edge_grasp_first=True, place_edge_margin=0.05)
     return dataclasses.replace(cfg, motion=motion, esim=esim)

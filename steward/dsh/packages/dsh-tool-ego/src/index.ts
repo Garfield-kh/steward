@@ -199,7 +199,7 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
         x: { type: 'number', description: 'navigate: goal x in metres.' },
         y: { type: 'number', description: 'navigate: goal y in metres.' },
         yaw: { type: 'number', description: 'navigate: goal heading; place: final heading of the object\'s frame (as ego_state yawDeg and ego_inspect report it), radians; the wrist turns it.' },
-        flip: { type: 'boolean', description: 'place: turn the held object upside down before setting it down.' },
+        flip: { type: 'boolean', description: 'place: turn the held object upside down before setting it down. pick: take it so that it can be turned over later; some arms take it tilted for that, and a place with flip says when the object must be picked again with flip.' },
         clearance: { type: 'number', description: 'place, pour: least gap in metres kept to objects already on the surface (default 0.015). With an offset, 0 allows contact or overlap (interlocking pieces, stacking): the spot is used exactly as requested, never shifted aside.' },
       },
       output: { schema: JSON_OUTPUT, render: (_a, v) => text(v) },

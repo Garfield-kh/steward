@@ -54,6 +54,16 @@ class EsimConfig:
     # Take a large object by its edge even when its centre is in reach: held so, it hangs ahead of
     # the gripper and can be set down (or poured) deeper on a surface than an arm of short reach gets.
     edge_grasp_first: bool = False
+    # Turned over (place with ``flip``), what a gripper pinches from above ends with the tool
+    # pointing up. An arm whose tool cannot point up at the surface turns it over above the spot,
+    # its tool tilted forward so that it points up only so far, and lowers it as far as it reaches
+    # turned over (Arm.turn_over), the rest of the way it drops flat. It needs the object taken
+    # tilted at least ``flip_pitch_min`` (pick with ``flip``), turns it ``flip_turn_above`` above
+    # where it is set down and lets it drop at most ``flip_drop_max``.
+    flip_in_air: bool = False
+    flip_pitch_min: float = 1.0
+    flip_turn_above: float = 0.2
+    flip_drop_max: float = 0.15
     receipt_ttl: float = 60.0
     dock_gap: float = 0.07
     predock_backoff: float = 0.35
@@ -754,8 +764,14 @@ class Esim:
         anchor = target if (on_floor or blind) else self._anchor(es, support)
         # Tilted most, the wrist tips a container farthest; anything else is taken with the least tilt,
         # or tilted most where the least does not also hold a dock that lands short or long.
+        # Taken to be turned over (``flip``) by an arm that does so in the air, it is tilted most.
         most = self.arm.geometry.wrist_pitch_max
-        pitches = [most, None] if self._affords(target, "pourable") else ([None, most] if most > 0 else [None])
+        if params.get("flip") and self.config.flip_in_air:
+            pitches = [most]
+        elif self._affords(target, "pourable"):
+            pitches = [most, None]
+        else:
+            pitches = [None, most] if most > 0 else [None]
         approach, grasp_offset, grasp_z = None, None, tp[2]
         first: PredictionError | None = None
         rim_z = max(tp[2], target_top - self.config.edge_grasp_depth) if self._affords(target, "container") else tp[2]
@@ -894,8 +910,29 @@ class Esim:
             plan["wristYaw"] = self._wrist_for(es, held, float(params["yaw"]), approach["yaw"], bool(params.get("flip")))
         if params.get("flip"):
             plan["wristRoll"] = math.pi  # turned over about the arm axis before it is set down
+            if self.config.flip_in_air:
+                plan.update(self._turn_over_plan(es, held, approach["reach"], height))
         plan["gentle"] = self._affords(held, "pourable")
         return self._receipt(es, "place", params, risk, issues, plan)
+
+    def _turn_over_plan(self, es: SceneState, held: Entity, reach: float, height: float) -> dict:
+        """For ``flip_in_air``: ``turnLift``, where the held object is turned over above its spot
+        ``reach`` out, and ``lift``, the lowest height the arm then brings it down to, at most
+        ``flip_drop_max`` above ``height`` (where it would be set down)."""
+        cfg = self.config
+        pitch = self._held_pitch(es)[0]
+        if pitch < cfg.flip_pitch_min:
+            raise PredictionError(f"{held.id} was taken with the tool tilted {pitch:.2f} rad; turning it over needs it "
+                                  f"taken tilted at least {cfg.flip_pitch_min:.2f} rad: put it down and pick it again "
+                                  "with flip")
+        turn = min(self.lift_max, height + cfg.flip_turn_above)
+        low = self.arm.turn_over(turn, reach, pitch, height)
+        if low is None:
+            raise PredictionError(f"the arm cannot turn {held.id} over {reach:.2f} m out")
+        if low - height > cfg.flip_drop_max:
+            raise PredictionError(f"turned over, {held.id} comes down only to {low - height:.2f} m above where it is "
+                                  f"set down; it would drop more than {cfg.flip_drop_max:.2f} m")
+        return {"turnLift": turn, "lift": low}
 
     def _grip_spot(self, es: SceneState, spot: tuple[float, float], dock_yaw: float, wrist_turn: float,
                    flip: bool) -> tuple[float, float]:

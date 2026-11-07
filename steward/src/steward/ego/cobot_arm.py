@@ -30,7 +30,7 @@ import numpy as np
 from steward.assets.cobot import ARM_MOUNT_X, CHASSIS, HOME, LIFT_HOME, LIFT_RANGE, TCP_OFFSET
 from steward.ego.arm import VIRTUAL_JOINTS, Arm, ArmGeometry
 from steward.ego.ik import CobotIK, IkError
-from steward.ego.skills import SkillFailed
+from steward.ego.skills import OutOfReach, SkillFailed
 from steward.math3d import matrix_from_quat, pose_compose, quat_from_axis_angle, quat_mul
 
 TOOL_DOWN = [0.0, 1.0, 0.0, 0.0]  # link6 +z (through the pinch point) along world -z
@@ -62,8 +62,8 @@ class PiperArmConfig:
     lift: tuple[float, float] = (0.30, 1.15)  # pinch point above the floor, tool down
     wrist_yaw_max: float = 3.1
     # Bounds only; what a posture allows is solved (``reachable``): the tool straight down tips
-    # less than 1 rad, tilted forward a full turn.
-    wrist_roll_max: float = 2.5
+    # less than 1 rad, tilted forward a full turn; a half turn turns what it holds over (``turn_over``).
+    wrist_roll_max: float = math.pi
     wrist_pitch_max: float = 1.05
     pitch_unseen_cos: float = 0.1  # |cos roll| below which the tool pitch cannot be read from the posture
     # Holding something, a small step of the grasp point (a ramp, a tip) that the solver can only
@@ -75,6 +75,12 @@ class PiperArmConfig:
     # the redundant torso sinks 0.12 m).
     max_joint_step: float = 0.6
     max_swing_m: float = 0.03
+    # Turning what it holds over (a half roll, tool tilted forward) the arm goes straight from its
+    # posture to the turned-over one in joint space: the wrist joints turn half a turn about the
+    # tool's own axis and the pinch point stays near its spot (measured: 3 cm forward halfway,
+    # height within 2 mm). A turn whose pinch point would leave its spot by more is refused.
+    max_turn_swing_m: float = 0.05
+    turn_lower_step: float = 0.02  # height step at which lowering what it turned over is checked
     small_step: tuple[float, float] = (0.05, 0.2)  # metres, radians: a command this close to the last is a step
     arrived_rad: float = 0.04  # encoders this close to the last solution report its command
     arrived_lift_m: float = 0.01
@@ -145,11 +151,14 @@ class PiperArm(Arm):
             out["gripper"] = grip if isinstance(grip, dict) else {self.geometry.gripper: grip}
         wanted = {k: float(cmd[k]) for k in VIRTUAL_JOINTS if k in cmd}
         if wanted:
-            torso, arm = self._solve(wanted)
+            torso, arm = self._solve(wanted, bool(cmd.get("turnOver")))
             out["joints"] = {"lift": torso, **dict(zip(self.names, arm, strict=True))}
         return out
 
-    def _solve(self, wanted: dict) -> tuple[float, list[float]]:
+    def _solve(self, wanted: dict, turn_over: bool = False) -> tuple[float, list[float]]:
+        """Torso and arm joints for ``wanted`` merged into the last target. ``turn_over`` solves it
+        from the target alone, as :meth:`turn_over` planned, and lets the arm go there in one move
+        while it holds something."""
         joints = self._last.get("joints") or {}
         with self._lock:
             target = dict(self._target) if self._target is not None else None
@@ -166,9 +175,9 @@ class PiperArm(Arm):
                           "wrist_pitch": 0.0}
             previous, prior = dict(target), self._solved
             target.update(wanted)
-            solved, last = self._ik(target, joints, prior)
+            solved, last = self._ik(target, {}) if turn_over else self._ik(target, joints, prior)
             holding = ((self._last.get("grippers") or {}).get(self.geometry.gripper) or {}).get("holding")
-            if (solved is not None and holding and prior is not None and self._step(previous, target)
+            if (solved is not None and holding and prior is not None and not turn_over and self._step(previous, target)
                     and self._jumps(prior, solved)):
                 raise SkillFailed(f"the {self.config.arm} arm would have to turn its wrist over to follow its gripper "
                                   f"{target['reach']:.2f} m ahead at {target['lift']:.2f} m (roll {target['wrist_roll']:.2f}, "
@@ -176,7 +185,7 @@ class PiperArm(Arm):
             if solved is not None:
                 self._target, self._solved = target, solved
                 return solved
-        raise SkillFailed(f"the {self.config.arm} arm cannot put its gripper {target['reach']:.2f} m ahead at "
+        raise OutOfReach(f"the {self.config.arm} arm cannot put its gripper {target['reach']:.2f} m ahead at "
                           f"{target['lift']:.2f} m height (wrist yaw {target['wrist_yaw']:.2f}, roll "
                           f"{target['wrist_roll']:.2f}, pitch {target['wrist_pitch']:.2f}) at any torso height: {last}")
 
@@ -296,6 +305,34 @@ class PiperArm(Arm):
                     lo = mid
             wide = min(g.wrist_pitch_max, hi + self.config.pitch_margin)
             return wide if self._ik({**at, "wrist_pitch": wide}, {})[0] is not None else hi
+
+    def turn_over(self, lift: float, reach: float, wrist_pitch: float, floor: float) -> float | None:
+        # Planned as the command runs it: both postures solved from the target alone, the move
+        # between them straight in joint space, then down step by step from the turned-over one.
+        g = self.geometry
+        if not (super().reachable(lift, reach, 0.0, 0.0, wrist_pitch) and g.lift_min <= floor <= lift):
+            return None
+        at = {"lift": lift, "reach": reach, "wrist_yaw": 0.0, "wrist_pitch": wrist_pitch}
+        with self._lock:
+            upright, _ = self._ik({**at, "wrist_roll": 0.0}, {})
+            over, _ = self._ik({**at, "wrist_roll": math.pi}, {})
+            if upright is None or over is None:
+                return None
+            spot = self._pinch(*upright)
+            for k in range(1, 11):
+                share = k / 10
+                between = (upright[0] + (over[0] - upright[0]) * share,
+                           [a + (b - a) * share for a, b in zip(upright[1], over[1], strict=True)])
+                if float(np.linalg.norm(self._pinch(*between) - spot)) > self.config.max_turn_swing_m:
+                    return None
+            low, prior = lift, over
+            while low - self.config.turn_lower_step >= floor - 1e-9:
+                nxt = low - self.config.turn_lower_step
+                solved, _ = self._ik({**at, "lift": nxt, "wrist_roll": math.pi}, {}, prior)
+                if solved is None or self._jumps(prior, solved):
+                    break
+                low, prior = nxt, solved
+            return low
 
     def reachable_path(self, targets) -> bool:
         if not super().reachable_path(targets):

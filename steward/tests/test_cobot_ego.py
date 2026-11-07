@@ -151,6 +151,26 @@ def test_the_torso_and_all_six_joints_tip_a_held_box_past_upright_in_one_motion(
     assert not arm.reachable_path(tip(1.9)[:1] + tip(-1.9)[-1:]), "a half-turn of the wrist in one step is a jump"
 
 
+def test_the_piper_turns_what_it_holds_over_in_the_air_with_its_tool_tilted_and_lowers_it():
+    """With the tool tilted most, a half turn of the wrist about the tool's own axis leaves the pinch
+    point near its spot; the arm then lowers it, still turned over, as far as it reaches so. With the
+    tool tilted less the arm cannot hold it turned over there at all."""
+    arm = _home_arm()
+    low = arm.turn_over(0.97, 0.36, 1.05, 0.77)
+    assert low is not None and 0.77 <= low < 0.92
+    assert arm.turn_over(0.97, 0.36, 0.6, 0.77) is None
+    arm._last["grippers"] = {arm.geometry.gripper: {"holding": "w:piece"}}
+    arm.command({"lift": 0.97, "reach": 0.36, "wrist_pitch": 1.05})
+    spot = arm._pinch(*arm._solved)
+    arm.command({"wrist_roll": math.pi, "turnOver": True})
+    assert float(np.linalg.norm(arm._pinch(*arm._solved) - spot)) < 0.01
+    for k in range(1, round((0.97 - low) / 0.02) + 1):
+        arm.command({"lift": 0.97 - 0.02 * k})
+    measured = arm._fk(arm._solved[0], arm._solved[1])
+    assert measured["lift"] == pytest.approx(low, abs=0.006)
+    assert abs(measured["wrist_roll"]) == pytest.approx(math.pi, abs=0.05)
+
+
 def _pumped(host: StewardHost, work):
     """Run ``work`` on a thread while the main thread serves the host's renders."""
     import threading
@@ -279,6 +299,40 @@ def test_the_twin_takes_the_puzzle_box_by_its_rim_tilted_and_pours_it_out_onto_t
     still_in = [p for p in pieces if rest.get(p) == "w:box"]
     assert not still_in, f"{still_in} stayed in the box"
     assert sum(p[2] > 0.7 for p in pieces.values()) >= len(pieces) - 2, "the pieces land on the table"
+
+
+def test_the_twin_turns_a_puzzle_piece_over_in_the_air_and_sets_it_down_on_the_table(cobot_in):
+    """Its gripper cannot point up at a surface: picked out of the box with flip the piece is pinched
+    with the tool tilted most, turned over by half a turn of the wrist above the table, lowered and
+    let go."""
+    host, api = cobot_in("puzzle-dog")
+
+    def up(world_id: str) -> float:
+        _, x, y, _ = host.sim._entity_pose(world_id)["q"]
+        return 1 - 2 * (x * x + y * y)
+
+    def flip() -> tuple[dict, str, float]:
+        lid, box, table = _puzzle_ids(api)
+        _receipt(api, "pick", {"target": lid["id"]})
+        _receipt(api, "place", {"on": table["id"], "offset": [0.75, 0.0]})
+        time.sleep(1)
+        pieces = [o for o in call("GET", f"{api}/ego/summary")["objects"]
+                  if o["category"] == "puzzle_piece" and o.get("on") == box["id"]]
+        piece = next(o for o in pieces if call("POST", f"{api}/ego/predict",
+                                               {"skill": "pick", "params": {"target": o["id"], "flip": True}})["feasible"])
+        picked, _ = _receipt(api, "pick", {"target": piece["id"], "flip": True})
+        held = next(r["a"]["entity"] for r in host.sim.world_state()["relations"] if r["type"] == "attached")
+        before = up(held)
+        placed, _ = _receipt(api, "place", {"on": table["id"], "offset": [0.0, 0.4], "flip": True})
+        time.sleep(1)
+        assert picked["plan"]["wristPitch"] == pytest.approx(1.05)
+        return placed["plan"], held, before
+
+    placed, held, before = _pumped(host, flip)
+    assert placed["turnLift"] > placed["lift"] >= 0.77, "turned over above the table, let go a little above it"
+    assert before * up(held) < -0.5, "the piece lies the other side up"
+    rest = {r["a"]["entity"]: r["b"]["entity"] for r in host.sim.world_state()["relations"] if r["type"] == "supported-by"}
+    assert rest[held] == "w:table-1"
 
 
 def test_the_twin_lifts_puzzle_pieces_out_of_the_box_over_its_wall(cobot_in):

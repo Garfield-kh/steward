@@ -64,8 +64,17 @@ class Arm:
 
     def command(self, cmd: dict) -> dict:
         """A command on the planar arm (``base``, the virtual joints, ``gripper`` open/close) as a
-        command for the body."""
-        return cmd
+        command for the body. ``turnOver`` marks the command that turns what the gripper holds over
+        in place (:meth:`turn_over`); the slide's wrist rolls there like any other command."""
+        return {k: v for k, v in cmd.items() if k != "turnOver"}
+
+    def turn_over(self, lift: float, reach: float, wrist_pitch: float, floor: float) -> float | None:
+        """The lowest height, no lower than ``floor``, to which the arm lowers what it holds after
+        turning it over (a half roll) at ``lift`` and ``reach`` with the tool tilted ``wrist_pitch``;
+        None where it cannot turn it over there. The slide's wrist rolls a half turn anywhere the
+        slide reaches: ``floor``."""
+        g = self.geometry
+        return floor if g.lift_min <= floor <= g.lift_max and g.reach_min <= reach <= g.reach_max else None
 
     def resting(self) -> bool:
         """Whether the arm stands in a rest posture outside the planar arm's workspace: the slide's

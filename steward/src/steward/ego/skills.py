@@ -33,6 +33,10 @@ class SkillFailed(Exception):
     pass
 
 
+class OutOfReach(SkillFailed):
+    """The arm cannot put its gripper where a command asks; the command was not sent."""
+
+
 @dataclass
 class MotionConfig:
     linear_speed: float = 1.4
@@ -65,6 +69,9 @@ class MotionConfig:
     reach_max: float = 0.70  # the wrist slide's upper joint limit; asking beyond it only fails
     stow_lift: float = 0.60
     dock_tol: float = 0.06
+    dock_position_tol: float = 0.01
+    """How near its docking pose the base settles before the arm moves (``position_tol`` leaves it
+    2-3 cm short, and the arm reaches that much farther than planned)."""
     dock_yaw_tol: float = 0.12
     align_min: float = 0.01
     align_max: float = 0.15
@@ -311,7 +318,9 @@ class SkillExecutor:
             if st["stamp"] > deadline:
                 raise SkillFailed(f"turn did not converge (yaw error {err:.2f} rad)")
 
-    def _translate_to(self, x1: float, y1: float, yaw: float, speed: float | None = None) -> None:
+    def _translate_to(self, x1: float, y1: float, yaw: float, speed: float | None = None,
+                      tol: float | None = None) -> None:
+        tol = self.config.position_tol if tol is None else tol
         st = self._state()
         x0, y0 = st["odometry"]["x"], st["odometry"]["y"]
         # The base yaw joint is continuous: express the heading in the same unwrapped frame as the
@@ -328,7 +337,7 @@ class SkillExecutor:
             frac = self._profile(1.0 if duration == 0 else min(1.0, (st["stamp"] - t0) / duration))
             self._command({"base": [x0 + (x1 - x0) * frac, y0 + (y1 - y0) * frac, yaw]})
             err = math.hypot(x1 - st["odometry"]["x"], y1 - st["odometry"]["y"])
-            if frac >= 1.0 and err < self.config.position_tol:
+            if frac >= 1.0 and err < tol:
                 return
             if stall.stuck(st["stamp"], err):
                 raise SkillFailed(f"base is blocked: no progress for {self.config.stall_s:.0f} s ({err:.2f} m from the waypoint)")
@@ -452,7 +461,7 @@ class SkillExecutor:
             # Only what the arm holds is held at the plan's tilt; an empty gripper points down.
             self._retract(plan if self._state()["gripper"].get("holding") else {})
         self._drive(job, plan["path"], plan["yaw"])
-        self._translate_to(plan["dock"][0], plan["dock"][1], plan["yaw"])
+        self._translate_to(plan["dock"][0], plan["dock"][1], plan["yaw"], tol=self.config.dock_position_tol)
         o = self._state()["odometry"]
         dist = math.hypot(o["x"] - plan["dock"][0], o["y"] - plan["dock"][1])
         dyaw = abs(wrap_angle(o["yaw"] - plan["yaw"]))
@@ -559,9 +568,15 @@ class SkillExecutor:
             left = np.array([-heading[1], heading[0]])
             goal = np.array(latest["p"][:2]) + forward * heading + sideways * left
             if n:
+                self._command({"gripper": "open"})
+                self._wait(self.config.grasp_wait_s)
                 self._align_lateral(goal.tolist())
-                self._set_joint("lift", latest["p"][2] + dz)
-                self._set_joint("reach", max(0.05, self._reach_to(goal.tolist())))
+                try:
+                    self._set_joint("lift", latest["p"][2] + dz)
+                    self._set_joint("reach", max(0.05, self._reach_to(goal.tolist())))
+                except OutOfReach as e:
+                    job.log.append(f"skipped probe {n}: {e}")
+                    continue
             self._command({"gripper": "close"})
             self._wait(self.config.grasp_wait_s)
             if self._state()["gripper"]["holding"]:
@@ -598,9 +613,16 @@ class SkillExecutor:
         self._dock(job, plan)
         if "wristYaw" in plan:
             self._ramp_joint("wrist_yaw", plan["wristYaw"], self.config.wrist_turn_s)
-        if "wristRoll" in plan:
-            self._ramp_joint("wrist_roll", plan["wristRoll"], self.config.wrist_turn_s)
         grip = plan.get("gripSpot", plan["spot"])
+        if "turnLift" in plan:
+            # Turned over in the air above the spot, then lowered as far as the arm reaches so.
+            self._align_lateral(grip)
+            self._set_joint("lift", plan["turnLift"])
+            self._reach_out(grip, plan.get("wristPitch"))
+            self._command({"wrist_roll": plan["wristRoll"], "turnOver": True})
+            self._set_joint("wrist_roll", plan["wristRoll"], ramp=False)
+        elif "wristRoll" in plan:
+            self._ramp_joint("wrist_roll", plan["wristRoll"], self.config.wrist_turn_s)
         self._align_lateral(grip)
         self._reach_over(plan, grip, plan["lift"])
         if not self._over_support(plan):
@@ -611,6 +633,10 @@ class SkillExecutor:
         self._released(plan["object"], plan["spot"])
         self._wait(self.config.release_wait_s)
         job.log.append(f"released {plan['object']} on {plan['support']}")
+        if "turnLift" in plan:
+            self._set_joint("lift", plan["turnLift"])
+            self._command({"wrist_roll": 0.0, "turnOver": True})
+            self._set_joint("wrist_roll", 0.0, ramp=False)
         self._withdraw(plan)
         self._untilt()
         self._set_joint("lift", max(plan["lift"], self.config.stow_lift))

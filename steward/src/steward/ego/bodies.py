@@ -40,8 +40,9 @@ def runtime_config(body: str, base: RuntimeConfig | None = None) -> RuntimeConfi
     # ramped. A retracted arm stays inside the reach its tool-down workspace has; tilted, the tool
     # reaches 0.70 m. Its reach is still short, so a large object is taken by the edge nearest the
     # robot (it then hangs ahead of the hand) and set down with a 5 cm margin inside the surface's edge.
+    # Its gripper cannot point up at a surface, so it turns things over in the air.
     motion = dataclasses.replace(cfg.motion, linear_speed=0.45, angular_speed=0.9, look_angular_speed=0.6,
                                  gentle_speed=0.25, gentle_turn_speed=0.4, retract_reach=0.15, reach_max=0.70,
                                  joint_tol=0.02, arm_speed=0.3)
-    esim = dataclasses.replace(cfg.esim, edge_grasp_first=True, place_edge_margin=0.05)
+    esim = dataclasses.replace(cfg.esim, edge_grasp_first=True, place_edge_margin=0.05, flip_in_air=True)
     return dataclasses.replace(cfg, motion=motion, esim=esim)

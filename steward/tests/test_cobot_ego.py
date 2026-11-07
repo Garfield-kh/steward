@@ -78,8 +78,10 @@ def test_the_twin_picks_a_bowl_and_puts_it_down_elsewhere_on_the_table_through_r
     placed = _run(api, "place", {"on": table["id"], "offset": [-0.30, -0.15]})
     assert placed["state"] == "succeeded", (placed["message"], placed["log"])
     bowl = host.sim._entity_pose("w:bowl-1")["p"]
-    yaw = math.radians(table["yawDeg"])
-    want = np.asarray(table["position"][:2]) + np.array([[math.cos(yaw), -math.sin(yaw)], [math.sin(yaw), math.cos(yaw)]]) @ [-0.30, -0.15]
+    real = host.sim._entity_pose("w:table-1")
+    w, _, _, z = real["q"]
+    yaw = 2 * math.atan2(z, w)
+    want = np.asarray(real["p"][:2]) + np.array([[math.cos(yaw), -math.sin(yaw)], [math.sin(yaw), math.cos(yaw)]]) @ [-0.30, -0.15]
     assert np.linalg.norm(np.asarray(bowl[:2]) - want) < 0.06, (bowl, want)
     assert bowl[2] > 0.74, "on the table, not on the floor"
 

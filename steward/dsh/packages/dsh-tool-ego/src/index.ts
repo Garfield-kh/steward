@@ -284,6 +284,21 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
       },
     }),
     defineTool({
+      name: 'ego_forget',
+      description: 'Remove an object from the Ego State as a false perception. Use it only for an object that is '
+        + 'physically implausible (marked `unsupported`: floating with nothing under it, or inside another solid object) '
+        + 'and that you looked for again, with ego_observe from a place where its spot is in view, without perceiving it '
+        + '(its lastSeenAgoS keeps growing). The robot refuses an object it holds or perceived in the last few seconds.',
+      parameters: {
+        entity: { type: 'string', required: true, description: 'Id of the object.' },
+        reason: { type: 'string', required: true, description: 'Why it is implausible and how you looked for it again.' },
+      },
+      output: { schema: JSON_OUTPUT, render: (_a, v) => text(v) },
+      async execute(args, exec) {
+        return json(await ego.forget({ entity: args.entity, reason: args.reason }, exec.signal))
+      },
+    }),
+    defineTool({
       name: 'ego_candidates',
       description: 'Find the objects that could be what the instruction calls something when perception names it differently: '
         + 'the segmenter names things by appearance (a lid printed with a picture can be "picture"), and the classifier only '

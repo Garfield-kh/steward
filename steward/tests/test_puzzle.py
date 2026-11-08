@@ -58,7 +58,7 @@ def test_the_four_by_four_pieces_lie_inside_their_box_and_the_pour_spot_fits_the
             p = sim._entity_pose(f"w:piece-{r}{c}")["p"]
             assert abs(p[0] - box[0]) < half_box and abs(p[1] - box[1]) < half_box
     table = next(e for e in _scenario(kitchen_root, "puzzle-dog")["sceneState"]["entities"] if e["id"] == "w:table-1")
-    assert table["asset"]["id"] == "puzzle-table-120x57"
+    assert table["asset"]["id"] == "puzzle-table-180x57"
     assert 0.575 / 2 > half_box + EsimConfig().pour_spill_sizes * PUZZLE_PIECE_M
 
 

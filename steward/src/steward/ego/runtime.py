@@ -740,6 +740,7 @@ class EgoRuntime:
                 "affordances": [a.value for a in ent.rigid.links[0].affordances],
                 "color": ent.state_vars["color"].value if "color" in ent.state_vars else None,
                 "extentM": self._extent(ent.id),
+                **({"unsupported": True} if self._unsupported(ent.id) else {}),
                 **({"openingM": round(self._opening(ent.id), 3)} if ent.category.value == "drawer" else {}),
                 **self._front(ent),
                 **self._appearance(ent.id),
@@ -779,6 +780,12 @@ class EgoRuntime:
         with self._lock:
             track = self.estimator.tracks.get(track_id)
             return [round(float(v), 3) for v in track.size] if track is not None else None
+
+    def _unsupported(self, track_id: str) -> bool:
+        """Whether the object floats where it is believed to be (:meth:`EgoEstimator.unsupported`)."""
+        with self._lock:
+            track = self.estimator.tracks.get(track_id)
+            return track is not None and self.estimator.unsupported(track)
 
     def _front(self, ent) -> dict:
         """Heading of the face looking into the room, for furniture and drawers."""
@@ -1125,6 +1132,26 @@ class EgoRuntime:
             self.estimator.annotate(entity, label, affordances)
             self._publish_view_scene()
         return next(o for o in self.summary()["objects"] if o["id"] == entity)
+
+    def forget(self, request: dict) -> dict:
+        """Remove an Ego-State object the robot's agent judged a false perception: implausible where
+        it is believed to be and not perceived again on a fresh look at its place.
+
+        :param request: ``{entity, reason}``.
+        :returns: the removal record as it appears in ``dropped``.
+        :raises ValueError: malformed fields, or the object is held or was seen recently;
+            :raises KeyError: no such object."""
+        entity, reason = request.get("entity"), request.get("reason")
+        if not isinstance(entity, str):
+            raise ValueError("forget needs an entity id")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("forget needs a reason: what made the object implausible and how it was looked for again")
+        with self._lock:
+            if entity not in self.estimator.tracks:
+                raise KeyError(f"unknown object {entity!r}")
+            self.estimator.forget(entity, reason.strip())
+            self._publish_view_scene()
+            return dict(self.estimator.dropped[-1])
 
     def receipt(self, receipt_id: str) -> dict:
         if receipt_id not in self.receipts:

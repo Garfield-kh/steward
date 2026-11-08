@@ -6,7 +6,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { EgoError, EgoService } from '@steward/dsh-ego'
-import type { Annotation, Candidate, CandidateQuery, EgoQuery, FailureReport, Reflection, EgoSkill, FaceMatchResult, InspectResult, JsonObject, PredictionReceipt, ProblemReport, SkillJob, RecordingId } from '@steward/dsh-ego'
+import type { Annotation, Forgetting, Candidate, CandidateQuery, EgoQuery, FailureReport, Reflection, EgoSkill, FaceMatchResult, InspectResult, JsonObject, PredictionReceipt, ProblemReport, SkillJob, RecordingId } from '@steward/dsh-ego'
 import { saveCameraCapture } from './camera-capture.ts'
 import { parseCameraCalibration, parseGripperPose } from './sensor-packet.ts'
 import { baseUrl, HttpJsonError, requestJson } from '@steward/http-json'
@@ -132,6 +132,10 @@ export class EgoRuntimeClient extends EgoService {
 
   annotate(annotation: Annotation, signal?: AbortSignal): Promise<JsonObject> {
     return this.call('POST', '/ego/annotate', annotation, signal)
+  }
+
+  forget(forgetting: Forgetting, signal?: AbortSignal): Promise<JsonObject> {
+    return this.call('POST', '/ego/forget', forgetting, signal)
   }
 
   async candidates(query: CandidateQuery, signal?: AbortSignal): Promise<Candidate[]> {

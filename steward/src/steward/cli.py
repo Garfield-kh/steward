@@ -886,7 +886,7 @@ def main(argv: list[str] | None = None) -> int:
                            help="DSH home of the robot's Ego Harness used by the console chat; '' disables it")
             p.add_argument("--turn-budget-s", type=float, default=TURN_BUDGET_S,
                            help="wall seconds one console chat turn of a harness may run before it is ended; "
-                                "default: 30 days")
+                                "default: 24 days")
         if name == "world":
             p.add_argument("--ego-api", default="http://127.0.0.1:7420",
                            help="Ego API of the robot, for robot tasks from the console chat")

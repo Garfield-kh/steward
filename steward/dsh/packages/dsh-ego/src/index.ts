@@ -107,6 +107,13 @@ export interface Annotation {
   affordances?: string[]
 }
 
+/** The robot agent's judgement that an Ego-State object is a false perception. */
+export interface Forgetting {
+  entity: string
+  /** What made the object implausible and how its place was looked at again without perceiving it. */
+  reason: string
+}
+
 /** What the instruction asked for, to find the objects that could be it (see {@link EgoService.candidates}). */
 export interface CandidateQuery {
   /** Category, role or segmenter word sought, for example `box`. */
@@ -322,6 +329,15 @@ export abstract class EgoService extends Service {
    * @returns the object's Ego-State summary entry after the change.
    */
   abstract annotate(annotation: Annotation, signal?: AbortSignal): Promise<JsonObject>
+
+  /**
+   * Remove an object the robot agent judged a false perception. The robot refuses while the object
+   * is held or was perceived within its `forget_unseen_s` (3 s by default).
+   * @param forgetting - object id and the reason.
+   * @param signal - caller cancellation.
+   * @returns the removal record as listed in the Ego-State summary's `dropped`.
+   */
+  abstract forget(forgetting: Forgetting, signal?: AbortSignal): Promise<JsonObject>
 
   /**
    * Objects that could be what a name and approximate size refer to, best first, each with its

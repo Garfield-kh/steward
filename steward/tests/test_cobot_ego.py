@@ -321,7 +321,7 @@ def deep_table_root(tmp_path_factory, monkeypatch):
     tips the box short of the 1.7 rad its walls need."""
     from steward.authoring import service
 
-    monkeypatch.setitem(service.PUZZLES, "dog", dataclasses.replace(service.PUZZLES["dog"], table_m=(2.4, 1.15)))
+    monkeypatch.setitem(service.PUZZLES, "dog", dataclasses.replace(service.PUZZLES["dog"], table_m=(2.4, 1.15), box_from_end_m=0.15))
     root = tmp_path_factory.mktemp("deep-table")
     service.build_default_kitchen(AuthoringService(root))
     return str(root)

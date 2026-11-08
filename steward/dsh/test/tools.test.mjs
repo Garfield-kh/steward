@@ -35,6 +35,7 @@ function fakeEgo(receipts = {}) {
     matchFace: async (entities, reference, px) => { calls.push(['matchFace', entities, reference, px]); return { reference, results: [] } },
     annotate: async (a) => { calls.push(['annotate', a]); return { id: a.entity, category: a.label } },
     candidates: async (q) => { calls.push(['candidates', q]); return [] },
+    forget: async (f) => { calls.push(['forget', f]); return { id: f.entity, reason: `forgotten by the agent: ${f.reason}` } },
   }
 }
 
@@ -50,7 +51,7 @@ test('ego tools expose the robot vocabulary without World State concepts', () =>
   const names = egoTools(fakeEgo()).map(t => t.name)
   assert.deepEqual(names, ['ego_state', 'ego_query', 'ego_observe', 'ego_capture_cameras', 'ego_rgb_recording_start',
     'ego_rgb_recording_status', 'ego_rgb_recording_stop', 'ego_camera_calibration', 'ego_gripper_pose', 'ego_explore', 'ego_predict', 'ego_inspect',
-    'ego_match_face', 'ego_annotate', 'ego_candidates', 'skill_run', 'skill_status', 'body_stop', 'report_problem'])
+    'ego_match_face', 'ego_annotate', 'ego_forget', 'ego_candidates', 'skill_run', 'skill_status', 'body_stop', 'report_problem'])
   for (const t of egoTools(fakeEgo())) assert.doesNotMatch(t.description, /ground truth|world state/i)
 })
 
@@ -128,6 +129,13 @@ test('ego_inspect and ego_annotate reach the Ego service', async () => {
   await tool(tools, 'ego_match_face').execute({ entities: ['e:7', 'e:8'], reference: 'e:1' }, exec('ego_match_face'))
   await tool(tools, 'ego_annotate').execute({ entity: 'e:7', label: 'box', affordances: ['graspable', 'pourable'] }, exec('ego_annotate'))
   assert.deepEqual(ego.calls, [['inspect', 'e:7', 24], ['matchFace', ['e:7', 'e:8'], 'e:1', 12], ['annotate', { entity: 'e:7', label: 'box', affordances: ['graspable', 'pourable'] }]])
+})
+
+test('ego_forget passes the object and the reason to the Ego service', async () => {
+  const ego = fakeEgo()
+  const result = await tool(egoTools(ego), 'ego_forget').execute({ entity: 'e:61', reason: 'floating; unseen on two looks' }, exec('ego_forget'))
+  assert.deepEqual(ego.calls, [['forget', { entity: 'e:61', reason: 'floating; unseen on two looks' }]])
+  assert.match(JSON.stringify(result), /e:61/)
 })
 
 test('ego_candidates forwards the sought name and size to the Ego service', async () => {

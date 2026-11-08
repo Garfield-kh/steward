@@ -88,6 +88,58 @@ def test_translate_keeps_heading_in_the_odometry_yaw_frame():
     assert abs(commands[-1]["base"][2] - (2 * 3.14159265 + 0.1)) < 1e-6
 
 
+def _with_detection(est: EgoEstimator, frame: dict, category: str, world_p: list[float], size: list[float]) -> dict:
+    """``frame`` with one more head-camera detection at ``world_p``, as the robot's own camera would place it."""
+    from steward.math3d import pose_compose, pose_inverse
+
+    cam = est.camera_pose(camera="head_camera")
+    pose = pose_compose(pose_inverse(cam), {"p": world_p, "q": cam["q"]})
+    det = {"category": category, "confidence": 0.9, "pose": pose, "size": size, "range": 2.0, "camera": "head_camera"}
+    return {**frame, "detections": [*frame["detections"], det]}
+
+
+def _tracks_near(est: EgoEstimator, p: list[float]) -> list:
+    return [t for t in est.tracks.values() if np.linalg.norm(t.pos - np.asarray(p)) < 0.05]
+
+
+def test_a_detection_floating_clear_of_everything_gets_no_track(kitchen_scene):
+    """Something seen in mid-air is falling, not resting: the belief waits to perceive it where it
+    lands, while a thing seen on a surface is taken in at once."""
+    sim = WorldSim(kitchen_scene, seed=6)
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    _observe(sim, est, 3)
+    table = next(t for t in est.tracks.values() if t.category == "table")
+    resting = [float(table.pos[0]) + 0.3, float(table.pos[1]) - 0.1, table.top() + 0.02]
+    floating = [float(table.pos[0]) + 0.3, float(table.pos[1]) + 0.25, table.top() + 0.3]
+    beyond = [float(table.pos[0]), float(table.pos[1]) + 1.2, table.top() + 0.02]
+    frame = sim.sensors("w:robot-1")
+    for p in (resting, floating, beyond):
+        frame = _with_detection(est, frame, "book", p, [0.15, 0.1, 0.04])
+    est.update(frame)
+    assert len(_tracks_near(est, resting)) == 1
+    assert _tracks_near(est, floating) == [] and _tracks_near(est, beyond) == []
+
+
+def test_an_implausible_object_is_flagged_and_forgotten_only_once_unseen(kitchen_scene):
+    sim = WorldSim(kitchen_scene, seed=6)
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    _observe(sim, est, 3)
+    plate = next(t for t in est.tracks.values() if t.category == "plate")
+    assert not est.unsupported(plate)
+    plate.pos = plate.pos + np.array([0.0, 0.0, 0.4])
+    assert est.unsupported(plate)
+    plate.last_seen = est.stamp
+    try:
+        est.forget(plate.id, "floating")
+        raise AssertionError("an object perceived a moment ago must not be forgotten")
+    except ValueError as exc:
+        assert "still seen" in str(exc)
+    plate.last_seen = est.stamp - est.config.forget_unseen_s - 1.0
+    est.forget(plate.id, "floats above the table; not seen on two looks")
+    assert plate.id not in est.tracks
+    assert est.dropped[-1]["reason"] == "forgotten by the agent: floats above the table; not seen on two looks"
+
+
 def test_esim_place_requires_holding(kitchen_scene):
     sim = WorldSim(kitchen_scene, seed=6)
     model = steward_bot().to_dict()

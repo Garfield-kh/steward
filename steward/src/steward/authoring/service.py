@@ -390,14 +390,18 @@ class Puzzle:
     subject: str
     grid: int
     table_m: tuple[float, float] = (1.0, 0.5)
+    box_from_end_m: float = 0.15
+    """Distance from the table's -x end to the box centre."""
 
 
 # Tables and pieces are half the size of a real dining-table puzzle, so that an arm of short reach
-# (the Cobot's Piper) reaches every spot of the table from its long sides.
+# (the Cobot's Piper) reaches every spot of the table from its long sides. The dog's box stands far
+# enough from the table's end for the robot to dock square in front of it: taken by its rim from
+# the side, the box turns in the gripper while it is carried.
 PUZZLES = {
     "cat": Puzzle("cat.jpg", "猫", 3),
     "greatwall": Puzzle("great-wall.jpg", "长城", 3),
-    "dog": Puzzle("dog.jpg", "狗", 4, (1.2, 0.575)),
+    "dog": Puzzle("dog.jpg", "狗", 4, (1.8, 0.575), 0.45),
 }
 PUZZLE_PIECE_M = 0.0575
 PUZZLE_GAP_M = 0.006  # between the pieces in the box, and between them and its walls
@@ -472,7 +476,7 @@ def puzzle_spec(name: str, image: str, seed: int) -> tuple[list[tuple[str, str, 
     entities = [
         {"id": "w:room", "asset": "kitchen-room", "at": {"x": 0.0, "y": 0.0}},
         {"id": "w:table-1", "asset": table, "at": {"x": 0.5, "y": -0.6}},
-        {"id": "w:box", "asset": f"{name}-box", "on": "w:table-1", "offset": [0.15 - table_w / 2, 0.075]},
+        {"id": "w:box", "asset": f"{name}-box", "on": "w:table-1", "offset": [puzzle.box_from_end_m - table_w / 2, 0.075]},
     ]
     for slot, k in enumerate(order):
         r, c = divmod(int(k), n)

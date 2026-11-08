@@ -59,3 +59,22 @@ def test_ego_runtime_forgets_ego_state_when_the_episode_restarts(kitchen_root, t
     assert runtime.estimator is not old
     assert runtime.estimator.version == 1
     host.stop()
+
+
+def test_ego_runtime_forgets_ego_state_on_a_reset_before_the_clock_moved(kitchen_root, tmp_path):
+    """With the world frozen while idle, a reset can land at the time the episode started; the new
+    episode number still makes the robot forget all it believed, ids and roles included."""
+    from steward.assets.generators import steward_bot
+    from steward.ego.runtime import EgoRuntime, RobotLink
+
+    host = StewardHost(kitchen_root, scenario="phase0-kitchen", run_dir=tmp_path)
+    runtime = EgoRuntime(RobotLink(host.robot_servers["w:robot-1"].url), steward_bot().to_dict())
+    runtime._poll_once()
+    old = runtime.estimator
+    assert old.tracks and old.stamp == 0.0
+    runtime._roles[next(iter(old.tracks))] = "table"
+    host.sim.reset()
+    runtime._poll_once()
+    assert runtime.estimator is not old and runtime.estimator.version == 1
+    assert not runtime._roles
+    host.stop()

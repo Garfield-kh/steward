@@ -8,8 +8,9 @@ Ego API serves the belief to the console -- the same shape as the mobile robot's
 a scenario.
 
 A round of the mission ends with the arms parked, and the world decides when the next one
-starts: an episode reset (the console's 重置, or loading the scenario again) turns the clock
-back, which the runtime reads as a reboot -- it forgets its belief and looks again. A reset that
+starts: an episode reset (the console's 重置, or loading the scenario again) changes the episode
+number of the robot's readings, which the runtime reads as a reboot -- it forgets its belief and
+looks again. A reset that
 lands in the middle of a round is caught the same way: the round ends however it ends, and the
 next one starts at once. The runtime never edits the world; in `steward cobot` the round driver
 teleports the tableware home itself, here that is the operator's reset.
@@ -62,6 +63,7 @@ class CobotEgoRuntime:
         self.results: list[dict] = []
         self.last_error: str | None = None
         self._stamp = -math.inf
+        self._episode: int | None = None
         self._reset = threading.Event()
         self._clock_lock = threading.Lock()
         self._running = False
@@ -69,9 +71,14 @@ class CobotEgoRuntime:
         self._telemetry: threading.Thread | None = None
 
     # ------------------------------------------------------------ sensing
-    def _clock(self, stamp) -> None:
-        """Called with every reading's stamp (the caller holds the read lock): the world's clock
-        only goes backwards when a new episode starts, which is the robot's reboot."""
+    def _clock(self, stamp, episode) -> None:
+        """Called with every reading's stamp and episode (the caller holds the read lock): a new
+        episode, the robot's reboot, changes the episode number or, from a world that numbers
+        none, turns the clock back."""
+        if episode is not None:
+            if self._episode is not None and episode != self._episode:
+                self._reset.set()
+            self._episode = episode
         if stamp is None:
             return
         if stamp < self._stamp - RESET_MARGIN_S:
@@ -99,8 +106,8 @@ class CobotEgoRuntime:
         order -- which would look exactly like the clock going backwards."""
         with self._clock_lock:
             frame = fetch()
-            stamp = frame[header]["stamp"] if header else frame.get("stamp")
-            self._clock(stamp)
+            fields = frame[header] if header else frame
+            self._clock(fields.get("stamp"), fields.get("episode"))
             return frame
 
     def frame_source(self) -> tuple[Callable[[], dict], bool]:

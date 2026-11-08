@@ -95,7 +95,7 @@ def test_the_runtime_nests_the_bowls_over_the_port_and_reboots_with_the_world(ri
         _pump_until(rig, lambda: rig.observer.latest_ego.get(ROBOT) is not None, timeout=10)
         assert "leak" not in rig.observer.latest[ROBOT]
 
-        # The operator's reset turns the clock back: a reboot, then the next round on a fresh belief.
+        # The operator's reset starts a new episode: a reboot, then the next round on a fresh belief.
         version = runtime.estimator.version
         rig.sim.reset()
         _pump_until(rig, lambda: any(r.get("cobotEgo") == "reboot" for r in reports), timeout=20)

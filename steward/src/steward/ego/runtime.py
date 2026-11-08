@@ -305,6 +305,7 @@ class EgoRuntime:
         self.perception_mode: str | None = None
         self.alerts: list[dict] = []
         self.plan: dict | None = None
+        self._episode: int | None = None  # the world's episode number of the last sensor frame
         self._looked_at: dict[str, float] = {}  # target id -> body stamp of its last fresh look
         self._roles: dict[str, str] = {}  # the latest role assignment, kept unless clearly outweighed
         self.activity: collections.deque[dict] = collections.deque(maxlen=ACTIVITY_MAX)
@@ -372,7 +373,7 @@ class EgoRuntime:
                 if rgbd["mask"] is not None or self._segment(rgbd):
                     frames.append(rgbd)
             with self._lock:
-                if frame["stamp"] < self.estimator.stamp - 1e-6:
+                if self._new_episode(frame):
                     self._restart()
                 if not frames:
                     self.estimator.update_body(frame)
@@ -384,7 +385,7 @@ class EgoRuntime:
         frame = {**frame, "cameras": [c for c in frame.get("cameras", []) if c["id"] in cameras],
                  "detections": [d for d in frame.get("detections", []) if d.get("camera") in cameras]}
         with self._lock:
-            if frame["stamp"] < self.estimator.stamp - 1e-6:
+            if self._new_episode(frame):
                 self._restart()
             self.estimator.update(frame)
             self._publish_view_scene()
@@ -591,12 +592,27 @@ class EgoRuntime:
         ego, version, stamp = scene
         return renderer.render(ego, settings), "image/jpeg", {"esVersion": version, "t": round(stamp, 3)}
 
+    def _new_episode(self, frame: dict) -> bool:
+        """Whether ``frame`` is from a new episode (the console's 重置 or a scenario load): its
+        ``episode`` differs from the last frame's, or, from a world that numbers none, its clock
+        went backwards. A reset at the very start of an episode leaves the clock where it was."""
+        episode, self._episode = self._episode, frame.get("episode")
+        if episode is not None and frame.get("episode") != episode:
+            return True
+        return frame["stamp"] < self.estimator.stamp - 1e-6
+
     def _restart(self) -> None:
-        """The world clock went backwards: a new episode started, which the robot experiences as a
-        reboot. Forget the Ego-State, receipts and any running skill."""
+        """A new episode started, which the robot experiences as a reboot: forget the whole
+        Ego-State and everything derived from it (receipts, roles, looks, keyframes) and
+        cancel any running skill. Track ids start again at ``e:1``."""
         self.executor.cancel()
         self.estimator = EgoEstimator(robot_model=self.estimator.robot_model, config=self.estimator.config)
         self.receipts.clear()
+        self._roles.clear()
+        self._looked_at.clear()
+        self._keyframe = {}
+        self._pose_sample = None
+        self._still_since = None
 
     def _loop(self) -> None:
         """Perceive every ``1 / perception_hz`` seconds of world time, from the time the runtime started;

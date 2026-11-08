@@ -40,7 +40,7 @@ def test_each_camera_gives_its_own_frame_and_an_unknown_camera_is_refused(kitche
     sim.perception.mode = "rgbd"
     assert [c["id"] for c in sim.sensors("w:robot-1")["cameras"]] == ["head_camera", "wide_camera"]
     head, wide = (decode_rgbd(sim.rgbd("w:robot-1", c)) for c in ("head_camera", "wide_camera"))
-    assert head["camera"] == "head_camera" and head["rgb"].shape == (240, 320, 3) and head["fovy"] == 60.0
+    assert head["camera"] == "head_camera" and head["rgb"].shape == (480, 640, 3) and head["fovy"] == 60.0
     assert wide["camera"] == "wide_camera" and wide["rgb"].shape == (360, 480, 3) and wide["fovy"] == 100.0
     assert decode_rgbd(sim.rgbd("w:robot-1"))["camera"] == "head_camera", "no camera named: the primary one"
     with pytest.raises(KeyError):

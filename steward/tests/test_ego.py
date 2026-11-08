@@ -88,13 +88,14 @@ def test_translate_keeps_heading_in_the_odometry_yaw_frame():
     assert abs(commands[-1]["base"][2] - (2 * 3.14159265 + 0.1)) < 1e-6
 
 
-def _with_detection(est: EgoEstimator, frame: dict, category: str, world_p: list[float], size: list[float]) -> dict:
-    """``frame`` with one more head-camera detection at ``world_p``, as the robot's own camera would place it."""
+def _with_detection(est: EgoEstimator, frame: dict, category: str, world_p: list[float], size: list[float],
+                    camera: str = "head_camera") -> dict:
+    """``frame`` with one more detection at ``world_p``, as the robot's own ``camera`` would place it."""
     from steward.math3d import pose_compose, pose_inverse
 
-    cam = est.camera_pose(camera="head_camera")
+    cam = est.camera_pose(camera=camera)
     pose = pose_compose(pose_inverse(cam), {"p": world_p, "q": cam["q"]})
-    det = {"category": category, "confidence": 0.9, "pose": pose, "size": size, "range": 2.0, "camera": "head_camera"}
+    det = {"category": category, "confidence": 0.9, "pose": pose, "size": size, "range": 2.0, "camera": camera}
     return {**frame, "detections": [*frame["detections"], det]}
 
 
@@ -118,6 +119,32 @@ def test_a_detection_floating_clear_of_everything_gets_no_track(kitchen_scene):
     est.update(frame)
     assert len(_tracks_near(est, resting)) == 1
     assert _tracks_near(est, floating) == [] and _tracks_near(est, beyond) == []
+
+
+def test_one_piece_seen_by_both_cameras_is_one_track_and_overlapping_pieces_are_two(kitchen_scene):
+    """An object yields one detection per camera, so both cameras' views of a piece join its one
+    track; two pieces one camera sees apart in a frame stay two, even lying half over each other."""
+    sim = WorldSim(kitchen_scene, seed=6)
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    _observe(sim, est, 3)
+    table = next(t for t in est.tracks.values() if t.category == "table")
+    single = [float(table.pos[0]) + 0.3, float(table.pos[1]) - 0.15, table.top() + 0.003]
+    a = [float(table.pos[0]) + 0.3, float(table.pos[1]) + 0.1, table.top() + 0.003]
+    b = [a[0] + 0.02, a[1], a[2] + 0.006]
+    size = [0.0575, 0.0575, 0.006]
+    first = None
+    for _ in range(5):
+        frame = sim.sensors("w:robot-1")
+        for camera in ("head_camera", "wide_camera"):
+            frame = _with_detection(est, frame, "puzzle_piece", single, size, camera)
+        for p in (a, b):
+            frame = _with_detection(est, frame, "puzzle_piece", p, size)
+        est.update(frame)
+        pieces = sorted(t.id for t in est.tracks.values() if t.category == "puzzle_piece")
+        assert len(pieces) == 3
+        first = first or pieces
+        assert pieces == first, "the same tracks every frame, none born and merged again"
+    assert not [d for d in est.dropped if d["category"] == "puzzle_piece"]
 
 
 def test_an_implausible_object_is_flagged_and_forgotten_only_once_unseen(kitchen_scene):

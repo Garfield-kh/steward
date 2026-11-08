@@ -49,6 +49,7 @@ class RuntimeConfig:
     appearance_cell_m: float = 0.005  # cell size of the remembered top faces
     appearance_max_m: float = 0.6  # larger objects' faces are remembered only when asked for
     appearance_range_m: float = 1.5  # faces farther from the camera are not looked at
+    detail_px: int = 24  # pixels across a face in the source image below which ego_inspect says to come closer
     appearance_interval_s: float = 0.5  # world time between two automatic looks at one face
     appearance_poll_s: float = 1.0  # wall time between camera images fetched for faces with detections
     appearance_min_coverage: float = 0.25  # a view showing less of a face is not kept
@@ -920,8 +921,10 @@ class EgoRuntime:
 
         :param entity: Ego-State object id.
         :param px: grid size, 4 to 64.
-        :returns: ``{entity, px, yawDeg, sizeM, coverage, rows, worldRows, worldTurnDeg, stamp}``, and
-            ``hint`` (:func:`view_hint`) when less than :data:`VIEW_HINT_COVERAGE` of the face is seen.
+        :returns: ``{entity, px, yawDeg, sizeM, coverage, sourcePx, rows, worldRows, worldTurnDeg, stamp}``,
+            ``hint`` (:func:`view_hint`) when less than :data:`VIEW_HINT_COVERAGE` of the face is seen,
+            and ``detailHint`` when the face's shorter side spans fewer than ``detail_px`` pixels of
+            the camera image (``sourcePx``): a finer grid than that only interpolates.
         :raises KeyError: unknown object; :raises ValueError: ``px`` out of range."""
         if not 4 <= px <= 64:
             raise ValueError("px must be between 4 and 64")
@@ -944,8 +947,18 @@ class EgoRuntime:
         coverage, rows, frame = best
         world_rows, turn = world_up_face(rows, yaw)
         hint = {} if coverage >= VIEW_HINT_COVERAGE else {"hint": self._view_hint(frame["header"]["odometry"], centre, top)}
+        intrinsics = self.estimator.camera_intrinsics(frame["camera"])
+        focal = intrinsics["height"] / (2 * math.tan(math.radians(intrinsics["fovy"]) / 2))
+        cam_p = np.asarray(self.estimator.camera_pose(frame["header"]["odometry"], frame["camera"])["p"], float)
+        side, distance = float(min(size[0], size[1])), float(np.linalg.norm(np.array([*centre[:2], top]) - cam_p))
+        source_px = focal * side / max(distance, 1e-3)
+        if source_px < self.config.detail_px:
+            within = focal * side / self.config.detail_px
+            hint["detailHint"] = (f"the face spans only {source_px:.0f} px of the {frame['camera']} image from "
+                                  f"{distance:.2f} m; its picture is reliable within {within:.2f} m of the camera")
         return {"entity": entity, "px": px, "camera": frame["camera"], "yawDeg": round(math.degrees(yaw), 2),
-                "sizeM": [round(float(v), 3) for v in size], "coverage": round(coverage, 3), **hint,
+                "sizeM": [round(float(v), 3) for v in size], "coverage": round(coverage, 3),
+                "sourcePx": round(source_px, 1), **hint,
                 "rows": rows, "worldRows": world_rows, "worldTurnDeg": turn, "stamp": frame["header"]["stamp"]}
 
     def _view_hint(self, odometry: dict, centre: np.ndarray, top: float) -> str:

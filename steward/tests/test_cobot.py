@@ -112,7 +112,7 @@ def test_sim_generic_joints_and_dual_gripper_grasp() -> None:
 
 def test_sim_rgbd_per_camera() -> None:
     sim = WorldSim(_cobot_scene())
-    for camera, expect, shape in ((None, "head_camera", (240, 320)), ("wide_camera", "wide_camera", (360, 480))):
+    for camera, expect, shape in ((None, "head_camera", (480, 640)), ("wide_camera", "wide_camera", (360, 480))):
         blob = sim.rgbd("w:cobot", camera)
         frame = np.load(io.BytesIO(blob))
         assert frame["rgb"].shape == (*shape, 3)

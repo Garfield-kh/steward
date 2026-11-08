@@ -411,21 +411,32 @@ class EgoEstimator:
             sigma = self.config.pos_sigma_base + self.config.pos_sigma_per_m * rng
             measurements.append((det, np.asarray(world["p"]), yaw_from_quat(world["q"]), sigma))
         # Global nearest-first assignment: of all detection-track pairs within the gate, the closest
-        # pair is joined first, so of two objects side by side neither takes the other's track.
+        # pair is joined first, so of two objects side by side neither takes the other's track. An
+        # object yields at most one detection per camera, so a track takes one from each camera.
         pairs = []
         for k, (det, pos, _yaw, sigma) in enumerate(measurements):
             for track in self._candidates(det["category"], pos, sigma, float(max(det["size"][0], det["size"][1]))):
                 pairs.append((float(np.linalg.norm(track.pos - pos)), k, track.id))
-        matched: set[str] = set()
+        camera_of = [det.get("camera", self.primary_camera) for det, _p, _y, _s in measurements]
+        seen_by: dict[str, set[str]] = {c: set() for c in cams}
         assigned: dict[int, str] = {}
         for _d, k, tid in sorted(pairs):
-            if k not in assigned and tid not in matched:
+            if k not in assigned and tid not in seen_by[camera_of[k]]:
                 assigned[k] = tid
-                matched.add(tid)
+                seen_by[camera_of[k]].add(tid)
         boxes = [(pos, np.asarray(det["size"], float), yaw) for det, pos, yaw, _sigma in measurements]
         for k, (det, pos, yaw, sigma) in sorted(enumerate(measurements), key=lambda item: item[1][3]):
             if k in assigned:
                 self._fuse(self.tracks[assigned[k]], det, pos, yaw, sigma)
+                continue
+            # Another camera's view of an object first seen in this very frame joins the track its
+            # first view started.
+            born = [t for t in self._candidates(det["category"], pos, sigma, float(max(det["size"][0], det["size"][1])))
+                    if t.first_seen == self.stamp and t.id not in seen_by[camera_of[k]]]
+            if born:
+                twin = min(born, key=lambda t: float(np.linalg.norm(t.pos - pos)))
+                self._fuse(twin, det, pos, yaw, sigma)
+                seen_by[camera_of[k]].add(twin.id)
                 continue
             entry = self._newcomer(pos, np.asarray(det["size"], float), sigma, boxes[:k] + boxes[k + 1:])
             if entry == "skip":
@@ -433,19 +444,21 @@ class EgoEstimator:
             if entry == "carried":
                 # Contents slide about in a container being carried and tipped: a view of one is first
                 # taken for a known content beyond the association gate, not for another object.
-                slid = [t for t in self.tracks.values() if t.carried and t.id not in matched and compatible(t.category, det["category"])]
+                slid = [t for t in self.tracks.values()
+                        if t.carried and t.id not in seen_by[camera_of[k]] and compatible(t.category, det["category"])]
                 if slid:
                     nearest = min(slid, key=lambda t: float(np.linalg.norm(t.pos - pos)))
                     self._fuse(nearest, det, pos, yaw, sigma)
-                    matched.add(nearest.id)
+                    seen_by[camera_of[k]].add(nearest.id)
                     continue
             track = self._new_track(det, pos, yaw, sigma)
             if entry == "carried":
                 track.carried_offset = self.gripper_rotation(self.held_gripper).T @ (track.pos - self.tracks[self.held_id].pos)
-            matched.add(track.id)
+            seen_by[camera_of[k]].add(track.id)
+        matched = set().union(*seen_by.values())
         self._decay_unseen(cams, matched)
         self._drop_lost_contents(matched)
-        self._merge_duplicates()
+        self._merge_duplicates(list(seen_by.values()))
         self._follow_held()
         self.version += 1
 
@@ -1218,9 +1231,11 @@ class EgoEstimator:
         if track is not None:
             self._drop(track, "forgotten")
 
-    def _merge_duplicates(self) -> None:
+    def _merge_duplicates(self, apart: list[set[str]] | None = None) -> None:
         """Merge compatible tracks whose centres lie inside each other's uncertainty-expanded
-        footprint; the track with more observations keeps its id."""
+        footprint; the track with more observations keeps its id. Two tracks one camera saw as two
+        detections in this frame (``apart``: the tracks each camera's detections went to) are two
+        objects, however close: pieces lying edge to edge are not one piece."""
         ids = sorted(self.tracks, key=lambda t: -self.tracks[t].observations)
         for i, keep_id in enumerate(ids):
             keep = self.tracks.get(keep_id)
@@ -1230,6 +1245,8 @@ class EgoEstimator:
                 drop = self.tracks.get(drop_id)
                 if drop is None or drop.held or drop.carried or not compatible(drop.perceived_category,
                                                                                keep.perceived_category):
+                    continue
+                if apart and any(keep_id in seen and drop_id in seen for seen in apart):
                     continue
                 if not self._size_match(drop.footprint, keep.footprint):
                     continue

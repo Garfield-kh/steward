@@ -719,7 +719,7 @@ class WorldSim:
         relations = [r for r in self._relations() if r.type == "supported-by"]
         supporting = {r.b["entity"] for r in relations if self.template.entity(r.a["entity"]).rigid.root.value == "free"}
         container = {r.a["entity"]: r.b["entity"] for r in relations}
-        best, best_rank = None, None
+        candidates = []
         for ent in self.template.entities:
             if ent.role != "object" or ent.rigid.root.value != "free":
                 continue
@@ -737,13 +737,23 @@ class WorldSim:
             centred = d <= self.grasp.capture_radius
             if not centred and not _at_edge(obb, grip):
                 continue
-            # Fingers closing on an object's middle take it before the rim of another they are near
-            # (a piece in its box, not the box); closing from above, the gripper meets the topmost
-            # object under it first (a lid before the pieces in the box); elsewhere the nearest one.
-            top = obb.center[2] + obb.size[2] / 2 if _under(obb, grip) else -math.inf
-            rank = (centred, top, -d)
+            candidates.append((ent.id, obb, d, centred, not centred and _is_pourable(ent)))
+        # Fingers closing on an object's middle take it before the rim of another they are near
+        # (a piece in its box, not the box), but straddling the wall of a pourable container they
+        # take the wall, not what lies inside it against the wall nor an object beside it they are
+        # not over (a piece smaller than the capture radius by the wall); closing from above, the
+        # gripper meets the topmost object under it first (a lid before the pieces in the box);
+        # elsewhere the nearest one.
+        walls = {ent_id for ent_id, _, _, _, wall in candidates if wall}
+        best, best_rank = None, None
+        for ent_id, obb, d, centred, _ in candidates:
+            if container.get(ent_id) in walls:
+                continue
+            over = _under(obb, grip)
+            top = obb.center[2] + obb.size[2] / 2 if over else -math.inf
+            rank = (centred and (over or not walls), top, -d)
             if best_rank is None or rank > best_rank:
-                best, best_rank = ent.id, rank
+                best, best_rank = ent_id, rank
         if best is None:
             handle = self._nearest_handle(grip)
             if handle is not None:

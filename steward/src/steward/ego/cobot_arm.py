@@ -81,6 +81,9 @@ class PiperArmConfig:
     # height within 2 mm). A turn whose pinch point would leave its spot by more is refused.
     max_turn_swing_m: float = 0.05
     turn_lower_step: float = 0.02  # height step at which lowering what it turned over is checked
+    # Turned over, the elbow hangs below the forearm: lowered, it reaches the surface before the
+    # pinch point does (the forearm pressed on the table 19 cm above it). No link comes nearer.
+    turn_link_clearance: float = 0.02
     small_step: tuple[float, float] = (0.05, 0.2)  # metres, radians: a command this close to the last is a step
     arrived_rad: float = 0.04  # encoders this close to the last solution report its command
     arrived_lift_m: float = 0.01
@@ -208,6 +211,12 @@ class PiperArm(Arm):
         self.ik.set_base(0.0, 0.0, 0.0, torso)
         return np.asarray(pose_compose(self.ik.fk(self.config.arm, arm), {"p": TCP_OFFSET, "q": [1.0, 0.0, 0.0, 0.0]})["p"])
 
+    def _lowest(self, solution: tuple[float, list[float]], beyond: float) -> float:
+        """Height above the floor of the lowest point of the arm's links in ``solution`` (torso, arm
+        joints) that reach farther than ``beyond`` ahead of the base centre."""
+        self.ik.set_base(0.0, 0.0, 0.0, solution[0])
+        return self.ik.lowest(self.config.arm, solution[1], beyond)
+
     def _ik(self, target: dict, joints: dict, prior: tuple[float, list[float]] | None = None
             ) -> tuple[tuple[float, list[float]] | None, IkError | None]:
         """Torso height and arm joints for virtual joints ``target`` in one whole-body solve, seeded
@@ -306,7 +315,8 @@ class PiperArm(Arm):
             wide = min(g.wrist_pitch_max, hi + self.config.pitch_margin)
             return wide if self._ik({**at, "wrist_pitch": wide}, {})[0] is not None else hi
 
-    def turn_over(self, lift: float, reach: float, wrist_pitch: float, floor: float) -> float | None:
+    def turn_over(self, lift: float, reach: float, wrist_pitch: float, floor: float, surface_top: float,
+                  surface_edge: float) -> float | None:
         # Planned as the command runs it: both postures solved from the target alone, the move
         # between them straight in joint space, then down step by step from the turned-over one.
         g = self.geometry
@@ -319,17 +329,19 @@ class PiperArm(Arm):
             if upright is None or over is None:
                 return None
             spot = self._pinch(*upright)
+            above = surface_top + self.config.turn_link_clearance
             for k in range(1, 11):
                 share = k / 10
                 between = (upright[0] + (over[0] - upright[0]) * share,
                            [a + (b - a) * share for a, b in zip(upright[1], over[1], strict=True)])
-                if float(np.linalg.norm(self._pinch(*between) - spot)) > self.config.max_turn_swing_m:
+                if (float(np.linalg.norm(self._pinch(*between) - spot)) > self.config.max_turn_swing_m
+                        or self._lowest(between, surface_edge) < above):
                     return None
             low, prior = lift, over
             while low - self.config.turn_lower_step >= floor - 1e-9:
                 nxt = low - self.config.turn_lower_step
                 solved, _ = self._ik({**at, "lift": nxt, "wrist_roll": math.pi}, {}, prior)
-                if solved is None or self._jumps(prior, solved):
+                if solved is None or self._jumps(prior, solved) or self._lowest(solved, surface_edge) < above:
                     break
                 low, prior = nxt, solved
             return low

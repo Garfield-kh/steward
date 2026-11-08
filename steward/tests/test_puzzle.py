@@ -17,7 +17,7 @@ import pytest
 from PIL import Image
 
 from steward.assets.generators import steward_bot
-from steward.authoring.service import PUZZLE_PIECE_M, AuthoringService
+from steward.authoring.service import PUZZLE_PIECE_M, AuthoringService, puzzle_box_m
 from steward.ego.estimator import EgoEstimator, Track
 from steward.ego.perception import top_face
 from steward.ego.runtime import EgoRuntime, RobotLink
@@ -52,14 +52,14 @@ def test_the_four_by_four_pieces_lie_inside_their_box_and_the_pour_spot_fits_the
     sim = WorldSim(_scenario(kitchen_root, "puzzle-dog")["sceneState"])
     sim.step_seconds(0.5)
     box = sim._entity_pose("w:box")["p"]
-    half_box = (4 * PUZZLE_PIECE_M + 5 * 0.012 + 0.02) / 2
+    half_box = puzzle_box_m(4) / 2
     for r in range(4):
         for c in range(4):
             p = sim._entity_pose(f"w:piece-{r}{c}")["p"]
             assert abs(p[0] - box[0]) < half_box and abs(p[1] - box[1]) < half_box
     table = next(e for e in _scenario(kitchen_root, "puzzle-dog")["sceneState"]["entities"] if e["id"] == "w:table-1")
-    assert table["asset"]["id"] == "puzzle-table-240x115"
-    assert 1.15 / 2 > half_box + EsimConfig().pour_spill
+    assert table["asset"]["id"] == "puzzle-table-120x57"
+    assert 0.575 / 2 > half_box + EsimConfig().pour_spill_sizes * PUZZLE_PIECE_M
 
 
 def test_a_printed_board_shows_its_picture_on_top_with_image_up_towards_plus_y(kitchen_root):
@@ -153,7 +153,9 @@ def test_fingers_take_a_piece_beside_the_box_wall_the_box_by_its_rim_and_nothing
     sim.edit_move("w:lid", {"at": {"x": 2.0, "y": 1.5}})
     sim.step_seconds(0.5)
     assert close_at(sim._entity_pose(corner)["p"]) == corner, "on a piece's middle by the wall: the piece, not the box"
-    rim = [box.center[0] - box.size[0] / 2 + 0.015, box.center[1], box.center[2]]
+    from steward.ego.esim import EsimConfig
+
+    rim = [box.center[0] - box.size[0] / 2 + EsimConfig().edge_grasp_inset, box.center[1], box.center[2]]
     assert close_at(rim) == "w:box", "on the rim, the wall between the fingers: the box"
 
 
@@ -290,8 +292,8 @@ def test_top_face_reads_a_face_in_the_object_frame_and_hides_what_is_occluded():
 
 
 @pytest.mark.parametrize(("scenario", "side", "lid_at", "pour_at", "min_out"), [
-    ("puzzle-cat", 3, [0.72, 0.22], [0.2, 0.0], 7),
-    ("puzzle-dog", 4, [0.85, 0.2], [0.0, -0.03], 12),
+    ("puzzle-cat", 3, [0.34, 0.0], [0.1, 0.0], 7),
+    ("puzzle-dog", 4, [0.40, 0.05], [0.0, 0.0], 12),
 ])
 def test_the_robot_takes_off_the_lid_and_pours_the_pieces_out_onto_the_table(kitchen_root, tmp_path, scenario, side,
                                                                               lid_at, pour_at, min_out):
@@ -317,17 +319,17 @@ def test_the_robot_takes_off_the_lid_and_pours_the_pieces_out_onto_the_table(kit
         try:
             runtime.start()
             _explore(api.url, 120)
-            table, lid = track_of("w:table-1", 1.0), track_of("w:lid", 0.3)
+            table, lid = track_of("w:table-1", 0.5), track_of("w:lid", 0.15)
             _approach_to_observe(api.url, lid, 1.0)
-            lid = track_of("w:lid", 0.3)
+            lid = track_of("w:lid", 0.15)
             assert call("POST", f"{api.url}/ego/inspect", {"entity": lid["id"], "px": 16})["coverage"] > 0.8
             call("POST", f"{api.url}/ego/annotate", {"entity": lid["id"], "affordances": ["graspable", "flat"]})
             out["lid"] = [run("pick", {"target": lid["id"]}), run("place", {"on": table["id"], "offset": lid_at})]
-            box = track_of("w:box", 0.3)
+            box = track_of("w:box", 0.15)
             call("POST", f"{api.url}/ego/annotate", {"entity": box["id"], "label": "box",
                                                        "affordances": ["graspable", "container", "receptacle", "pourable"]})
             out["box"] = [run("pick", {"target": box["id"]}), run("pour", {"on": table["id"], "offset": pour_at}),
-                          run("place", {"on": table["id"]})]
+                          run("place", {"at": [-0.6, -0.6]})]
         except Exception:  # noqa: BLE001 - reported by the assertions below
             out["error"] = traceback.format_exc()
         finally:
@@ -346,7 +348,7 @@ def test_the_robot_takes_off_the_lid_and_pours_the_pieces_out_onto_the_table(kit
         fallen = [w for w in pieces if host.sim._entity_pose(w)["p"][2] < 0.7]
         assert not fallen, f"no piece slides off the table: {fallen}"
         box_xy = np.array(host.sim._entity_pose("w:box")["p"][:2])
-        beyond_box = (side * PUZZLE_PIECE_M + (side + 1) * 0.012 + 0.02) / 2 + 0.04
+        beyond_box = puzzle_box_m(side) / 2 + 0.04
         out_of_box = [w for w in pieces
                       if np.linalg.norm(np.array(host.sim._entity_pose(w)["p"][:2]) - box_xy) > beyond_box
                       and host.sim._entity_pose(w)["p"][2] > 0.7]
@@ -532,7 +534,7 @@ def test_a_pour_spot_keeps_the_contents_slide_from_every_edge_of_the_surface():
     es = est.to_scene()
     table, box = es.find("e:4"), es.find("e:2")
     esim = Esim(model)
-    keep = 0.205 + esim.config.pour_spill
+    keep = 0.205 + 0.25
     spot, _ = esim._choose_spot(es, table, entity_box(table)[0], box, entity_box(box)[0], None, 0.0, 0.015, edge_keep=keep)
     assert esim._edge_distance(entity_box(table)[0], spot) >= keep - 1e-9
     with pytest.raises(PredictionError, match="of the edge"):

@@ -68,10 +68,12 @@ class Arm:
         in place (:meth:`turn_over`); the slide's wrist rolls there like any other command."""
         return {k: v for k, v in cmd.items() if k != "turnOver"}
 
-    def turn_over(self, lift: float, reach: float, wrist_pitch: float, floor: float) -> float | None:
+    def turn_over(self, lift: float, reach: float, wrist_pitch: float, floor: float, surface_top: float,
+                  surface_edge: float) -> float | None:
         """The lowest height, no lower than ``floor``, to which the arm lowers what it holds after
-        turning it over (a half roll) at ``lift`` and ``reach`` with the tool tilted ``wrist_pitch``;
-        None where it cannot turn it over there. The slide's wrist rolls a half turn anywhere the
+        turning it over (a half roll) at ``lift`` and ``reach`` with the tool tilted ``wrist_pitch``,
+        none of its links coming down onto what it is set down on (its top at ``surface_top``, its
+        near edge ``surface_edge`` ahead of the base centre); None where it cannot turn it over there. The slide's wrist rolls a half turn anywhere the
         slide reaches: ``floor``."""
         g = self.geometry
         return floor if g.lift_min <= floor <= g.lift_max and g.reach_min <= reach <= g.reach_max else None

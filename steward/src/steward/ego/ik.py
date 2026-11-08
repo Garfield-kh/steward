@@ -89,6 +89,9 @@ class CobotIK:
                 "pinch": f"{_ENT}/{arm}_pinch",
                 "limits": [(float(self.model.jnt_range[_joint_id(self.model, n)][0]),
                             float(self.model.jnt_range[_joint_id(self.model, n)][1])) for n in names],
+                "geoms": [g for g in range(self.model.ngeom) if mujoco.mj_id2name(
+                    self.model, mujoco.mjtObj.mjOBJ_BODY, int(self.model.geom_bodyid[g])) in
+                    {f"{_ENT}/{arm}_link{k}" for k in range(1, _DOF_PER_ARM + 1)}],
             }
         # Every DOF that is not part of a solved arm is frozen: the base's x, y and yaw, the lift,
         # the other arm and both fingers. Freezing the base matters as much as freeing the arm --
@@ -174,6 +177,41 @@ class CobotIK:
         p = np.asarray(pose.translation())
         rot = np.asarray(pose.rotation().as_matrix())
         return {"p": [float(v) for v in p], "q": _quat_from_matrix(rot)}
+
+    def lowest(self, arm: str, joints: list[float], beyond_x: float = -math.inf) -> float:
+        """Height in the world frame of the lowest point of the arm's links (joint 1 to the flange
+        with the gripper housing) at ``joints``; only links reaching past world ``x`` = ``beyond_x``
+        count (inf when none does). Spheres and capsules by the part of their axis past it, other
+        geometry by its bounding box."""
+        spec = self._arms[self._check(arm)]
+        q = np.array(self.data.q, dtype=float)
+        for qadr, value in zip(spec["qadr"], joints, strict=True):
+            q[qadr] = value
+        self.data.update(q)
+        d, m = self.data.data, self.model
+        low = math.inf
+        for g in spec["geoms"]:
+            rot, pos = d.geom_xmat[g].reshape(3, 3), d.geom_xpos[g]
+            kind, size = int(m.geom_type[g]), m.geom_size[g]
+            if kind in (mujoco.mjtGeom.mjGEOM_SPHERE, mujoco.mjtGeom.mjGEOM_CAPSULE):
+                # The axis (a point for a sphere) where it lies past beyond_x less the radius,
+                # lowered by the radius.
+                axis = rot[:, 2] * (size[1] if kind == mujoco.mjtGeom.mjGEOM_CAPSULE else 0.0)
+                ends = [pos - axis, pos + axis]
+                cut = beyond_x - size[0]
+                inside = [e for e in ends if e[0] > cut]
+                if not inside:
+                    continue
+                if len(inside) == 1 and ends[0][0] != ends[1][0]:
+                    t = (cut - ends[0][0]) / (ends[1][0] - ends[0][0])
+                    inside.append(ends[0] + (ends[1] - ends[0]) * t)
+                low = min(low, min(float(e[2]) for e in inside) - float(size[0]))
+            else:
+                centre = pos + rot @ m.geom_aabb[g][:3]
+                half = np.abs(rot) @ m.geom_aabb[g][3:]
+                if centre[0] + half[0] > beyond_x:
+                    low = min(low, float(centre[2] - half[2]))
+        return low
 
     # --------------------------------------------------------------------- ik
     def solve(self, arm: str, position: list[float], orientation: list[float] | None = None,

@@ -389,22 +389,28 @@ class Puzzle:
     image: str
     subject: str
     grid: int
-    table_m: tuple[float, float] = (2.0, 1.0)
+    table_m: tuple[float, float] = (1.0, 0.5)
 
 
-# A pour spot keeps the box half side + the robot's 0.25 m pour spill from every table edge, so a 4 × 4
-# box needs a table at least 1.04 m deep; the robot reaches 0.59 m in from the edge it docks at, so a
-# table up to 1.18 m deep is reachable everywhere from its two long sides.
+# Tables and pieces are half the size of a real dining-table puzzle, so that an arm of short reach
+# (the Cobot's Piper) reaches every spot of the table from its long sides.
 PUZZLES = {
     "cat": Puzzle("cat.jpg", "猫", 3),
     "greatwall": Puzzle("great-wall.jpg", "长城", 3),
-    "dog": Puzzle("dog.jpg", "狗", 4, (2.4, 1.15)),
+    "dog": Puzzle("dog.jpg", "狗", 4, (1.2, 0.575)),
 }
-PUZZLE_PIECE_M = 0.115
+PUZZLE_PIECE_M = 0.0575
+PUZZLE_GAP_M = 0.006  # between the pieces in the box, and between them and its walls
+PUZZLE_BOX_WALL_M = 0.005  # wall of the box; the lid overhangs it by as much on each side
 PUZZLE_TASK = ("餐桌上有一盒拼图，盒盖上印着拼好后的完整图案（{subject}）。盒子上写着：共 {count} 片，"
                "拼好后 {size_cm:.1f} 厘米见方，和盒盖上印的图一样大。打开盒子，把盒子里的拼图块倒在桌上，"
                "再把这些拼图块在桌上拼成和盒盖上一样的图案，拼时每块的图案面都要朝上。")
 PUZZLE_LID_BORDER_RGB = (236, 232, 224)
+
+
+def puzzle_box_m(grid: int) -> float:
+    """Outer side of the box holding ``grid`` × ``grid`` pieces."""
+    return grid * PUZZLE_PIECE_M + (grid + 1) * PUZZLE_GAP_M + 2 * PUZZLE_BOX_WALL_M
 
 
 def png_b64(image, size: int) -> str:
@@ -444,12 +450,12 @@ def puzzle_spec(name: str, image: str, seed: int) -> tuple[list[tuple[str, str, 
     n = puzzle.grid
     table_w, table_d = puzzle.table_m
     table = f"puzzle-table-{round(table_w * 100)}x{round(table_d * 100)}"
-    box_w = n * PUZZLE_PIECE_M + (n + 1) * 0.012 + 0.02
-    lid_w = box_w + 0.02
+    box_w = puzzle_box_m(n)
+    lid_w = box_w + 2 * PUZZLE_BOX_WALL_M
     full, pieces = puzzle_textures(puzzle.image, lid_w, n)
     assets = [
         (table, "dining_table", {"width": table_w, "depth": table_d}),
-        (f"{name}-box", "open_box", {"width": box_w, "depth": box_w}),
+        (f"{name}-box", "open_box", {"width": box_w, "depth": box_w, "wall": PUZZLE_BOX_WALL_M}),
         (f"{name}-lid", "printed_board", {"width": lid_w, "depth": lid_w, "thickness": 0.008,
                                           "texture": full, "mass": 0.08, "category": "lid"}),
     ]
@@ -461,12 +467,12 @@ def puzzle_spec(name: str, image: str, seed: int) -> tuple[list[tuple[str, str, 
     rng = np.random.default_rng(seed)
     order = rng.permutation(n * n)
     turns = rng.integers(0, 4, n * n)
-    pitch = PUZZLE_PIECE_M + 0.012
+    pitch = PUZZLE_PIECE_M + PUZZLE_GAP_M
     middle = (n - 1) / 2
     entities = [
         {"id": "w:room", "asset": "kitchen-room", "at": {"x": 0.0, "y": 0.0}},
         {"id": "w:table-1", "asset": table, "at": {"x": 0.5, "y": -0.6}},
-        {"id": "w:box", "asset": f"{name}-box", "on": "w:table-1", "offset": [0.3 - table_w / 2, 0.15]},
+        {"id": "w:box", "asset": f"{name}-box", "on": "w:table-1", "offset": [0.15 - table_w / 2, 0.075]},
     ]
     for slot, k in enumerate(order):
         r, c = divmod(int(k), n)

@@ -63,7 +63,7 @@ class EsimConfig:
     flip_in_air: bool = False
     flip_pitch_min: float = 1.0
     flip_turn_above: float = 0.2
-    flip_drop_max: float = 0.15
+    flip_drop_max: float = 0.2
     receipt_ttl: float = 60.0
     dock_gap: float = 0.07
     predock_backoff: float = 0.35
@@ -109,7 +109,10 @@ class EsimConfig:
     retract_floor: float = 0.10  # the nearest a tilted tool is checked to come back to (a slide retracts to 0.10)
     retract_step: float = 0.05
     pour_clearance: float = 0.02
-    pour_spill: float = 0.25  # how far beyond the container poured contents may slide; the spot keeps that from every edge
+    # Poured contents slide up to this many times their largest side beyond the container (measured:
+    # 5.75 cm puzzle pieces poured from a box at the rim of a table slid 0.11 m beyond it); the spot
+    # keeps that from every edge.
+    pour_spill_sizes: float = 2.0
     pour_hold_s: float = 1.5
     # Tipped out, the container rises this far before it turns upright again: the contents pile up
     # under its lower edge, and the last pieces rest on that pile against its wall, where the wall
@@ -436,11 +439,14 @@ class Esim:
         """Where a pick may close on ``target``: ``(xy, offset from its centre)``, its centre first,
         then -- for an object ``edge_grasp_min_m`` or larger -- the middle of each side,
         ``edge_grasp_inset`` inside its extent, the side nearest the robot first; with
-        ``edge_grasp_first`` the sides come before the centre."""
+        ``edge_grasp_first`` the sides come before the centre. A pourable container (an open box,
+        carried with what lies in it) is taken by its rim only, whatever its size: closing over its
+        middle the fingers meet its contents."""
         cfg = self.config
         points = [((tp[0], tp[1]), (0.0, 0.0))]
         box, _, _ = entity_box(target)
-        if 2 * max(box.hx, box.hy) < cfg.edge_grasp_min_m:
+        pourable = self._affords(target, "pourable")
+        if 2 * max(box.hx, box.hy) < cfg.edge_grasp_min_m and not pourable:
             return points
         rx, ry, _ = self._robot_xy_yaw(es)
         c, s = math.cos(box.yaw), math.sin(box.yaw)
@@ -450,6 +456,8 @@ class Esim:
             dx, dy = (c * lx - s * ly) * scale, (s * lx + c * ly) * scale
             edges.append(((tp[0] + dx, tp[1] + dy), (dx, dy)))
         edges.sort(key=lambda e: math.hypot(e[0][0] - rx, e[0][1] - ry))
+        if pourable:
+            return edges
         return edges + points if cfg.edge_grasp_first else points + edges
 
     def _turn_blocked(self, obstacles: list[Box2D], xy: tuple[float, float], radius: float | None = None) -> str | None:
@@ -855,6 +863,7 @@ class Esim:
             else:
                 spot, area, bottom, issues = self._nest_spot(es, support, held, held_half)
             hold_dz = self._hold_dz(es, held)
+            surface = bottom
             height = bottom + 0.012 + held_h / 2 + 0.02 + hold_dz
             rim = entity_box(support)[2]
             over = (min(self.lift_max, rim + held_h / 2 + self.config.rim_clearance + hold_dz)
@@ -871,6 +880,7 @@ class Esim:
             spot, issues = self._choose_spot(es, support, sbox, held, held_box, params.get("offset"),
                                              final_yaw, float(params.get("clearance", 0.015)))
             area = sbox
+            surface = top
             height = top + held_h / 2 + 0.02 + self._hold_dz(es, held)
             edge = self._edge_distance(sbox, spot) - held_half
             sigma = self._sigma_xy(support)
@@ -911,22 +921,27 @@ class Esim:
         if params.get("flip"):
             plan["wristRoll"] = math.pi  # turned over about the arm axis before it is set down
             if self.config.flip_in_air:
-                plan.update(self._turn_over_plan(es, held, approach["reach"], height))
+                plan.update(self._turn_over_plan(es, held, approach, height, surface, area))
         plan["gentle"] = self._affords(held, "pourable")
         return self._receipt(es, "place", params, risk, issues, plan)
 
-    def _turn_over_plan(self, es: SceneState, held: Entity, reach: float, height: float) -> dict:
+    def _turn_over_plan(self, es: SceneState, held: Entity, approach: dict, height: float, surface: float,
+                        area: Box2D) -> dict:
         """For ``flip_in_air``: ``turnLift``, where the held object is turned over above its spot
-        ``reach`` out, and ``lift``, the lowest height the arm then brings it down to, at most
-        ``flip_drop_max`` above ``height`` (where it would be set down)."""
+        from the ``approach`` dock, and ``lift``, the lowest height the arm then brings it down to,
+        at most ``flip_drop_max`` above ``height`` (where it would be set down on ``surface``, the
+        top of footprint ``area``)."""
         cfg = self.config
+        reach = approach["reach"]
+        heading = np.array([math.cos(approach["yaw"]), math.sin(approach["yaw"])])
+        edge = float(min((area.corners() - np.array(approach["dock"][:2])) @ heading))
         pitch = self._held_pitch(es)[0]
         if pitch < cfg.flip_pitch_min:
             raise PredictionError(f"{held.id} was taken with the tool tilted {pitch:.2f} rad; turning it over needs it "
                                   f"taken tilted at least {cfg.flip_pitch_min:.2f} rad: put it down and pick it again "
                                   "with flip")
         turn = min(self.lift_max, height + cfg.flip_turn_above)
-        low = self.arm.turn_over(turn, reach, pitch, height)
+        low = self.arm.turn_over(turn, reach, pitch, height, surface, edge)
         if low is None:
             raise PredictionError(f"the arm cannot turn {held.id} over {reach:.2f} m out")
         if low - height > cfg.flip_drop_max:
@@ -994,8 +1009,8 @@ class Esim:
             raise PredictionError(f"unknown support surface {params.get('on')!r}")
         sbox, _, top = entity_box(support)
         held_box, hb, ht = entity_box(held)
-        # Contents slide out up to pour_spill beyond the container: the spot keeps them on the surface.
-        spill = max(held_box.hx, held_box.hy) + self.config.pour_spill
+        sides = [2 * max(b.hx, b.hy) for b in (entity_box(c)[0] for c in self._contents(es, held))]
+        spill = max(held_box.hx, held_box.hy) + self.config.pour_spill_sizes * max(sides, default=0.0)
         if min(sbox.hx, sbox.hy) < spill:
             raise PredictionError(f"{support.id} is too small to pour {held.id} on: the contents could slide over "
                                   f"its edge (a spot {spill:.2f} m from every edge is needed)")

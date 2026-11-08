@@ -555,8 +555,11 @@ class SkillExecutor:
         # feels for a cup in the dark: at the estimate, then a little forward and back (the arm
         # alone moves), then to either side (the base shifts), then at other heights. The estimate
         # is re-read before each probe -- it is best while the camera is right over the object.
+        # Taken by its edge (docked facing that side), forward lies over what is inside it and back
+        # over nothing: the probes keep along the edge.
         probes = [(0.0, 0.0, 0.0)]
-        probes += [(dx, 0.0, 0.0) for dx in self.config.grasp_probe_xy]
+        if not (ox or oy):
+            probes += [(dx, 0.0, 0.0) for dx in self.config.grasp_probe_xy]
         probes += [(0.0, dy, 0.0) for dy in self.config.grasp_probe_xy]
         probes += [(0.0, 0.0, dz) for dz in self.config.grasp_probe_z]
         grasped = False

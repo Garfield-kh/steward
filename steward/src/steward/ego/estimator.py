@@ -1742,9 +1742,10 @@ class EgoEstimator:
 
     def unsupported(self, track: Track) -> bool:
         """Whether a track is physically implausible where it is believed to be: not held, not in the
-        held container, clear of the floor, and resting on and inside nothing the belief holds."""
-        tol = 2 * self.config.rest_gap_m
-        if track.held or track.carried or track.bottom() <= tol:
+        held container, clear of the floor, and resting on and inside nothing the belief holds. What
+        tops ``wall_like_top`` is a wall, which stands on the floor however its height is estimated."""
+        tol = 2 * self.config.rest_gap_m + 2 * math.sqrt(float(track.var[2]))
+        if track.held or track.carried or track.bottom() <= tol or track.top() >= self.config.wall_like_top:
             return False
         for other in self.tracks.values():
             if other is not track and not other.held and _inside(other, track.pos, tol) and other.bottom() - tol <= track.bottom() <= other.top() + tol:

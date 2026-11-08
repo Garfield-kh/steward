@@ -126,6 +126,9 @@ def test_an_implausible_object_is_flagged_and_forgotten_only_once_unseen(kitchen
     _observe(sim, est, 3)
     plate = next(t for t in est.tracks.values() if t.category == "plate")
     assert not est.unsupported(plate)
+    wall = next(t for t in est.tracks.values() if t.category == "wall")
+    wall.pos = wall.pos + np.array([0.0, 0.0, 0.1])
+    assert not est.unsupported(wall), "a wall stands on the floor, whatever its estimated bottom"
     plate.pos = plate.pos + np.array([0.0, 0.0, 0.4])
     assert est.unsupported(plate)
     plate.last_seen = est.stamp

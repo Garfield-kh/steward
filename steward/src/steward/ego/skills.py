@@ -66,6 +66,9 @@ class MotionConfig:
     joint_tol: float = 0.01
     tick_s: float = 0.04
     retract_reach: float = 0.10
+    # After a failure the arm first rises this far, then turns the wrist upright in place, then draws
+    # back: drawn back at once, a box tipped over a table caught its edge and turned the table over.
+    failure_raise: float = 0.08
     reach_max: float = 0.70  # the wrist slide's upper joint limit; asking beyond it only fails
     stow_lift: float = 0.60
     dock_tol: float = 0.06
@@ -276,10 +279,17 @@ class SkillExecutor:
             pass
 
     def _safe_retract(self) -> None:
-        try:
-            self._command({"reach": self.config.retract_reach, "wrist_roll": 0.0})
-        except Exception:  # noqa: BLE001 - best effort after a failure that is already reported
-            pass
+        """Rise ``failure_raise``, turn the wrist upright in place, then draw the arm back; each step
+        is tried even where the one before it failed."""
+        lift = self._state()["joints"].get("lift")
+        steps = [lambda: self._set_joint("lift", lift + self.config.failure_raise)] if lift is not None else []
+        steps += [lambda: self._ramp_joint("wrist_roll", 0.0, self.config.wrist_turn_s),
+                  lambda: self._set_joint("reach", self.config.retract_reach)]
+        for step in steps:
+            try:
+                step()
+            except Exception:  # noqa: BLE001 - best effort after a failure that is already reported
+                continue
 
     def _tick(self) -> dict:
         if self._stop.is_set():

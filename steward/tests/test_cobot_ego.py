@@ -152,6 +152,37 @@ def test_the_torso_and_all_six_joints_tip_a_held_box_past_upright_in_one_motion(
     assert not arm.reachable_path(tip(1.9)[:1] + tip(-1.9)[-1:]), "a half-turn of the wrist in one step is a jump"
 
 
+def test_the_piper_keeps_its_upper_arm_off_its_own_frame_as_it_tips_a_box_close_in():
+    """Tipped past upright close to the body, the sinking torso swung the upper arm into the robot's
+    frame: the twin's shoulder stalled against it, the box came down on the table and the arm
+    drawing back turned the table over. Every posture solved along such a tip keeps the arm's links
+    clear of the frame and chassis."""
+    import mujoco
+
+    from steward.ego.ik import _ENT
+
+    arm = _home_arm()
+    ik, solved, prior = arm.ik, None, None
+    body = ik._collidable({f"{_ENT}/frame", f"{_ENT}/base"})
+    links = ik._collidable({f"{_ENT}/L_link{k}" for k in range(2, 6)})
+    with arm._lock:
+        for k in range(21):
+            roll = -1.9 * k / 20
+            target = {"lift": 0.81 + 0.14 * abs(math.sin(roll)), "reach": 0.333, "wrist_yaw": 0.0,
+                      "wrist_roll": roll, "wrist_pitch": 1.05}
+            solved, _ = arm._ik(target, {}, prior)
+            if solved is None:
+                break
+            ik.set_base(0.0, 0.0, 0.0, solved[0])
+            q = np.array(ik.data.q)
+            q[ik._arms["L"]["qadr"]] = solved[1]
+            ik.data.update(q)
+            gap = min(mujoco.mj_geomDistance(ik.model, ik.data.data, a, b, 0.5, np.zeros(6)) for a in links for b in body)
+            assert gap > 0.009, f"at roll {roll:+.2f} the arm is {gap * 1000:.0f} mm from its frame"
+            prior = solved
+    assert prior is not None and k > 10, "it still tips the box well over"
+
+
 def test_the_piper_turns_what_it_holds_over_in_the_air_with_its_tool_tilted_and_lowers_it():
     """With the tool tilted most, a half turn of the wrist about the tool's own axis leaves the pinch
     point near its spot; the arm then lowers it, still turned over, until its forearm or gripper

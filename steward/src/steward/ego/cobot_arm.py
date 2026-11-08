@@ -84,6 +84,7 @@ class PiperArmConfig:
     # Turned over, the elbow hangs below the forearm: lowered, it reaches the surface before the
     # pinch point does (the forearm pressed on the table 19 cm above it). No link comes nearer.
     turn_link_clearance: float = 0.02
+    self_clearance: float = 0.01  # the least gap the solver keeps between the arm and the robot's own frame
     small_step: tuple[float, float] = (0.05, 0.2)  # metres, radians: a command this close to the last is a step
     arrived_rad: float = 0.04  # encoders this close to the last solution report its command
     arrived_lift_m: float = 0.01
@@ -92,7 +93,7 @@ class PiperArmConfig:
 class PiperArm(Arm):
     def __init__(self, robot_model: dict, config: PiperArmConfig | None = None):
         self.config = cfg = config or PiperArmConfig()
-        self.ik = CobotIK(robot_model)
+        self.ik = CobotIK(robot_model, self_clearance=cfg.self_clearance)
         mount = next(j for j in robot_model["body"]["joints"] if j["id"] == f"{cfg.arm}_mount")
         lateral = float(mount["origin"]["value"]["p"][1])
         super().__init__(ArmGeometry(tool_offset=ARM_MOUNT_X, lateral=lateral, reach_min=cfg.reach[0],

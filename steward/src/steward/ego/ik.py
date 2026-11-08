@@ -52,7 +52,9 @@ class IkError(RuntimeError):
 class CobotIK:
     """FK/IK for one Cobot Magic twin, on the robot's own (URDF-derived) model."""
 
-    def __init__(self, robot: dict | None = None, timestep: float = 0.002) -> None:
+    def __init__(self, robot: dict | None = None, timestep: float = 0.002, self_clearance: float = 0.01) -> None:
+        """``self_clearance``: the least distance :meth:`solve_body` keeps between an arm's links
+        (beyond its shoulder) and the robot's frame and chassis."""
         self.robot = robot if robot is not None else cobot_magic().to_dict()
         # Only the robot is compiled: IK must not depend on scene furniture.
         ent = dict(self.robot)
@@ -109,6 +111,21 @@ class CobotIK:
                 self.model, dof_indices=[d for d in all_dofs if d not in owned | {self._lift_dof}])
         self._posture = mink.PostureTask(self.model, cost=1e-2)
         self._limit = mink.ConfigurationLimit(self.model)
+        # The torso sinks as the arm tips a held box past upright, swinging the upper arm into the
+        # frame (measured: the twin's L_link2 stopped against it, the tip fell 3 cm short and the
+        # box came down on the table): a whole-body solve keeps the arm clear of its own body.
+        body = self._collidable({f"{_ENT}/frame", f"{_ENT}/base"})
+        for arm in ARMS:
+            links = self._collidable({f"{_ENT}/{arm}_link{k}" for k in range(2, _DOF_PER_ARM)})
+            self._arms[arm]["avoid"] = mink.CollisionAvoidanceLimit(
+                self.model, [(links, body)], minimum_distance_from_collisions=self_clearance,
+                collision_detection_distance=self_clearance + 0.05)
+
+    def _collidable(self, bodies: set[str]) -> list[int]:
+        """Ids of the geoms of ``bodies`` that take part in contacts."""
+        m = self.model
+        return [g for g in range(m.ngeom) if (m.geom_contype[g] or m.geom_conaffinity[g])
+                and mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_BODY, int(m.geom_bodyid[g])) in bodies]
 
     # ------------------------------------------------------------------ queries
     def joint_names(self, arm: str) -> list[str]:
@@ -278,7 +295,8 @@ class CobotIK:
         ``stall`` steps gives up. Once the goal is met the redundant joints keep settling, within the
         tolerances, for up to ``settle`` steps or until no joint moves ``settled`` rad in a step: a
         posture the goal does not pin down settles where the costs put it, not where convergence
-        happened to stop, so neighbouring goals solve to neighbouring postures.
+        happened to stop, so neighbouring goals solve to neighbouring postures. The arm's links stay
+        ``self_clearance`` clear of the robot's frame and chassis.
 
         Returns:
             ``(lift, joints)``.
@@ -332,7 +350,7 @@ class CobotIK:
                     break
             try:
                 velocity = mink.solve_ik(self.data, [place, turn, posture], self.dt, solver="daqp",
-                                         limits=[self._limit], constraints=[self._freeze_body[arm]])
+                                         limits=[self._limit, spec["avoid"]], constraints=[self._freeze_body[arm]])
             except mink.NoSolutionFound as exc:
                 if met is not None:
                     return met

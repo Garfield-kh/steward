@@ -65,10 +65,13 @@ def grasp_link(model: dict) -> str:
                 if any((a if isinstance(a, str) else a.get("value")) == "grasp-point" for a in link.get("affordances", [])))
 
 
-def gripper_pose(model: dict, packet: dict, gripper: str | None = None) -> dict:
+def gripper_pose(model: dict, packet: dict, gripper: str | None = None, joints: dict | None = None) -> dict:
     """Return gripper-link-to-base and gripper-link-to-camera matrices in metres.
 
-    ``gripper`` is the grasp-point link to report (default: :func:`grasp_link`). Body links use
+    ``gripper`` is the grasp-point link to report (default: :func:`grasp_link`); whatever the body,
+    its frame is called ``gripper`` and the link is named in ``gripper_link``. ``joint_positions``
+    are ``joints`` (the arm's virtual joints: ``lift``, ``reach`` and the wrist) or, without them,
+    the raw encoder readings. Body links use
     x forward, y left, z up at their zero pose; camera frames use OpenCV x right, y down, z
     forward. Only the robot body model, encoder sample and relative rig calibration contribute.
     No odometry or simulator absolute pose is required.
@@ -96,6 +99,7 @@ def gripper_pose(model: dict, packet: dict, gripper: str | None = None) -> dict:
             raise ValueError("Invalid camera rig calibration")
         relative[camera_id] = (np.linalg.inv(reference_to_base @ camera_to_reference) @ gripper_to_base).tolist()
     return {"stamp": packet["stamp"], "pose_source": "joint_encoders_and_robot_model",
-            "gripper_frame": gripper, "gripper_axes": "x_forward_y_left_z_up", "camera_axes": CAMERA_AXES,
-            "joint_positions": dict(encoders), "gripper_to_base": gripper_to_base.tolist(),
+            "gripper_frame": "gripper", "gripper_link": gripper, "gripper_axes": "x_forward_y_left_z_up",
+            "camera_axes": CAMERA_AXES, "joint_positions": dict(encoders if joints is None else joints),
+            "gripper_to_base": gripper_to_base.tolist(),
             "gripper_to_camera": relative}

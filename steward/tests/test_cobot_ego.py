@@ -92,8 +92,10 @@ def test_the_twins_cameras_are_captured_with_the_pose_of_the_gripper_its_arm_wor
     _, api = cobot
     packet = call("POST", f"{api}/ego/cameras/capture", {})
     assert set(packet["views"]) == {"head_camera", "wide_camera"}
-    assert packet["gripper_pose"]["gripper_frame"] == "L_link6"
-    assert call("GET", f"{api}/ego/gripper/pose")["gripper_frame"] == "L_link6"
+    pose = call("GET", f"{api}/ego/gripper/pose")
+    for reported in (packet["gripper_pose"], pose):
+        assert (reported["gripper_frame"], reported["gripper_link"]) == ("gripper", "L_link6")
+    assert {"lift", "reach"} <= set(pose["joint_positions"]), "the arm's joints as the Ego Harness reads them"
 
 
 def _home_arm() -> PiperArm:

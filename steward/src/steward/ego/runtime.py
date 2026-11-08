@@ -877,12 +877,16 @@ class EgoRuntime:
         absolute camera pose.
         """
         packet = self.link.cameras()
-        pose = gripper_pose(self.estimator.robot_model, packet, self.arm.geometry.gripper)
-        return {key: value for key, value in packet.items() if key != "joint_encoders"} | {"gripper_pose": pose}
+        return {key: value for key, value in packet.items() if key != "joint_encoders"} | {"gripper_pose": self._gripper_pose(packet)}
 
     def gripper_pose(self) -> dict:
         """Current gripper-link pose relative to the base and the robot cameras, without imaging."""
-        return gripper_pose(self.estimator.robot_model, self.link.kinematics(), self.arm.geometry.gripper)
+        return self._gripper_pose(self.link.kinematics())
+
+    def _gripper_pose(self, packet: dict) -> dict:
+        """The pose of the gripper the arm works with, its joints read as the arm's virtual joints."""
+        return gripper_pose(self.estimator.robot_model, packet, self.arm.geometry.gripper,
+                            self.arm.joints_of(packet["joint_encoders"], {"x": 0.0, "y": 0.0, "yaw": 0.0}))
 
     def camera_calibration(self) -> dict:
         """Read fixed camera calibration through the robot sensor port, with no absolute poses."""

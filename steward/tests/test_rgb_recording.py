@@ -83,7 +83,7 @@ def test_ego_export_builds_real_scene_zip_and_current_gripper_target_without_mot
         assert all("depth" not in name for name in zipped.namelist())
         for frame in scene["frames"][:-1]:
             image = Image.open(io.BytesIO(zipped.read(frame["image_path"])))
-            assert image.format == "JPEG" and image.size == (640, 480)
+            assert image.format == "JPEG" and image.size == (2560, 1920)
         assert all("head_camera_left" not in name and "head_camera_right" not in name for name in zipped.namelist())
         assert "simulation_ground_truth" not in json.dumps(evidence)
         temporal = call("POST", f"{api.url}/ego/rgb/record/export", {"recording_id": job.id})

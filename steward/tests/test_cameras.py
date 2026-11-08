@@ -40,11 +40,29 @@ def test_each_camera_gives_its_own_frame_and_an_unknown_camera_is_refused(kitche
     sim.perception.mode = "rgbd"
     assert [c["id"] for c in sim.sensors("w:robot-1")["cameras"]] == ["head_camera", "wide_camera"]
     head, wide = (decode_rgbd(sim.rgbd("w:robot-1", c)) for c in ("head_camera", "wide_camera"))
-    assert head["camera"] == "head_camera" and head["rgb"].shape == (480, 640, 3) and head["fovy"] == 60.0
+    assert head["camera"] == "head_camera" and head["rgb"].shape == (1920, 2560, 3) and head["fovy"] == 60.0
     assert wide["camera"] == "wide_camera" and wide["rgb"].shape == (360, 480, 3) and wide["fovy"] == 100.0
     assert decode_rgbd(sim.rgbd("w:robot-1"))["camera"] == "head_camera", "no camera named: the primary one"
     with pytest.raises(KeyError):
         sim.rgbd("w:robot-1", "tail_camera")
+
+
+def test_a_camera_with_more_rows_detects_positions_finer_in_proportion(kitchen_scene):
+    sim = WorldSim(kitchen_scene, seed=1)
+    p = sim.perception
+    views: dict[tuple[str, int], list[float]] = {}
+    for _ in range(100):
+        sim.step()
+        dets = sim.sensors("w:robot-1")["detections"]
+        for camera in ("head_camera", "wide_camera"):
+            for n, det in enumerate(d for d in dets if d["camera"] == camera):
+                views.setdefault((camera, n), []).append(det["pose"]["p"][1] / (p.pos_sigma_base + p.pos_sigma_per_m * det["range"]))
+    spread = {camera: float(np.mean([np.std(v) for (c, _n), v in views.items() if c == camera]))
+              for camera in ("head_camera", "wide_camera")}
+    rows = {c: EgoEstimator(robot_model=steward_bot().to_dict()).camera_intrinsics(c)["height"] for c in spread}
+    assert rows == {"head_camera": 1920, "wide_camera": 360}
+    assert spread["head_camera"] / spread["wide_camera"] == pytest.approx(360 / 1920, rel=0.25), spread
+    assert spread["head_camera"] == pytest.approx(p.pos_sigma_rows / 1920, rel=0.25)
 
 
 def test_the_robot_port_names_its_cameras_and_refuses_others(kitchen_root, tmp_path):

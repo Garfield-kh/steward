@@ -88,6 +88,11 @@ class MotionConfig:
     a load) gets one corrected setpoint."""
     grasp_wait_s: float = 0.1
     release_wait_s: float = 0.15
+    release_joint_tol: float = 0.002
+    """How near its setpoint each arm joint comes before a place lets go: ``joint_tol`` ends a move
+    up to a centimetre short, and the load is put down where the gripper is."""
+    release_settle_s: float = 0.6
+    """Most robot time a place waits for its joints to come within ``release_joint_tol``; then it lets go anyway."""
     handle_release_wait_s: float = 0.08
     look_dwell_s: float = 0.6
     wrist_turn_s: float = 0.6
@@ -159,6 +164,7 @@ class SkillExecutor:
         self.config = config or MotionConfig()
         self._ids = itertools.count(1)
         self._gentle = False  # the running plan moves a container with its contents
+        self._setpoints: dict[str, float] = {}  # the last target each joint was moved to
         self._look = False  # the running skill is a look-around
         self._keyframed = False  # that look-around turns at look_angular_speed only while perception keeps keyframes
         self._lock = threading.Lock()
@@ -366,6 +372,7 @@ class SkillExecutor:
         self._turn_to(final_yaw)
 
     def _set_joint(self, name: str, target: float, timeout: float = 8.0, ramp: bool = True) -> None:
+        self._setpoints[name] = target
         speed = self.config.gentle_lift_speed if self._gentle else self.config.arm_speed
         if ramp and speed and name in ("lift", "reach"):
             st = self._state()
@@ -395,6 +402,18 @@ class SkillExecutor:
                 corrected = True
             if st["stamp"] - t0 > timeout:
                 raise SkillFailed(f"joint {name} did not reach {target:.3f} (at {q:.3f})")
+
+    def _settle_for_release(self) -> None:
+        """Wait until the lift and reach are within ``release_joint_tol`` of their setpoints, for at
+        most ``release_settle_s``; a joint that stays farther (sagging under the load) does not fail the place."""
+        t0 = self._state()["stamp"]
+        while True:
+            st = self._tick()
+            if all(abs(st["joints"].get(name, target) - target) < self.config.release_joint_tol
+                   for name, target in self._setpoints.items() if name in ("lift", "reach")):
+                return
+            if st["stamp"] - t0 > self.config.release_settle_s:
+                return
 
     def _profile(self, frac: float) -> float:
         """Share of a move done at time share ``frac``: steady, or for a gentle plan starting and
@@ -642,6 +661,7 @@ class SkillExecutor:
             self._withdraw(plan)
             self._backoff(plan)
             raise SkillFailed(f"gripper is not over {plan['support']}; keeping {plan['object']}")
+        self._settle_for_release()
         self._command({"gripper": "open"})
         self._released(plan["object"], plan["spot"])
         self._wait(self.config.release_wait_s)

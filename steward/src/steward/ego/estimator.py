@@ -139,6 +139,7 @@ class Track:
 class EstimatorConfig:
     pos_sigma_base: float = 0.01
     pos_sigma_per_m: float = 0.02
+    pos_sigma_rows: int = 240  # image rows the pos_sigma_* figures hold for: a camera with more rows localises finer in proportion
     process_noise: float = 1e-6
     gate_m: float = 0.30
     size_gate_ratio: float = 0.25
@@ -180,6 +181,13 @@ class EstimatorConfig:
     gets no track until it is seen where it lands (:meth:`EgoEstimator._newcomer`)."""
     content_margin_m: float = 0.02
     """Margin (m) around the held container within which a newly seen object is taken to lie in it."""
+    grasp_shift_m: float = 0.01
+    """Standard deviation (m) of where a grasp leaves the load in the hand relative to where the
+    estimate put it before the grasp: the uncertainty views of the load in the gripper start from
+    (:meth:`EgoEstimator._refine_held`)."""
+    held_view_gate_m: float = 0.05
+    """Largest distance (m) between a detection and the held load's predicted position at which it
+    corrects where the load sits in the gripper; a detection as near another track corrects nothing."""
     forget_unseen_s: float = 3.0
     """Seconds a track must have gone unperceived before the agent may forget it (:meth:`EgoEstimator.forget`)."""
     wall_like_top: float = 1.25
@@ -408,7 +416,8 @@ class EgoEstimator:
                 continue
             world = pose_compose(cams[det.get("camera", self.primary_camera)], det["pose"])
             rng = float(det.get("range", np.linalg.norm(det["pose"]["p"])))
-            sigma = self.config.pos_sigma_base + self.config.pos_sigma_per_m * rng
+            rows = self.camera_intrinsics(det.get("camera", self.primary_camera))["height"]
+            sigma = (self.config.pos_sigma_base + self.config.pos_sigma_per_m * rng) * self.config.pos_sigma_rows / rows
             measurements.append((det, np.asarray(world["p"]), yaw_from_quat(world["q"]), sigma))
         # Global nearest-first assignment: of all detection-track pairs within the gate, the closest
         # pair is joined first, so of two objects side by side neither takes the other's track. An
@@ -1355,6 +1364,7 @@ class EgoEstimator:
         track.existence = min(1.0, track.existence + 0.2 * (1.0 - track.existence))
         track.absent_views.clear()
         if track.held:
+            self._refine_held(track, pos, sigma)
             return
         if track.carried:
             # Inside the carried container it may have slid: it follows the view, and keeps its
@@ -1385,6 +1395,24 @@ class EgoEstimator:
             track.yaw_conflicts = 0
         n = track.observations
         track.size = track.size + (np.asarray(det["size"], float) - track.size) / n
+
+    def _refine_held(self, track: Track, pos: np.ndarray, sigma: float) -> None:
+        """Correct where the held ``track`` sits in the gripper from a detection of it there. The
+        grasp takes the load where it really lay, which the estimate before the grasp missed by its
+        error, and a place puts down where the estimate holds it; without this correction that error
+        carries into every placement. A view from before the gripper closed, one beyond
+        ``held_view_gate_m`` of the load, or one as near another track (a neighbour the load is
+        lowered beside) corrects nothing."""
+        gate = self.config.held_view_gate_m
+        if self.stamp < self.held_since - 1e-6 or track.held_offset is None or np.linalg.norm(pos - track.pos) > gate:
+            return
+        if any(other is not track and not other.carried and np.linalg.norm(other.pos - pos) <= gate
+               for other in self.tracks.values()):
+            return
+        gain = track.var / (track.var + sigma**2)
+        track.pos = track.pos + gain * (pos - track.pos)
+        track.var = (1.0 - gain) * track.var
+        track.held_offset = self.gripper_rotation(self.held_gripper).T @ (track.pos - self.gripper_position(self.held_gripper))
 
     def _decay_unseen(self, cams: dict[str, dict], matched: set[str]) -> None:
         """Fade every unmatched track that lies well inside the view of at least one of ``cams``
@@ -1481,6 +1509,7 @@ class EgoEstimator:
         closed_at = self.gripper_position(gripper) if at is None else np.asarray(at, dtype=float)
         track.held = True
         track.held_offset = rot.T @ (track.pos - closed_at)
+        track.var = np.maximum(track.var, self.config.grasp_shift_m**2)
         track.held_yaw = wrap_angle(track.yaw - math.atan2(rot[1, 0], rot[0, 0]))
         track.held_up = rot.T @ np.array([0.0, 0.0, 1.0])
         track.recent.clear()  # it will be put down elsewhere

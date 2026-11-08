@@ -107,6 +107,10 @@ def build_mjcf(
     ET.SubElement(root, "compiler", angle="radian", autolimits="true")
     ET.SubElement(root, "option", timestep=f"{timestep}", integrator="implicitfast")
     visual = ET.SubElement(root, "visual")
+    # MuJoCo renders nothing larger than the offscreen buffer: it grows to the largest camera in the scene.
+    sizes = [(s["intrinsics"]["width"], s["intrinsics"]["height"]) for ent in scene.entities
+             if isinstance(ent.body, RigidTree) for link in ent.rigid.links for s in link.sensors if "intrinsics" in s]
+    offscreen = (max([offscreen[0], *(w for w, _h in sizes)]), max([offscreen[1], *(h for _w, h in sizes)]))
     ET.SubElement(visual, "global", offwidth=str(offscreen[0]), offheight=str(offscreen[1]))
     world = ET.SubElement(root, "worldbody")
     if appearance == "textured":

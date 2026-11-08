@@ -398,9 +398,9 @@ HEAD_HEIGHT_M = 1.50  # head mount above the floor; the bodies' perception is tu
 
 def head_link(camera_pitch_deg: float = 30.0, camera_fovy_deg: float = 60.0, wide_camera: bool = True,
               wide_pitch_deg: float = 45.0, wide_fovy_deg: float = 100.0,
-              wide_size: tuple[int, int] = (480, 360), head_size: tuple[int, int] = (640, 480)) -> Link:
-    """The robot head both bodies carry: ``head_camera`` (survey view, ``head_size``: at 640x480 a
-    5.75 cm puzzle piece a metre away spans about 22 pixels, enough to tell its picture) and, 5 cm below
+              wide_size: tuple[int, int] = (480, 360), head_size: tuple[int, int] = (2560, 1920)) -> Link:
+    """The robot head both bodies carry: ``head_camera`` (survey view, ``head_size``: at 2560x1920 a
+    5.75 cm puzzle piece a metre away spans about 90 pixels, enough to tell its picture and edges) and, 5 cm below
     it, the short-focal-length ``wide_camera`` (work view down to the robot's own front). Fixed
     on the base, not on a lift, so what the robot sees does not depend on its working height."""
     pitch = math.radians(camera_pitch_deg)
@@ -421,7 +421,7 @@ def head_link(camera_pitch_deg: float = 30.0, camera_fovy_deg: float = 60.0, wid
 
 def steward_bot(camera_pitch_deg: float = 30.0, camera_fovy_deg: float = 60.0, wide_camera: bool = True,
                 wide_pitch_deg: float = 45.0, wide_fovy_deg: float = 100.0, wide_size: tuple[int, int] = (480, 360),
-                head_size: tuple[int, int] = (640, 480)) -> Entity:
+                head_size: tuple[int, int] = (2560, 1920)) -> Entity:
     """Phase 0 mobile manipulator: planar base, vertical lift, horizontal reach, a two-axis wrist
     (yaw about the vertical, roll about the arm) and an ideal gripper.
 

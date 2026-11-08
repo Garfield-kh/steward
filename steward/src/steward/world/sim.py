@@ -81,6 +81,7 @@ class PerceptionConfig:
     min_mask_pixels: int = 25
     pos_sigma_base: float = 0.01
     pos_sigma_per_m: float = 0.02
+    pos_sigma_rows: int = 240  # image rows the pos_sigma_* figures hold for: a camera with more rows localises finer in proportion
     size_sigma_rel: float = 0.03
     yaw_sigma: float = 0.05
     odom_pos_sigma: float = 0.003
@@ -1236,7 +1237,7 @@ class WorldSim:
                 continue
             rel = pose_compose(cam_inv, obb.pose())
             rng_m = float(np.linalg.norm(rel["p"]))
-            sigma = p.pos_sigma_base + p.pos_sigma_per_m * rng_m
+            sigma = (p.pos_sigma_base + p.pos_sigma_per_m * rng_m) * p.pos_sigma_rows / sensor["intrinsics"]["height"]
             noisy_p = [rel["p"][i] + rng.normal(0, sigma) for i in range(3)]
             noisy_q = quat_normalize(quat_mul(rel["q"], quat_from_yaw(rng.normal(0, p.yaw_sigma))))
             size = [max(0.005, s * (1 + rng.normal(0, p.size_sigma_rel))) for s in obb.size]

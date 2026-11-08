@@ -257,6 +257,7 @@ def test_a_detection_of_a_neighbour_does_not_take_the_track_of_the_piece_beside_
     from steward.math3d import pose_compose, pose_inverse
 
     est = EgoEstimator(robot_model=steward_bot().to_dict())
+    est.tracks["e:1"] = _track("e:1", "table", [0.6, 0.0, 0.375], [1.0, 0.6, 0.75])
     est.tracks["e:50"] = _track("e:50", "puzzle_piece", [0.627, 0.0, 0.76], [0.115, 0.115, 0.006])
     odometry = {"x": 0.0, "y": 0.0, "yaw": 0.0, "sigma": {"pos": 0.003, "yaw": 0.003}}
     est.odometry = odometry
@@ -270,7 +271,7 @@ def test_a_detection_of_a_neighbour_does_not_take_the_track_of_the_piece_beside_
     # the piece it lies on.
     est.update({"stamp": 1.0, "odometry": odometry, "joints": {}, "gripper": {"state": "open", "holding": False},
                 "detections": [det(0.5, 0.2), det(0.627, 0.9)]})
-    tracks = sorted(est.tracks.values(), key=lambda t: t.pos[0])
+    tracks = sorted((t for t in est.tracks.values() if t.category == "puzzle_piece"), key=lambda t: t.pos[0])
     assert len(tracks) == 2 and tracks[1].id == "e:50"
     assert tracks[0].pos[0] == pytest.approx(0.5, abs=0.01) and tracks[1].pos[0] == pytest.approx(0.627, abs=0.01)
 

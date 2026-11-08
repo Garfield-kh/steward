@@ -89,6 +89,7 @@ ROBOT_BRIEF = (
 )
 
 ROBOT_OWNER = "operator"
+TURN_BUDGET_S = 30 * 24 * 3600.0
 
 
 def _terminate(proc: subprocess.Popen) -> None:
@@ -126,7 +127,7 @@ class ChatConfig:
     world_home: Path | None = None
     robot_home: Path | None = None
     ego_api: str | None = None
-    timeout_s: float = 900.0
+    timeout_s: float = TURN_BUDGET_S  # wall seconds a turn may run before it is ended
     stop_wait_s: float = 15.0  # how long a stopped turn may take to end before a new task gives up on it
 
 

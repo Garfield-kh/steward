@@ -27,6 +27,7 @@ from pathlib import Path
 
 from steward.embodiments import EMBODIMENTS
 from steward.phases import LATEST_PHASE, PHASES, load_misnames
+from steward.world.chat import TURN_BUDGET_S
 
 STEWARD_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_ROOT = STEWARD_DIR / "var" / "steward"
@@ -133,7 +134,8 @@ def _chat_config(args):
     _dsh = _dsh_bin / ("dsh.CMD" if os.name == "nt" and (_dsh_bin / "dsh.CMD").exists() else "dsh")
     return ChatConfig(dsh=_dsh, cwd=STEWARD_DIR,
                       env_file=STEWARD_DIR / ".env", world_home=Path(world) if world else None,
-                      robot_home=Path(robot) if robot else None, ego_api=getattr(args, "ego_api", None))
+                      robot_home=Path(robot) if robot else None, ego_api=getattr(args, "ego_api", None),
+                      timeout_s=getattr(args, "turn_budget_s", TURN_BUDGET_S))
 
 
 def cmd_world(args) -> int:
@@ -882,6 +884,9 @@ def main(argv: list[str] | None = None) -> int:
                            help="DSH home of the World Harness used by the console chat; '' disables it")
             p.add_argument("--robot-harness", default=str(STEWARD_DIR / "var" / "dsh" / "robot-1"),
                            help="DSH home of the robot's Ego Harness used by the console chat; '' disables it")
+            p.add_argument("--turn-budget-s", type=float, default=TURN_BUDGET_S,
+                           help="wall seconds one console chat turn of a harness may run before it is ended; "
+                                "default: 30 days")
         if name == "world":
             p.add_argument("--ego-api", default="http://127.0.0.1:7420",
                            help="Ego API of the robot, for robot tasks from the console chat")

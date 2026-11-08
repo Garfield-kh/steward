@@ -22,9 +22,14 @@ _cache: dict[str, tuple[float, int, list[dict]]] = {}
 _lock = threading.Lock()
 
 
-def _session_file(robot_home: str) -> str | None:
-    """The newest DSH session file of the robot's Harness home."""
-    files = glob.glob(f"{robot_home}/sessions/*/*/session.v4.jsonl.zstd")
+def session_files(robot_home: str) -> set[str]:
+    """Every DSH session file of the robot's Harness home."""
+    return set(glob.glob(f"{robot_home}/sessions/*/*/session.v4.jsonl.zstd"))
+
+
+def _session_file(robot_home: str, exclude: frozenset[str]) -> str | None:
+    """The newest DSH session file of the robot's Harness home that is not in ``exclude``."""
+    files = session_files(robot_home) - exclude
     return max(files, key=os.path.getmtime) if files else None
 
 
@@ -75,16 +80,17 @@ def _thinking_of(rows: list[dict], limit: int) -> list[dict]:
     return out[-limit:]
 
 
-def thinking_state(robot_homes: dict[str, str], limit: int = 3) -> dict[str, dict]:
+def thinking_state(robot_homes: dict[str, str], limit: int = 3, exclude: frozenset[str] = frozenset()) -> dict[str, dict]:
     """Live thinking per robot: its latest reasoning blocks and conclusions.
 
     :param robot_homes: robot id to its DSH home directory.
     :param limit: reasoning blocks per robot, newest last.
+    :param exclude: session files not to read (those of an episode the operator reset).
     :returns: per robot ``{entries, error}`` (one of them None)."""
     deadline = time.monotonic() + _TIME_BUDGET_S
     out: dict[str, dict] = {}
     for rid, home in robot_homes.items():
-        path = _session_file(home)
+        path = _session_file(home, exclude)
         if path is None:
             continue
         try:

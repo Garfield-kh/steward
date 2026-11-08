@@ -17,6 +17,7 @@ import os
 import sys
 import threading
 import time
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -310,6 +311,7 @@ class EgoRuntime:
         self._roles: dict[str, str] = {}  # the latest role assignment, kept unless clearly outweighed
         self.activity: collections.deque[dict] = collections.deque(maxlen=ACTIVITY_MAX)
         self._activity_ids = itertools.count(1)
+        self.boot = uuid.uuid4().hex  # a console drops the activity it shows when this changes
         self._input_lock = threading.Lock()
         self.inputs: list[dict] = []  # Ego API requests as applied, with their world time (:meth:`apply`)
         self._alert_ids = itertools.count(1)
@@ -1252,8 +1254,9 @@ class EgoRuntime:
         entries newer than ``since``.
 
         :param since: the id of the newest activity entry the caller already has.
-        :returns: ``{"plan", "skill", "activity", "activityLast", "t"}`` (``activityLast`` is the newest
-            id, lower than ``since`` after the runtime restarted).
+        :returns: ``{"plan", "skill", "activity", "activityLast", "boot", "t"}`` (``activityLast`` is
+            the newest id, lower than ``since`` after the runtime restarted; ``boot`` names this
+            runtime process, so a client tells a new process from the one it was reading).
         """
         running = next((j for j in reversed(list(self.executor.jobs.values())) if j.state == "running"), None)
         with self._lock:
@@ -1261,7 +1264,7 @@ class EgoRuntime:
         with self._lock:
             newest = self.activity[-1]["id"] if self.activity else 0
         return {"plan": plan, "skill": running.to_dict() if running else None, "activity": self.activity_since(since),
-                "activityLast": newest, "t": round(self.estimator.stamp, 2)}
+                "activityLast": newest, "boot": self.boot, "t": round(self.estimator.stamp, 2)}
 
     # ----------------------------------------------------------------- control
     def control(self) -> dict:

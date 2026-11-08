@@ -122,3 +122,15 @@ def test_the_runtime_records_step_changes_difficulties_states_and_alerts_for_the
     assert "白色碗 e:16" in entries[1]["text"]
     view = runtime.plan_view(since=entries[1]["id"])
     assert [e["kind"] for e in view["activity"]] == ["state", "alert"] and view["activityLast"] == entries[-1]["id"]
+
+
+
+def test_each_runtime_process_names_itself_so_a_console_drops_the_activity_it_shows():
+    def fresh() -> EgoRuntime:
+        return EgoRuntime(RobotLink("http://127.0.0.1:1"), steward_bot().to_dict())
+
+    old, new = fresh(), fresh()
+    old.set_plan({"goal": "拼图", "steps": [{"name": "倒出", "status": "active"}], "current": "倒出拼图块"})
+    assert old.plan_view()["boot"] == old.plan_view()["boot"] != new.plan_view()["boot"]
+    view = new.plan_view()
+    assert view["plan"] is None and view["activity"] == []

@@ -200,12 +200,6 @@
     </div>
   </section>
   </div>
-  <section class="card" id="planCard">
-    <h2>机器人计划 <span class="pill" id="planState"></span><span class="sub" id="planMeta"></span></h2>
-    <div id="planBody" class="task">机器人尚未发布计划</div>
-    <h2 style="margin-top:14px">当前思考 <span class="sub" id="thinkMeta"></span></h2>
-    <div id="thinkBody" class="task" style="white-space:pre-wrap"></div>
-  </section>
   <div class="grid3">
     <section class="card">
       <h2 id="robotCamLabel">机器人相机</h2>
@@ -226,6 +220,12 @@
       <ol class="events" id="events"></ol>
     </section>
   </div>
+  <section class="card" id="planCard">
+    <h2>机器人计划 <span class="pill" id="planState"></span><span class="sub" id="planMeta"></span></h2>
+    <div id="planBody" class="task">机器人尚未发布计划</div>
+    <h2 style="margin-top:14px">当前思考 <span class="sub" id="thinkMeta"></span></h2>
+    <div id="thinkBody" class="task" style="white-space:pre-wrap"></div>
+  </section>
 </div>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -810,7 +810,7 @@ function renderPlan(chat) {
     + (plan.difficulty ? `<div class="plan-trouble ${plan.state === 'waiting-operator' || plan.state === 'escaping' ? 'stuck' : ''}">遇到的困难：${esc(plan.difficulty)}</div>` : ''));
 }
 const ACTIVITY_KINDS = { step: '步骤', skill: '技能', difficulty: '困难', state: '状态', alert: '告警', reflection: '反思', think: '思考' };
-let activityLast = 0, thinkLast = 0;
+let activityLast = 0, thinkLast = 0, activityBoot = null;
 function renderRobotStatus(chat) {
   // Macro step (phase), micro step (current action) and running skill of the robot, then its
   // activity record (kept by the Ego Runtime, so it survives page reloads), newest at the bottom,
@@ -833,7 +833,14 @@ function renderRobotStatus(chat) {
     : '机器人尚未发布计划');
   if (!view) return;
   const box = $('rsHistory');
-  if ((view.activityLast || 0) < activityLast) { activityLast = 0; thinkLast = 0; box.innerHTML = ''; }  // the runtime restarted
+  // A new runtime process (the operator's reset restarts it) or a runtime that rebooted itself: this
+  // view was asked for entries after the old process's last id, so the next poll fetches them all.
+  const booted = activityBoot !== null && view.boot !== activityBoot;
+  activityBoot = view.boot;
+  if ((view.activityLast || 0) < activityLast || booted) {
+    activityLast = 0; thinkLast = 0; box.innerHTML = '';
+    if (booted) return;
+  }
   if (selecting(box)) return;  // the rows not added now come again with the next poll
   const fresh = (view.activity || []).filter(e => e.id > activityLast);
   const thoughts = (chat.messages || []).filter(m => m.agent === 'robot' && m.role === 'assistant' && m.id > thinkLast);
@@ -1014,7 +1021,7 @@ $('load').onclick = async () => {
   if (target && !target.built) setText($('clock'), '正在构建场景…');
   try { await api('POST', '/wca/episode', { action: 'load', scenario: name, body }); viewKey = ''; refresh(); loadScenarios(); } catch (e) { showError(e); }
 };
-$('reset').onclick = async () => { try { await api('POST', '/wca/episode', { action: 'reset' }); refresh(); } catch (e) { showError(e); } };
+$('reset').onclick = async () => { try { await api('POST', '/wca/episode', { action: 'reset' }); refresh(); refreshChat(); } catch (e) { showError(e); } };
 $('pause').onclick = async () => { try { await api('POST', '/wca/clock', { action: state && state.paused ? 'resume' : 'pause' }); refresh(); } catch (e) { showError(e); } };
 $('speed').onchange = async () => { try { await api('POST', '/wca/clock', { action: 'speed', value: $('speed').value === 'max' ? 'max' : Number($('speed').value) }); refresh(); } catch (e) { showError(e); } };
 for (const id of ['showGtLabels', 'showEgoLabels', 'showSigma', 'showError']) $(id).onchange = drawOverlays;

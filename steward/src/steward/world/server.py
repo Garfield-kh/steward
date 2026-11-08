@@ -42,6 +42,7 @@ from steward.viewloop import ViewLoop, ViewSettings, frame_response
 from steward.world.goals import evaluate as evaluate_goal
 from steward.world.sim import EditError, PerceptionConfig, WorldSim, speed_json
 from steward.world.sensor_cameras import SensorCameras
+from steward.world.thinking import session_files
 from steward.world.world_view import WorldViewRenderer
 
 
@@ -100,6 +101,8 @@ class StewardHost:
         self.phase = phase or fallback_phase
         self.authoring = AuthoringService(root)
         self.chat = HarnessChat(chat, lambda: self.wca.url)
+        # Session files of reset episodes, whose thinking the console no longer shows.
+        self.stale_sessions: frozenset[str] = frozenset()
         # On: every episode the WCA loads or resets starts the robot's Ego Harness on the scenario's
         # task (:meth:`dispatch_scenario_task`), and a turn still running is stopped before the world changes.
         self.dispatch_task = dispatch_task
@@ -129,6 +132,10 @@ class StewardHost:
         # went backwards would otherwise begin a round against a scenario it is not built for.
         self.before_episode_load: Callable[[dict], None] | None = None
         self.on_episode_loaded: Callable[[], None] | None = None
+        # Called on a reset, before the world starts over: `steward up` stops every Ego Runtime
+        # process, so that :attr:`on_episode_loaded` starts each robot afresh, with nothing it believed,
+        # planned or recorded left over.
+        self.before_episode_reset: Callable[[], None] | None = None
         self.view_settings: ViewSettings | None = None
         renderer = WorldViewRenderer(lambda: self.sim)
         self.world_view = ViewLoop("world", renderer.render, renderer.close)
@@ -296,6 +303,26 @@ class StewardHost:
         except HttpError as exc:
             self.chat.post_error("robot", f"未能把场景任务下发给 {label}：{exc}")
 
+    def _start_robot_runtimes(self) -> None:
+        """Run :attr:`on_episode_loaded` once the episode's world is up; raises ``HttpError(500)``
+        when the robots' runtimes did not start."""
+        if self.on_episode_loaded is None:
+            return
+        try:
+            self.on_episode_loaded()
+        except Exception as exc:  # noqa: BLE001 - the world is up; say what is not
+            raise HttpError(500, f"the episode is loaded but its robot runtime is not: "
+                                 f"{type(exc).__name__}: {exc}") from exc
+
+    def clear_transcripts(self) -> None:
+        """Empty the chat transcripts and the robot's thinking of the episode being reset (the
+        sessions that exist now are no longer read); its plan and activity record go with its Ego
+        Runtime process (:attr:`before_episode_reset`)."""
+        self.chat.clear()
+        home = getattr(self.chat.config, "robot_home", None)
+        if home is not None:
+            self.stale_sessions = frozenset(session_files(str(home)))
+
     def _stop_robot_turn(self) -> None:
         """With :attr:`dispatch_task` on, end the robot's running turn before the world it acts in changes."""
         if self.dispatch_task and "robot" in self.chat.agents:
@@ -346,20 +373,20 @@ class StewardHost:
                     self.sim.start()
                     return result
                 result = self.on_main(load)
-                if self.on_episode_loaded is not None:
-                    try:
-                        self.on_episode_loaded()
-                    except Exception as exc:  # noqa: BLE001 - the world is up; say what is not
-                        raise HttpError(500, f"the episode is loaded but its robot runtime is not: "
-                                             f"{type(exc).__name__}: {exc}") from exc
+                self._start_robot_runtimes()
                 self.dispatch_scenario_task()
                 return result
             if action == "reset":
                 sim = self._require_sim()
-                self._stop_robot_turn()
+                if "robot" in self.chat.agents:
+                    self.chat.stop_turn("robot")
+                self.clear_transcripts()
+                if self.before_episode_reset is not None:
+                    self.before_episode_reset()
                 self.sensor_cameras.recordings.interrupt("Scene reset; start a new RGB recording")
                 self.on_main(sim.reset)
                 self.observer.reset()
+                self._start_robot_runtimes()
                 self.dispatch_scenario_task()
                 return {"reset": True}
             raise HttpError(400, "action must be load or reset")

@@ -99,7 +99,7 @@ def _thinking(host) -> dict[str, dict]:
     home = getattr(config, "robot_home", None)
     if home is None:
         return {}
-    return thinking_state({"w:robot-1": str(home)})
+    return thinking_state({"w:robot-1": str(home)}, exclude=host.stale_sessions)
 
 
 def _ego_view(ego: dict) -> dict:

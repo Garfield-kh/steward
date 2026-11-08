@@ -6,7 +6,7 @@ import json
 
 import zstandard
 
-from steward.world.thinking import thinking_state
+from steward.world.thinking import session_files, thinking_state
 
 
 def _row(kind: str, time: int, data: dict | None = None) -> bytes:
@@ -36,3 +36,15 @@ def test_a_corrupt_session_file_is_reported_not_raised(tmp_path):
     state = thinking_state({"robot-1": str(tmp_path)})
 
     assert state["robot-1"]["entries"] == [] and "zstd failed to decode" in state["robot-1"]["error"]
+
+
+def test_the_sessions_of_a_reset_episode_are_no_longer_read(tmp_path):
+    session = tmp_path / "sessions" / "workspace" / "session-1"
+    session.mkdir(parents=True)
+    message = {"content": [{"type": "reasoning", "text": "上一轮的思考"}]}
+    (session / "session.v4.jsonl.zstd").write_bytes(
+        zstandard.ZstdCompressor().compress(_row("assistant/message", 1, {"step": 1, "message": message})))
+
+    state = thinking_state({"robot-1": str(tmp_path)}, exclude=frozenset(session_files(str(tmp_path))))
+
+    assert state == {}

@@ -172,6 +172,13 @@ def test_the_runtime_keeper_runs_one_process_of_the_right_kind_per_robot(kitchen
 
         switch("phase0-kitchen")
         assert len(started) == 3 and len(stopped) == 2, "same robot, same body: the runtime is kept and reboots itself"
+
+        # The console's 重置 replaces the runtime: stopped before the world starts over, then started anew.
+        host.before_episode_reset = lambda: (keeper.retire(host), order.append("retire"))
+        _pump_while(host, lambda: call("POST", f"{host.wca.url}/wca/episode", {"action": "reset"}, timeout=180))
+        assert order[-2:] == ["retire", "start"]
+        assert stopped[-1] is started[2] and len(started) == 4 and started[3].embodiment == "steward-bot"
+        assert host.ego_apis == {"w:robot-1": started[3].url}
     finally:
         keeper.stop()
         host.stop()

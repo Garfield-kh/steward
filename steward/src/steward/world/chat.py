@@ -250,6 +250,15 @@ class HarnessChat:
             self._add(key, "system", f"已开始新的 {agent.label} 会话")
         return {"reset": True}
 
+    def clear(self) -> None:
+        """Empty the transcript of every harness and start each idle one on a new conversation (an
+        episode reset). A harness still running keeps its conversation for the rest of its turn."""
+        with self._lock:
+            self._entries.clear()
+            for agent in self.agents.values():
+                if not agent.busy:
+                    agent.session_id = None
+
     def cancel(self, key: str) -> dict:
         """Stop the running turn of one harness; robot control is released when the turn ends."""
         agent = self.agents.get(key)

@@ -305,7 +305,8 @@ class EgoSupervisor:
     runtime still polling when its world is replaced would see the clock go back and start a
     round against a scenario it is not built for. :meth:`reconcile` runs afterwards and starts
     the runtimes the new bodies need. Same robot, same body: the process is kept and reboots
-    itself on the clock change, so the console's 重置 does not cost a process.
+    itself on the new episode. The console's 重置 replaces every process (:meth:`retire`, then
+    :meth:`reconcile`), so nothing the robot believed, planned or recorded is left over.
 
     The first robot keeps the fixed Ego API port (the console chat and `steward chores --api`
     find it there); any further robot takes a free port. A robot whose body is not in the
@@ -350,6 +351,14 @@ class EgoSupervisor:
         with self._lock:
             for rid in self._departing(self._wanted(scenario), self.procs):
                 self.procs.pop(rid).stop()
+                host.detach_ego_api(rid)
+
+    def retire(self, host) -> None:
+        """Stop every runtime; :meth:`reconcile` starts them anew."""
+        with self._lock:
+            procs, self.procs = self.procs, {}
+            for rid, proc in procs.items():
+                proc.stop()
                 host.detach_ego_api(rid)
 
     def reconcile(self, host) -> dict[str, str]:
@@ -408,6 +417,7 @@ def cmd_up(args) -> int:
     # before the world they poll is replaced, and the new bodies' runtimes follow.
     host.before_episode_load = lambda scenario: egos.depart(host, scenario)
     host.on_episode_loaded = lambda: egos.reconcile(host)
+    host.before_episode_reset = lambda: egos.retire(host)
     host.start()
     primary = next(iter(host.scenario["robots"]), None)
     print(json.dumps({"console": f"{host.wca.url}/console", "wca": host.wca.url,

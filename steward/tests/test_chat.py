@@ -245,7 +245,9 @@ def test_the_host_gives_the_scenario_task_to_the_robot_whenever_an_episode_loads
         try:
             task = steward.scenario["task"]
             over_wca(steward, {"action": "load", "scenario": "phase0-kitchen"})
+            before = [m["text"] for m in steward.chat.state()["messages"]]
             over_wca(steward, {"action": "reset"})
+            after = [m["text"] for m in steward.chat.state()["messages"]]
         finally:
             steward.stop()
     finally:
@@ -254,6 +256,7 @@ def test_the_host_gives_the_scenario_task_to_the_robot_whenever_an_episode_loads
     assert [t["resumed"] for t in turns] == [False, False], "each episode starts a new conversation"
     assert all(t["text"].endswith(task) for t in turns)
     assert calls == ["acquire", "release"] * 2
+    assert after.count(task) == 1 and len(after) < len(before) + 2, "a reset empties the transcript before the new task"
 
 
 def test_a_turn_ended_by_the_budget_reports_a_designed_stop_not_a_failure(tmp_path):

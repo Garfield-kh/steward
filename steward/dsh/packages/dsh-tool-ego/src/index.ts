@@ -58,8 +58,9 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
         + 'in progress, and every object you have perceived with its estimated position, position uncertainty in '
         + 'metres, size, what it rests on, and when you last saw it. Objects you have not seen are absent, and '
         + 'positions are estimates. appearance says what you remember of an object\'s top face: how long ago you '
-        + 'saw it, the share seen, its colour spread and interiorSpread (near 0: a plain back; prefer interiorSpread '
-        + 'when pieces are packed) and stale (put down since, look again); ego_match_face compares remembered faces.',
+        + 'saw it, the share seen, plain / interiorColors (plain true or interiorColors under about 20: a cardboard '
+        + 'back; do not use spread alone — lighting makes a plain back look varied) and stale (put down since, look '
+        + 'again); ego_match_face compares remembered faces.',
       parameters: {},
       output: { schema: JSON_OUTPUT, render: (_a, v) => text(v) },
       async execute(_args, exec) {
@@ -225,9 +226,9 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
         + 'the strip of a table next to the edge you stand at and the gripper at work, in less detail. When part of the face is unseen, hint says '
         + 'why (too close below the view, beside or behind it, too far, hidden) and how to move. Use it to compare '
         + 'printed or patterned faces, read which side of a flat object is up, or tell similar objects apart. A '
-        + 'printed flat object lying with its plain back up shows an almost uniform face: interiorSpread near 0 '
-        + '(under about 10) is the check to use; spread of the whole face can look patterned when neighbours tint the '
-        + 'edge cells. Turn it over (place with flip) and look again. Flat objects lying on or against each other hide '
+        + 'printed flat object lying with its plain back up: use plain === true or interiorColors (under about 20). '
+        + 'Do not use spread / interiorSpread alone — table lighting makes cardboard look variegated in RGB even when '
+        + 'it is one colour. Turn it over (place with flip) and look again. Flat objects lying on or against each other hide '
         + 'parts of their faces and can be perceived as one object, and one lying on another can hide it wholly: set '
         + 'them apart on free space first, looking again where each one lay after picking it up. The object frame stays '
         + 'fixed to the object between views and while it is carried, so one inspection before picking it tells which '
@@ -256,8 +257,8 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
         + 'place yaw = H + turnDeg. score is a correlation (1 = identical); a best score barely above the second is '
         + 'ambiguous, so look closer (raise px toward 32) and match again. offsetM is good to about one cell (cellM): '
         + 'when you know the layout (for example a grid of equal pieces), snap it to the nearest slot. '
-        + 'interiorSpread near 0 (under about 10) means a plain face: the object probably lies with its back up '
-        + '(prefer it over spread when pieces are packed). An entry with error says what to look at.',
+        + 'plain / interiorColors (under about 20) means a cardboard back facing up; do not trust spread alone. '
+        + 'An entry with error says what to look at.',
       parameters: {
         entities: { type: 'array', items: { type: 'string' }, required: true, description: 'Ids of the objects whose faces are sought.' },
         reference: { type: 'string', required: true, description: 'Id of the object showing the whole picture.' },

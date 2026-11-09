@@ -49,12 +49,16 @@ export interface InspectResult {
   sizeM: number[]
   /** Share of cells seen (not out of view or hidden). */
   coverage: number
-  /** Colour standard deviation of seen cells; near 0 the face is plain. Prefer `interiorSpread` when pieces are packed. */
+  /** Colour standard deviation of seen cells. Lighting inflates this on a plain back; prefer `plain` / `interiorColors`. */
   spread?: number
-  /** Colour standard deviation excluding a one-cell border (neighbours often tint the edge); near 0 means a plain back. */
+  /** Colour standard deviation excluding a one-cell border (neighbours often tint the edge). */
   interiorSpread?: number
   /** Share of interior cells seen. */
   interiorCoverage?: number
+  /** Distinct interior colours after 16-level quantisation; a plain cardboard back stays near 1–4, a print has dozens. */
+  interiorColors?: number
+  /** True when `interiorColors` is low enough that the face is treated as a uniform back. */
+  plain?: boolean
   /** Present when part of the face is unseen: why, from each camera's view (too close below it, beside or behind it, too far, hidden). */
   hint?: string
   /** Row 0 is the object's +y edge, column 0 its -x edge; each cell is [r, g, b] (0-255) or null. */

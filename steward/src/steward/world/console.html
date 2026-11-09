@@ -113,6 +113,13 @@
   .plan-step.failed { border-color: #a33a3a; color: #ffb3b3; }
   .plan-now { font-size: 13px; }
   .plan-now .label { color: var(--muted); }
+  .plan-wait { margin-top: 8px; padding: 6px 10px; border-radius: 8px; border: 1px solid #2a3340; background: #151a21;
+               font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px;
+               font-variant-numeric: tabular-nums; }
+  .plan-wait .label { color: var(--muted); }
+  .plan-wait .bar { color: #9cd0ff; white-space: pre; }
+  .plan-wait.llm .bar { color: #c8a6ff; }
+  .plan-wait.run_code .bar { color: #8fe0b8; }
   .plan-trouble { margin-top: 8px; padding: 6px 10px; border-radius: 8px; background: #33270f; color: #ffd27a; font-size: 13px;
                   white-space: pre-wrap; word-break: break-word; }
   .plan-trouble.stuck { background: #3a1f24; color: #ffb3b3; }
@@ -786,27 +793,65 @@ function agentTodos(chat) {
     && m.input && Array.isArray(m.input.todos));
   return last ? last.input.todos : null;
 }
+function charBar(elapsed) {
+  // Sliding block: a short filled run moves across a 20-cell track as time passes.
+  const width = 20, block = 6;
+  const pos = Math.floor(elapsed * 3) % (width - block + 1);
+  let s = '';
+  for (let i = 0; i < width; i++) s += (i >= pos && i < pos + block) ? '█' : '░';
+  return s;
+}
+function waitLabel(wait) {
+  if (!wait) return '';
+  if (wait.kind === 'llm') return '调用 LLM';
+  if (wait.kind === 'run_code') return '执行 run_code';
+  return `执行 ${wait.tool || '工具'}`;
+}
+function waitUnit(wait) { return wait && wait.kind === 'llm' ? '已等待' : '已执行'; }
+function waitHtml(wait) {
+  if (!wait) return '';
+  const elapsed = Math.max(0, Date.now() / 1000 - wait.since);
+  const detail = wait.detail ? ` · ${esc(wait.detail)}` : '';
+  return `<div class="plan-wait ${esc(wait.kind)}"><span class="label">${waitLabel(wait)}${detail}</span>`
+    + `<div class="bar" data-since="${wait.since}" data-kind="${esc(wait.kind)}">${charBar(elapsed)}`
+    + ` ${waitUnit(wait)} ${elapsed.toFixed(0)} s</div></div>`;
+}
+function tickWaitBars() {
+  document.querySelectorAll('.plan-wait .bar[data-since]').forEach(el => {
+    const since = Number(el.dataset.since), kind = el.dataset.kind;
+    const elapsed = Math.max(0, Date.now() / 1000 - since);
+    const unit = kind === 'llm' ? '已等待' : '已执行';
+    el.textContent = `${charBar(elapsed)} ${unit} ${elapsed.toFixed(0)} s`;
+  });
+}
+setInterval(tickWaitBars, 250);
 function renderPlan(chat) {
   const robot = chat.agents.robot || {};
-  const view = robot.plan, todos = agentTodos(chat);
+  const view = robot.plan, todos = agentTodos(chat), wait = waitHtml(robot.wait);
   const skill = view && view.skill ? `${view.skill.skill}（已执行 ${Math.max(0, (view.t - view.skill.started)).toFixed(0)} s）` : '无';
   if (todos) {
     setText($('planState'), '操作员任务'); $('planState').className = 'pill running';
     setText($('planMeta'), '　机器人智能体（Ego Harness）的待办计划');
     setHtml($('planBody'), `<div class="plan-steps">${todos.map(t => `<span class="plan-step ${t.status === 'completed' ? 'done' : t.status === 'in_progress' ? 'active' : ''}">`
       + `${STEP_MARKS[t.status] || ''} ${esc(t.content)}</span>`).join('')}</div>`
-      + `<div class="plan-now"><span class="label">正在执行的技能：</span>${esc(skill)}</div>`);
+      + `<div class="plan-now"><span class="label">正在执行的技能：</span>${esc(skill)}</div>${wait}`);
     return;
   }
   const plan = view && view.plan;
-  if (!plan) { setText($('planState'), ''); setText($('planMeta'), ''); setText($('planBody'), '机器人尚未发布计划'); return; }
+  if (!plan) {
+    setText($('planState'), robot.busy ? '执行中' : '');
+    if (robot.busy) $('planState').className = 'pill running';
+    setText($('planMeta'), robot.busy ? '　等待模型或工具返回' : '');
+    setHtml($('planBody'), wait || '机器人尚未发布计划');
+    return;
+  }
   setText($('planState'), PLAN_STATES[plan.state] || plan.state);
   $('planState').className = `pill ${plan.state}`;
   setText($('planMeta'), `　${plan.source}${plan.round ? ` · 第 ${plan.round} 轮` : ''} · 更新于 t = ${plan.t.toFixed(0)} s`);
   setHtml($('planBody'), `<div class="plan-goal">目标：${esc(plan.goal)}</div>`
     + `<div class="plan-steps">${plan.steps.map((st, i) => `<span class="plan-step ${st.status}">${STEP_MARKS[st.status] || ''} ${i + 1}. ${esc(st.name)}</span>`).join('')}</div>`
     + `<div class="plan-now"><span class="label">当前步骤：</span>${esc(plan.current || '–')}</div>`
-    + `<div class="plan-now"><span class="label">正在执行的技能：</span>${esc(skill)}</div>`
+    + `<div class="plan-now"><span class="label">正在执行的技能：</span>${esc(skill)}</div>${wait}`
     + (plan.difficulty ? `<div class="plan-trouble ${plan.state === 'waiting-operator' || plan.state === 'escaping' ? 'stuck' : ''}">遇到的困难：${esc(plan.difficulty)}</div>` : ''));
 }
 const ACTIVITY_KINDS = { step: '步骤', skill: '技能', difficulty: '困难', state: '状态', alert: '告警', reflection: '反思', think: '思考' };
@@ -828,9 +873,10 @@ function renderRobotStatus(chat) {
     macro = `${active ? active.name : plan.goal}${plan.round ? `（第 ${plan.round} 轮` : '（'}· ${PLAN_STATES[plan.state] || plan.state}）`;
     micro = plan.current || '–';
   }
+  const wait = waitHtml(robot.wait);
   setHtml($('rsNow'), view ? `<div><span class="label">宏观步骤：</span>${esc(macro)}</div>`
-    + `<div><span class="label">微观步骤：</span>${esc(micro)}</div><div><span class="label">技能：</span>${esc(skill)}</div>`
-    : '机器人尚未发布计划');
+    + `<div><span class="label">微观步骤：</span>${esc(micro)}</div><div><span class="label">技能：</span>${esc(skill)}</div>${wait}`
+    : (wait || '机器人尚未发布计划'));
   if (!view) return;
   const box = $('rsHistory');
   // A new runtime process (the operator's reset restarts it) or a runtime that rebooted itself: this

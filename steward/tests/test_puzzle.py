@@ -618,17 +618,32 @@ def test_a_remembered_face_gathers_views_and_is_replaced_after_the_object_is_put
 
 def test_interior_face_stats_ignore_a_neighbour_tinting_the_edge():
     plain = [[[200, 200, 200]] * 8 for _ in range(8)]
-    assert face_colour_stats(plain)["interiorSpread"] == 0.0
+    assert face_colour_stats(plain)["interiorSpread"] == 0.0 and face_colour_stats(plain)["plain"]
     edged = [list(row) for row in plain]
     for i in range(8):
         edged[0][i] = edged[i][0] = [40, 180, 40]  # a neighbour's green along two edges
     stats = face_colour_stats(edged)
-    assert stats["spread"] > 20 and stats["interiorSpread"] == 0.0
+    assert stats["spread"] > 20 and stats["interiorSpread"] == 0.0 and stats["plain"]
     rgb = np.full((8, 8, 3), 200.0)
     rgb[0, :], rgb[:, 0] = 40.0, 40.0
     track = _track("e:3", "puzzle_piece", [0.5, 0.0, 0.753], [0.115, 0.115, 0.006])
     track.appearance = Appearance(rgb, (0.115, 0.115), 1.0)
     assert track.appearance.spread > 20 and track.appearance.interior_spread == 0.0
+    assert track.appearance.plain and track.appearance.interior_colors == 1
+
+
+def test_a_lit_cardboard_back_is_plain_while_a_printed_face_is_not():
+    """Lighting gradients inflate RGB std on a one-colour back; colour-bucket count still tells them apart."""
+    back = []
+    for i in range(12):
+        shade = 140 + i * 8  # bright-to-dark gradient like a table lamp
+        back.append([[shade, int(shade * 0.85), int(shade * 0.62)]] * 12)
+    back_stats = face_colour_stats(back)
+    assert back_stats["interiorSpread"] > 20 and back_stats["plain"] and back_stats["interiorColors"] <= 12
+    rng = np.random.default_rng(0)
+    print_face = rng.integers(0, 256, (12, 12, 3)).tolist()
+    print_stats = face_colour_stats(print_face)
+    assert not print_stats["plain"] and print_stats["interiorColors"] > 20
 
 
 def test_a_fine_face_averages_into_coarser_cells_over_the_same_extent():

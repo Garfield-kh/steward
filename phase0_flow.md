@@ -354,7 +354,7 @@ for (var iter = 0; iter < 25; iter++) {
 
 - 反思插件区分程序语法错误和物理失败：`SyntaxError` 等只给简短提示，不计入深度反思的触发条件，也不重复反思同一次语法错误。
 - 提高图案网格分辨率：记忆顶面格子从 5 mm 改为 2 mm；`ego_inspect` 上限 128；`ego_match_face` 默认 24、上限 32；参考图最多 192 格。
-- `ego_inspect` / `ego_state.appearance` / `ego_match_face` 增加 `interiorSpread`：正反面判断只看内部格，避免邻块颜色污染边缘。
+- `ego_inspect` / `ego_state.appearance` 增加 `interiorSpread`、`interiorColors`、`plain`：正反面用 `plain` / `interiorColors`（光照会抬高 RGB 标准差，不能只用 spread）；内部格避免邻块颜色污染。
 - `ROBOT_BRIEF` 要求宣布完成前用参考图核对最终排列（相关系数明显高于随机），并说明用 `interiorSpread` 和更高的 `px`。
 - HarnessChat 在机器人每轮开始时把能力库清单放进上下文。
 - Harness 安全插件采用收据上的 `maxRisk`（抓取可为 0.6），并检查 `expired` / `now`。

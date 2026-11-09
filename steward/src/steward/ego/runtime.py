@@ -926,8 +926,9 @@ class EgoRuntime:
             interiorCoverage, rows, worldRows, worldTurnDeg, stamp}``, ``hint`` (:func:`view_hint`)
             when less than :data:`VIEW_HINT_COVERAGE` of the face is seen, and ``detailHint`` when the
             face's shorter side spans fewer than ``detail_px`` pixels of the camera image
-            (``sourcePx``): a finer grid than that only interpolates. ``interiorSpread`` near 0 means
-            a plain face (likely the back); use it rather than ``spread``, which mixes in neighbours.
+            (``sourcePx``): a finer grid than that only interpolates. ``plain`` / ``interiorColors``
+            tell a cardboard back from a printed face (lighting makes ``interiorSpread`` look high
+            on a plain back; do not use spread alone).
         :raises KeyError: unknown object; :raises ValueError: ``px`` out of range."""
         if not 4 <= px <= 128:
             raise ValueError("px must be between 4 and 128")
@@ -1005,7 +1006,9 @@ class EgoRuntime:
                 return {"appearance": None}
             return {"appearance": {"seenAgoS": round(self.estimator.stamp - known.stamp, 1),
                                    "coverage": round(known.coverage, 2), "spread": round(known.spread, 1),
-                                   "interiorSpread": round(known.interior_spread, 1), "stale": known.stale}}
+                                   "interiorSpread": round(known.interior_spread, 1),
+                                   "interiorColors": known.interior_colors, "plain": known.plain,
+                                   "stale": known.stale}}
 
     def match_face(self, entities: list[str], reference: str, px: int = 24) -> dict:
         """Where the top face of each of ``entities`` appears on the top face of ``reference``

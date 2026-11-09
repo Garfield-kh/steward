@@ -98,7 +98,9 @@ ROBOT_BRIEF = (
     "ego_inspect 结果的 sourcePx 是顶面在相机图像里的像素宽，带 detailHint 时说明还不够清楚并给出要走到多近，"
     "先按提示走近再看、再比对，不要用看不清的图案硬配；图案比对用 ego_match_face 时把 px 提到 24–32（上限 32），"
     "让相机分辨率真正用到匹配上；卡片、拼图块、照片这类扁平物体可能背面朝上，背面通常是均匀的单一颜色，"
-    "判断正反面用 ego_inspect 的 interiorSpread（近 0 即背面），不要用整面 spread——拼图块挨着时边缘格会混进邻块颜色；"
+    "判断正反面用 ego_inspect 的 plain（true）或 interiorColors（约 20 以下即背面硬纸板）；"
+    "不要用 spread / interiorSpread——桌面光照会让单色背面的 RGB 标准差达到 25–35，看起来像有图案；"
+    "拼图块挨着时边缘格还会混进邻块颜色；"
     "判断前先把互相压着的摊开、再走近看清，判定背面朝上的用 place 的 flip 翻过来再比对）、ego_annotate（标注你认出的物体类别与可供性）"
     "和 ego_predict / skill_run 组合起来，并尽量复用已有的 skill。做成之后用 capability_save 保存："
     "把每个能用在别的物体上的操作存成 skill（例如把一堆物体摊开、把扁平物体翻成正面、按网格摆放），"
@@ -202,6 +204,12 @@ class _Agent:
     busy: bool = False
     proc: subprocess.Popen | None = None
     cancelled: bool = False
+    # What the harness is waiting on during a busy turn: ``llm`` while the model answers,
+    # ``run_code`` / ``tool`` while a tool call is open. Cleared when the turn ends.
+    wait_kind: str | None = None
+    wait_since: float | None = None
+    wait_tool: str | None = None
+    wait_detail: str | None = None
 
 
 @dataclass
@@ -267,7 +275,8 @@ class HarnessChat:
                      "plan": self._robot_plan(activity_since)}
         with self._lock:
             agents = {key: {"label": a.label, "available": self.unavailable_reason(key) is None,
-                            "reason": self.unavailable_reason(key), "busy": a.busy, "sessionId": a.session_id}
+                            "reason": self.unavailable_reason(key), "busy": a.busy, "sessionId": a.session_id,
+                            "wait": self._wait_of(a)}
                       for key, a in self.agents.items()}
             messages = [e.to_dict() for e in self._entries if e.id > since]
         if robot:
@@ -288,6 +297,7 @@ class HarnessChat:
             if agent.busy:
                 raise HttpError(409, f"{agent.label} is still working on the previous message")
             agent.busy = True
+            self._set_wait(agent, "llm")
             entry = self._add(key, "user", text)
             first = agent.session_id is None
         threading.Thread(target=self._run, args=(agent, text, first), name=f"chat-{key}", daemon=True).start()
@@ -505,6 +515,43 @@ class HarnessChat:
             with self._lock:
                 agent.busy = False
                 agent.proc = None
+                self._clear_wait(agent)
+
+    def _wait_of(self, agent: _Agent) -> dict | None:
+        """Live wait state for the console progress bar, or ``None`` when the agent is idle."""
+        if not agent.busy or agent.wait_kind is None or agent.wait_since is None:
+            return None
+        out: dict = {"kind": agent.wait_kind, "since": agent.wait_since}
+        if agent.wait_tool:
+            out["tool"] = agent.wait_tool
+        if agent.wait_detail:
+            out["detail"] = agent.wait_detail
+        return out
+
+    @staticmethod
+    def _set_wait(agent: _Agent, kind: str, tool: str | None = None, detail: str | None = None) -> None:
+        agent.wait_kind = kind
+        agent.wait_since = time.time()
+        agent.wait_tool = tool
+        agent.wait_detail = detail
+
+    @staticmethod
+    def _clear_wait(agent: _Agent) -> None:
+        agent.wait_kind = None
+        agent.wait_since = None
+        agent.wait_tool = None
+        agent.wait_detail = None
+
+    @staticmethod
+    def _tool_wait_detail(inp: object) -> str | None:
+        """A short label for an open tool call, taken from its common description fields."""
+        if not isinstance(inp, dict):
+            return None
+        for key in ("description", "goal", "summary", "title"):
+            value = inp.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()[:80]
+        return None
 
     def _ingest(self, agent: _Agent, line: str, last_text: str | None) -> str | None:
         try:
@@ -519,14 +566,18 @@ class HarnessChat:
                 last_text = event["text"].strip()
                 self._add(agent.key, "assistant", last_text)
             elif kind == "tool_call":
-                self._add(agent.key, "tool", "", tool=event.get("tool"), input=event.get("input"), status="running",
+                tool = event.get("tool")
+                self._add(agent.key, "tool", "", tool=tool, input=event.get("input"), status="running",
                           call_id=event.get("callId"))
+                wait_kind = "run_code" if tool == "run_code" else "tool"
+                self._set_wait(agent, wait_kind, tool=tool, detail=self._tool_wait_detail(event.get("input")))
             elif kind == "tool_result":
                 for entry in reversed(self._entries):
                     if entry.role == "tool" and entry.call_id == event.get("callId"):
                         entry.status = event.get("status")
                         entry.text = str(event.get("result", ""))[:1200]
                         break
+                self._set_wait(agent, "llm")
             elif kind == "final":
                 agent.session_id = event.get("sessionId") or agent.session_id
                 final = (event.get("text") or "").strip()

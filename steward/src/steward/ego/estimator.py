@@ -58,12 +58,33 @@ class Appearance:
     @property
     def interior_spread(self) -> float:
         """Colour standard deviation of seen cells excluding a one-cell border: edge cells often
-        mix in a neighbour's colour when pieces lie packed, so a plain back only looks plain inside."""
+        mix in a neighbour's colour when pieces lie packed. Lighting still inflates this on a
+        plain back; prefer :attr:`interior_colors` / :attr:`plain` to tell face-down from face-up."""
         h, w = self.rgb.shape[:2]
         margin = 1 if min(h, w) > 2 else 0
         region = self.rgb[margin:h - margin or None, margin:w - margin or None] if margin else self.rgb
         seen = region[np.isfinite(region[..., 0])]
         return float(seen.std()) if len(seen) else 0.0
+
+    @property
+    def interior_colors(self) -> int:
+        """Distinct interior colours after 16-level quantisation; a plain back stays near 1–4."""
+        from steward.ego.perception import FACE_COLOR_STEP
+        h, w = self.rgb.shape[:2]
+        margin = 1 if min(h, w) > 2 else 0
+        region = self.rgb[margin:h - margin or None, margin:w - margin or None] if margin else self.rgb
+        seen = region[np.isfinite(region[..., 0])]
+        if len(seen) == 0:
+            return 0
+        step = FACE_COLOR_STEP
+        q = (seen // step).astype(int)
+        return len({(int(c[0]), int(c[1]), int(c[2])) for c in q})
+
+    @property
+    def plain(self) -> bool:
+        """True when the interior looks like a uniform back (few distinct colours)."""
+        from steward.ego.perception import FACE_PLAIN_COLORS
+        return self.interior_colors <= FACE_PLAIN_COLORS
 
 
 @dataclass

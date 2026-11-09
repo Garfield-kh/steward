@@ -174,6 +174,46 @@ def test_stopping_a_robot_turn_ends_the_run_and_releases_control(tmp_path):
     assert chat.cancel("robot") == {"stopped": False}
 
 
+def test_robot_wait_reports_llm_then_run_code_then_llm_again(tmp_path):
+    """The console progress bar needs a live wait kind while the turn is busy."""
+    robot = _home(tmp_path, "robot-1", "ego")
+    gate = tmp_path / "gate"
+    script = _launcher(tmp_path, (
+        "import json\n"
+        "sys.stdin.read()\n"
+        "print(json.dumps({'type': 'session', 'sessionId': 's-1'}), flush=True)\n"
+        "time.sleep(0.15)\n"
+        "print(json.dumps({'type': 'tool_call', 'callId': 'c1', 'tool': 'run_code',"
+        " 'input': {'description': 'inspect pieces'}}), flush=True)\n"
+        f"open({str(gate)!r}, 'w').write('run')\n"
+        "time.sleep(0.2)\n"
+        "print(json.dumps({'type': 'tool_result', 'callId': 'c1', 'status': 'completed',"
+        " 'result': 'ok'}), flush=True)\n"
+        "time.sleep(0.15)\n"
+        "print(json.dumps({'type': 'final', 'sessionId': 's-1', 'text': 'done'}), flush=True)\n"))
+    ego = JsonServer({("POST", "/ego/control"): lambda q, b: {"owner": None},
+                      ("GET", "/ego/control"): lambda q, b: {"owner": None}}).start()
+    try:
+        chat = HarnessChat(ChatConfig(dsh=script, cwd=tmp_path, env_file=tmp_path / ".env",
+                                      robot_home=robot, ego_api=ego.url), lambda: "unused")
+        chat.send("robot", "看一眼桌面")
+        wait = chat.state()["agents"]["robot"]["wait"]
+        assert wait and wait["kind"] == "llm" and isinstance(wait["since"], float)
+        deadline = time.time() + 5
+        while not gate.exists() and time.time() < deadline:
+            time.sleep(0.02)
+        assert gate.exists()
+        wait = chat.state()["agents"]["robot"]["wait"]
+        assert wait["kind"] == "run_code" and wait["tool"] == "run_code" and wait["detail"] == "inspect pieces"
+        while (chat.state()["agents"]["robot"].get("wait") or {}).get("kind") != "llm" and time.time() < deadline:
+            time.sleep(0.02)
+        assert chat.state()["agents"]["robot"]["wait"]["kind"] == "llm"
+        _wait_idle(chat, "robot")
+    finally:
+        ego.stop()
+    assert chat.state()["agents"]["robot"]["wait"] is None
+
+
 def _recording_dsh(tmp_path):
     """A stand-in launcher that records each turn (resumed or not, its stdin), prints a session and,
     for a task marked ⏳, keeps running until stopped."""

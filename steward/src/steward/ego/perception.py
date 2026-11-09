@@ -388,6 +388,46 @@ def face_rows(face: np.ndarray) -> list[list[list[int] | None]]:
     return [[None if not np.isfinite(c[0]) else [int(round(float(v))) for v in c] for c in row] for row in face]
 
 
+def face_colour_stats(rows: list[list], margin: int = 1) -> dict:
+    """Colour standard deviation of seen cells on a face grid: the whole face and its interior.
+
+    Edge cells often mix in a neighbour's colour when flat objects lie packed; a plain back (a
+    puzzle piece face down) only looks uniform inside. ``interiorSpread`` near 0 means the face is
+    plain. When the grid is too small for a ``margin``-cell border, the interior is the whole face.
+
+    :param rows: square grid as :func:`top_face` returns it.
+    :param margin: cells dropped from each edge for the interior.
+    :returns: ``spread``, ``interiorSpread``, ``interiorCoverage`` (share of interior cells seen)."""
+    if not rows or not rows[0]:
+        return {"spread": 0.0, "interiorSpread": 0.0, "interiorCoverage": 0.0}
+    h, w = len(rows), len(rows[0])
+    use_margin = margin if min(h, w) > 2 * margin else 0
+
+    def values(interior: bool) -> list[list[int]]:
+        out = []
+        for i, row in enumerate(rows):
+            for j, cell in enumerate(row):
+                if cell is None:
+                    continue
+                if interior and (i < use_margin or j < use_margin or i >= h - use_margin or j >= w - use_margin):
+                    continue
+                out.append(cell)
+        return out
+
+    def spread(vals: list[list[int]]) -> float:
+        if not vals:
+            return 0.0
+        return round(float(np.asarray(vals, float).std()), 1)
+
+    all_seen, interior = values(False), values(True)
+    if use_margin:
+        interior_cells = max(1, (h - 2 * use_margin) * (w - 2 * use_margin))
+    else:
+        interior_cells = max(1, h * w)
+    return {"spread": spread(all_seen), "interiorSpread": spread(interior),
+            "interiorCoverage": round(len(interior) / interior_cells, 3)}
+
+
 def top_face(frame: dict, cam_pose: dict, centre: np.ndarray, size: np.ndarray, yaw: float, top: float,
              px: int, depth_tol: float = 0.025, py: int | None = None) -> list[list[list[int] | None]]:
     """:func:`top_face_array` as JSON rows (``None`` where unseen)."""

@@ -13,7 +13,7 @@ import pytest
 from steward.assets.generators import steward_bot
 from steward.ego.runtime import EgoRuntime, RobotLink
 from steward.net import JsonServer
-from steward.world.chat import ChatConfig, HarnessChat
+from steward.world.chat import ChatConfig, HarnessChat, ROBOT_BRIEF, capabilities_digest
 from steward.world.server import StewardHost
 
 EVENTS = [
@@ -110,6 +110,12 @@ def test_world_chat_keeps_its_session_and_targets_this_hosts_wca(tmp_path):
 
 def test_robot_chat_takes_control_for_the_turn_and_gives_it_back(tmp_path):
     robot = _home(tmp_path, "robot-1", "ego")
+    library = robot / "steward-capabilities"
+    library.mkdir()
+    (library / "flip_flat_objects_face_up.json").write_text(json.dumps({
+        "name": "flip_flat_objects_face_up", "layer": "skill", "status": "verified",
+        "description": "Inspects flat objects and flips face-down ones picture side up.",
+    }), encoding="utf-8")
     calls = []
 
     def control(q, b):
@@ -132,6 +138,9 @@ def test_robot_chat_takes_control_for_the_turn_and_gives_it_back(tmp_path):
     assert cwd.parts[-2:] == ("robot-1", "workspace"), "the robot runs in its empty workspace"
     stdin = (robot / "stdin").read_text(encoding="utf-8")
     assert stdin.startswith("你是家用服务机器人") and "World State" not in stdin
+    assert "flip_flat_objects_face_up（skill，verified）" in stdin
+    assert "interiorSpread" in ROBOT_BRIEF and "相关系数" in ROBOT_BRIEF
+    assert capabilities_digest(None) == "" and capabilities_digest(tmp_path / "empty") == ""
     assert [m["agent"] for m in chat.state()["messages"]] == ["robot"] * 3
 
 

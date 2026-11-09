@@ -97,16 +97,21 @@ test('report_problem forwards the goal, step, diagnosis and message to the opera
 
 test('safety policy denies skill_run without a receipt, with an unknown one, or above the risk limit', async () => {
   const receipts = {
-    ok: { id: 'ok', risk: 0.1, feasible: true, issues: [] },
-    risky: { id: 'risky', risk: 0.6, feasible: true, issues: ['target position uncertainty 4.0 cm'] },
-    used: { id: 'used', risk: 0.1, feasible: true, issues: [], used: true },
+    ok: { id: 'ok', risk: 0.1, feasible: true, issues: [], expiresAt: 60 },
+    risky: { id: 'risky', risk: 0.6, feasible: true, issues: ['target position uncertainty 4.0 cm'], expiresAt: 60 },
+    pickOk: { id: 'pickOk', risk: 0.5, feasible: true, maxRisk: 0.6, issues: [], expiresAt: 60 },
+    expired: { id: 'expired', risk: 0.1, feasible: true, issues: [], expiresAt: 10, now: 11, expired: true },
+    used: { id: 'used', risk: 0.1, feasible: true, issues: [], used: true, expiresAt: 60 },
   }
   const ego = fakeEgo(receipts)
   assert.equal((await reviewExecution(ego, exec('skill_run', {}), 0.35)).kind, 'deny')
   assert.match((await reviewExecution(ego, exec('skill_run', { receipt: 'nope' }), 0.35)).reason, /could not be verified/)
   assert.match((await reviewExecution(ego, exec('skill_run', { receipt: 'risky' }), 0.35)).reason, /above the limit/)
   assert.match((await reviewExecution(ego, exec('skill_run', { receipt: 'used' }), 0.35)).reason, /already executed/)
+  assert.match((await reviewExecution(ego, exec('skill_run', { receipt: 'expired' }), 0.35)).reason, /expired/)
   assert.equal(await reviewExecution(ego, exec('skill_run', { receipt: 'ok' }), 0.35), undefined)
+  assert.equal(await reviewExecution(ego, exec('skill_run', { receipt: 'pickOk' }), 0.35), undefined,
+    'the receipt maxRisk (0.6 for pick) is the limit, not the plugin fallback')
   assert.equal(await reviewExecution(ego, exec('ego_state', {}), 0.35), undefined)
   assert.equal(receiptDenial(receipts.ok, 0.05), 'receipt ok has risk 0.1 above the limit 0.05: ')
 })
@@ -128,7 +133,7 @@ test('ego_inspect and ego_annotate reach the Ego service', async () => {
   await tool(tools, 'ego_inspect').execute({ entity: 'e:7' }, exec('ego_inspect'))
   await tool(tools, 'ego_match_face').execute({ entities: ['e:7', 'e:8'], reference: 'e:1' }, exec('ego_match_face'))
   await tool(tools, 'ego_annotate').execute({ entity: 'e:7', label: 'box', affordances: ['graspable', 'pourable'] }, exec('ego_annotate'))
-  assert.deepEqual(ego.calls, [['inspect', 'e:7', 24], ['matchFace', ['e:7', 'e:8'], 'e:1', 12], ['annotate', { entity: 'e:7', label: 'box', affordances: ['graspable', 'pourable'] }]])
+  assert.deepEqual(ego.calls, [['inspect', 'e:7', 24], ['matchFace', ['e:7', 'e:8'], 'e:1', 24], ['annotate', { entity: 'e:7', label: 'box', affordances: ['graspable', 'pourable'] }]])
 })
 
 test('ego_forget passes the object and the reason to the Ego service', async () => {

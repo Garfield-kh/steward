@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import {
-  apply, candidateLine, CHECKPOINT_QUESTIONS, checkpointText, Config, DEEP_QUESTIONS, failureOf, IDLE_QUESTIONS, instructionOf,
-  RECURRING_QUESTIONS, reflectionText, sceneDigest, SHALLOW_QUESTIONS,
+  apply, candidateLine, CHECKPOINT_QUESTIONS, checkpointText, Config, DEEP_QUESTIONS, failureOf, IDLE_QUESTIONS,
+  instructionOf, isProgramError, PROGRAM_QUESTIONS, RECURRING_QUESTIONS, reflectionText, sceneDigest, SHALLOW_QUESTIONS,
 } from '@steward/dsh-ego-reflection'
 
 const ok = (value) => ({ isError: false, value, content: [{ type: 'text', text: JSON.stringify(value) }] })
@@ -200,6 +200,23 @@ test('a failed program is reflected on only when none of its nested failures was
   const decision = await h.program(failed('Error: only 9 pieces matched'), 'call-2')
   assert.match(h.text(decision), /^【反思】run_code 失败：Error: only 9 pieces matched/)
   assert.deepEqual(h.reports.map(r => r.tool), ['ego_query', 'run_code'])
+})
+
+test('a program language error gets a short reflection and never escalates to a deep one', async () => {
+  assert.equal(isProgramError('SyntaxError: Identifier \'p\' has already been declared'), true)
+  assert.equal(isProgramError('pick failed: missed the grasp'), false)
+  const h = harness({ deepAfter: 1 })
+  h.claim('操作员任务：拼好拼图')
+  const syntax = 'SyntaxError: Identifier \'p\' has already been declared'
+  const first = h.text(await h.program(failed(syntax), 'call-1'))
+  assert.match(first, /^【反思】run_code 失败：SyntaxError/)
+  assert.ok(first.includes(PROGRAM_QUESTIONS[0]))
+  assert.ok(!first.includes('【宏观】') && !first.includes('失败归类'))
+  assert.equal((await h.program(failed(syntax), 'call-2')).additionalContexts, undefined,
+    'the same syntax error is not reflected on again, and does not become a deep reflection')
+  const next = h.text(await h.run('ego_query', { category: 'box' }, ok({ objects: [] }), { rootCallId: 'call-3' }))
+  assert.match(next, /^【反思】/, 'a later physical failure is still only shallow: the syntax error did not count toward deepAfter')
+  assert.ok(!next.includes('【深度反思】'))
 })
 
 test('the reflect tool answers a reported difficulty deeply unless a shallow check is asked for', async () => {

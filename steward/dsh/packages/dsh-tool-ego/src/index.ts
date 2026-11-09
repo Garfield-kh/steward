@@ -58,8 +58,8 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
         + 'in progress, and every object you have perceived with its estimated position, position uncertainty in '
         + 'metres, size, what it rests on, and when you last saw it. Objects you have not seen are absent, and '
         + 'positions are estimates. appearance says what you remember of an object\'s top face: how long ago you '
-        + 'saw it, the share seen, its colour spread (near 0: a plain face) and stale (put down since, look again); '
-        + 'ego_match_face compares remembered faces.',
+        + 'saw it, the share seen, its colour spread and interiorSpread (near 0: a plain back; prefer interiorSpread '
+        + 'when pieces are packed) and stale (put down since, look again); ego_match_face compares remembered faces.',
       parameters: {},
       output: { schema: JSON_OUTPUT, render: (_a, v) => text(v) },
       async execute(_args, exec) {
@@ -225,15 +225,16 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
         + 'the strip of a table next to the edge you stand at and the gripper at work, in less detail. When part of the face is unseen, hint says '
         + 'why (too close below the view, beside or behind it, too far, hidden) and how to move. Use it to compare '
         + 'printed or patterned faces, read which side of a flat object is up, or tell similar objects apart. A '
-        + 'printed flat object lying with its plain back up shows an almost uniform face: turn it over (place with '
-        + 'flip) and look again. Flat objects lying on or against each other hide parts of their faces and can be '
-        + 'perceived as one object, and one lying on another can hide it wholly: set them apart on free space first, '
-        + 'looking again where each one lay after picking it up. The object frame stays fixed to the object between '
-        + 'views and while it is carried, so one inspection before picking it tells which place yaw turns its face '
-        + 'as you want.',
+        + 'printed flat object lying with its plain back up shows an almost uniform face: interiorSpread near 0 '
+        + '(under about 10) is the check to use; spread of the whole face can look patterned when neighbours tint the '
+        + 'edge cells. Turn it over (place with flip) and look again. Flat objects lying on or against each other hide '
+        + 'parts of their faces and can be perceived as one object, and one lying on another can hide it wholly: set '
+        + 'them apart on free space first, looking again where each one lay after picking it up. The object frame stays '
+        + 'fixed to the object between views and while it is carried, so one inspection before picking it tells which '
+        + 'place yaw turns its face as you want.',
       parameters: {
         entity: { type: 'string', required: true, description: 'Id of the object to inspect.' },
-        px: { type: 'number', description: 'Grid size, 4 to 64 (default 24).' },
+        px: { type: 'number', description: 'Grid size, 4 to 128 (default 24). Raise it when sourcePx is large and you need pattern detail.' },
       },
       output: { schema: JSON_OUTPUT, render: (_a, v) => text(v) },
       async execute(args, exec) {
@@ -253,17 +254,18 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
         + 'the heading (degrees; place takes radians) that lines it up with the reference as the reference lies '
         + 'now. To build the picture elsewhere at heading H, put each object at centre + offsetM turned by H, with '
         + 'place yaw = H + turnDeg. score is a correlation (1 = identical); a best score barely above the second is '
-        + 'ambiguous, so look closer and match again. offsetM is good to about one cell (cellM): when you know the '
-        + 'layout (for example a grid of equal pieces), snap it to the nearest slot. spread near 0 (under about 10) '
-        + 'means a plain face: the object probably lies with its back up. An entry with error says what to look at.',
+        + 'ambiguous, so look closer (raise px toward 32) and match again. offsetM is good to about one cell (cellM): '
+        + 'when you know the layout (for example a grid of equal pieces), snap it to the nearest slot. '
+        + 'interiorSpread near 0 (under about 10) means a plain face: the object probably lies with its back up '
+        + '(prefer it over spread when pieces are packed). An entry with error says what to look at.',
       parameters: {
         entities: { type: 'array', items: { type: 'string' }, required: true, description: 'Ids of the objects whose faces are sought.' },
         reference: { type: 'string', required: true, description: 'Id of the object showing the whole picture.' },
-        px: { type: 'number', description: 'Cells across each object\'s shorter side, 4 to 16 (default 12).' },
+        px: { type: 'number', description: 'Cells across each object\'s shorter side, 4 to 32 (default 24).' },
       },
       output: { schema: JSON_OUTPUT, render: (_a, v) => text(v) },
       async execute(args, exec) {
-        return json(await ego.matchFace(args.entities as string[], args.reference, args.px ?? 12, exec.signal))
+        return json(await ego.matchFace(args.entities as string[], args.reference, args.px ?? 24, exec.signal))
       },
     }),
     defineTool({

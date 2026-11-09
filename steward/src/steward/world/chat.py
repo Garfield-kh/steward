@@ -44,7 +44,9 @@ ROBOT_BRIEF = (
     "按物体的 role 理解操作员说的「餐边柜」「柜子」「咖啡杯」等指称：role 是结合整个场景推断出的用途标签，"
     "category 只是单个视角下最像的类别，局部视角下家具和相似餐具容易混淆。"
     "每个动作先用 ego_predict 得到收据，风险超限就先靠近观察再预测，然后用 skill_run 执行；"
-    "执行后用 ego_state 自查结果。完成或无法完成时，用一两句中文向操作员汇报。\n"
+    "执行后用 ego_state 自查结果。宣布完成之前，如果任务要求结果和某个参照图或参照物一致（例如按盒盖图案拼图），"
+    "必须用独立证据核对最终状态：把摆好的排列合成图或逐块 ego_match_face 得分与参照比较，相关系数要明显高于随机排列，"
+    "达不到就继续修正或调用 reflect，不要只数格位是否占满、正反面是否朝上。完成或无法完成时，用一两句中文向操作员汇报。\n"
     "新视角生成通过 rgbd-video-gen 或 novelanything skill 及其工具调用；明确指定模型时不得替换。"
     "模型输入输出保存在机器人工作空间 inputs/outputs；使用工具返回的真实路径和 local_manifest_path，勿猜文件名。"
     "运动过程取证先用 ego_rgb_recording_start 按要求fps录制 head_camera RGB，运动结束后用 ego_rgb_recording_stop；"
@@ -94,8 +96,10 @@ ROBOT_BRIEF = (
     "await run(tools, {...})，不要重写它）；没有就自己写程序，把 ego_inspect（看清物体顶面）、"
     "ego_match_face（找出物体的图案在参考图上的位置和转向；机器人会记住看到过的物体顶面，先走到能看清所有物体的地方，再一次传入全部物体比对；小物体的图案要走近才看得清："
     "ego_inspect 结果的 sourcePx 是顶面在相机图像里的像素宽，带 detailHint 时说明还不够清楚并给出要走到多近，"
-    "先按提示走近再看、再比对，不要用看不清的图案硬配；卡片、拼图块、照片这类扁平物体可能背面朝上，背面通常是均匀的单一颜色，"
-    "判断前先把互相压着的摊开、再走近看清，否则顶面会混进旁边物体的颜色，判定背面朝上的用 place 的 flip 翻过来再比对）、ego_annotate（标注你认出的物体类别与可供性）"
+    "先按提示走近再看、再比对，不要用看不清的图案硬配；图案比对用 ego_match_face 时把 px 提到 24–32（上限 32），"
+    "让相机分辨率真正用到匹配上；卡片、拼图块、照片这类扁平物体可能背面朝上，背面通常是均匀的单一颜色，"
+    "判断正反面用 ego_inspect 的 interiorSpread（近 0 即背面），不要用整面 spread——拼图块挨着时边缘格会混进邻块颜色；"
+    "判断前先把互相压着的摊开、再走近看清，判定背面朝上的用 place 的 flip 翻过来再比对）、ego_annotate（标注你认出的物体类别与可供性）"
     "和 ego_predict / skill_run 组合起来，并尽量复用已有的 skill。做成之后用 capability_save 保存："
     "把每个能用在别的物体上的操作存成 skill（例如把一堆物体摊开、把扁平物体翻成正面、按网格摆放），"
     "再存一个只负责组合这些 skill 的 recipe；物体 id、位置和尺寸都放进参数，做不到预期结果时让代码抛出错误。"
@@ -104,6 +108,41 @@ ROBOT_BRIEF = (
 
 ROBOT_OWNER = "operator"
 TURN_BUDGET_S = 24 * 24 * 3600.0
+
+
+def capabilities_digest(home: Path | None, *, max_description: int = 120) -> str:
+    """A short list of saved capabilities to prepend to the first robot turn, so the model sees
+    what it can reuse without calling ``capability_list`` first.
+
+    :param home: the robot's DSH home (``DSH_HOME``); ``None`` or a missing library yields "".
+    :param max_description: longest description kept per capability.
+    :returns: a Chinese paragraph ending with a blank line, or "" when there is nothing to list."""
+    if home is None:
+        return ""
+    root = home / "steward-capabilities"
+    if not root.is_dir():
+        return ""
+    lines: list[str] = []
+    for path in sorted(root.glob("*.json")):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        name = record.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        layer = record.get("layer", "?")
+        status = record.get("status", "?")
+        description = record.get("description", "")
+        if not isinstance(description, str):
+            description = ""
+        if len(description) > max_description:
+            description = description[: max_description - 1] + "…"
+        lines.append(f"- {name}（{layer}，{status}）：{description}")
+    if not lines:
+        return ""
+    return ("你已保存的能力（本轮开始时的清单；有合适的先用 capability_get 取出来运行，不要重写）：\n"
+            + "\n".join(lines) + "\n\n")
 
 
 def _terminate(proc: subprocess.Popen) -> None:
@@ -420,7 +459,10 @@ class HarnessChat:
                                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                                                  encoding="utf-8", errors="replace",  # dsh speaks UTF-8; the Windows
                                                  start_new_session=True)  # locale (GBK) would kill the reader
-            proc.stdin.write((agent.brief if first else agent.follow_up) + text)
+            prefix = agent.brief if first else agent.follow_up
+            if first and agent.key == "robot":
+                prefix += capabilities_digest(agent.home)
+            proc.stdin.write(prefix + text)
             proc.stdin.close()
             err_reader = threading.Thread(target=lambda: stderr_tail.extend(proc.stderr), daemon=True)
             err_reader.start()

@@ -306,6 +306,27 @@ export const SHALLOW_QUESTIONS = [
 ]
 
 /**
+ * Questions for a program that failed to compile or threw a language error: fix the code, do not
+ * re-examine the physical scene.
+ */
+export const PROGRAM_QUESTIONS = [
+  '一、错误：程序哪里写错了（语法、变量重复声明、未定义的名字、类型不符）？',
+  '二、修正：怎样改写后重试；不要原样再提交同一段代码。',
+]
+
+/**
+ * Whether a failure message is a program language error rather than a robot-tool or physical
+ * failure. Syntax and reference errors get a short shallow reflection and never trigger a deep one.
+ * @param message - the failure text.
+ * @returns true when the message names a language error.
+ */
+export function isProgramError(message: string): boolean {
+  return /\b(SyntaxError|ReferenceError|TypeError|RangeError|EvalError|URIError)\b/.test(message)
+    || /Unexpected token|is not (defined|a function)|Cannot read propert|Identifier '.+' has already been declared|has already been declared/i
+      .test(message)
+}
+
+/**
  * Questions of a deep reflection: macro (scene, task, language, assumptions), then micro
  * (physical causes, evidence, preconditions), then strategy (method, efficiency, plan).
  */
@@ -385,22 +406,27 @@ export function reflectionText(failure: Failure, context: ReflectionContext,
   evidence: Reflection | { error: string }, config: Pick<Config, 'candidateLimit' | 'failureMaxChars'>): string {
   const what = clip(failure.message, config.failureMaxChars)
   const deep = context.depth === 'deep'
+  const programBug = !deep && isProgramError(failure.message)
   const title = deep ? '【深度反思】' : '【反思】'
   const lines = [failure.tool === REFLECT_TOOL ? `${title}你遇到的困难：${what}` : `${title}${failure.tool} 失败：${what}`]
   if (context.trigger) lines.push(`为什么深入反思：${context.trigger}`)
   lines.push(...instructionLines(context.instructions))
   if (context.history.length) lines.push('这条指令下之前的失败：', ...context.history.map(h => `- ${h}`))
   if (deep && context.scene?.length) lines.push(`当前场景（Ego State 摘要，这条指令下已运行 ${context.steps} 个程序）：`, ...context.scene)
-  lines.push(...evidenceLines(evidence, config.candidateLimit))
+  if (!programBug) lines.push(...evidenceLines(evidence, config.candidateLimit))
   if (deep) {
     lines.push(`这是这条指令下的第 ${context.ordinal} 次反思，是一次深度反思。先在思考中充分推敲，再分层逐条作答，每条几句话：`)
     if (context.ordinal > 1) lines.push(...RECURRING_QUESTIONS)
     lines.push(...DEEP_QUESTIONS)
+  } else if (programBug) {
+    lines.push(`这是程序本身的错误，不是机器人动作失败。用一两句话回答后改程序重试：`, ...PROGRAM_QUESTIONS)
   } else {
     lines.push(`这是这条指令下的第 ${context.ordinal} 次反思。下一次行动之前，用几句话逐条回答：`, ...SHALLOW_QUESTIONS,
       '同一类失败再次出现时，会进入深度反思。')
   }
-  lines.push('需要时用 ego_candidates（传入指令里的名字和大小）、ego_inspect、ego_observe 或靠近观察核实，用 ego_annotate 改正物体的名字和可供性。')
+  if (!programBug) {
+    lines.push('需要时用 ego_candidates（传入指令里的名字和大小）、ego_inspect、ego_observe 或靠近观察核实，用 ego_annotate 改正物体的名字和可供性。')
+  }
   return lines.join('\n')
 }
 
@@ -510,16 +536,16 @@ export function apply(ctx: Context, config: Config) {
     }
   }
 
-  const note = (state: AgentState, depth: Depth) => {
+  const note = (state: AgentState, depth: Depth, countTowardDeep = true) => {
     state.reflections += 1
     state.quiet = 0
     if (depth === 'deep') [state.deep, state.shallowSinceDeep] = [state.deep + 1, 0]
-    if (depth === 'shallow') state.shallowSinceDeep += 1
+    if (depth === 'shallow' && countTowardDeep) state.shallowSinceDeep += 1
     if (state.pending === undefined || RANK[depth] > RANK[state.pending]) state.pending = depth
   }
 
   const reflect = async (state: AgentState, failure: Failure, report: FailureReport, depth: 'shallow' | 'deep',
-    trigger: string | undefined, signal: AbortSignal): Promise<string> => {
+    trigger: string | undefined, signal: AbortSignal, countTowardDeep = true): Promise<string> => {
     let evidence: Reflection | { error: string }
     try {
       evidence = await ego.reflect(report, signal)
@@ -531,23 +557,27 @@ export function apply(ctx: Context, config: Config) {
       ...trigger === undefined ? {} : { trigger }, steps: state.steps,
       ...depth === 'deep' ? { scene: await scene(signal) } : {},
     }, evidence, config)
-    note(state, depth)
+    note(state, depth, countTowardDeep)
     state.history.push(`${failure.tool}：${clip(failure.message, config.historyMaxChars)}`)
     while (state.history.length > config.historyLimit) state.history.shift()
     return text
   }
 
   /** The depth a failure gets and why, or undefined when it gets no reflection. */
-  const depthOf = (state: AgentState, failure: Failure): { depth: 'shallow' | 'deep', trigger?: string } | undefined => {
+  const depthOf = (state: AgentState, failure: Failure):
+    { depth: 'shallow' | 'deep', trigger?: string, countTowardDeep?: boolean } | undefined => {
     if (state.reflections >= config.maxPerInstruction) return undefined
+    const programBug = programs.has(failure.tool) && isProgramError(failure.message)
     const deepLeft = state.deep < config.maxDeepPerInstruction
     const seen = state.signatures.get(signature(failure))
     if (seen !== undefined) {
-      if (seen.deep || !deepLeft) return undefined
+      // A repeated language error stays a short fix; do not escalate to a deep scene review.
+      if (programBug || seen.deep || !deepLeft) return undefined
       seen.deep = true
       return { depth: 'deep', trigger: '同样的失败又出现了一次：换个角度重新理解任务和场景，而不是再调整参数。' }
     }
     state.signatures.set(signature(failure), { deep: false })
+    if (programBug) return { depth: 'shallow', countTowardDeep: false }
     if (deepLeft && state.shallowSinceDeep >= config.deepAfter) {
       return { depth: 'deep', trigger: `前 ${state.shallowSinceDeep} 次反思之后任务仍然受阻：检查对任务的理解、假设和方法本身。` }
     }
@@ -603,7 +633,8 @@ export function apply(ctx: Context, config: Config) {
         tool: failure.tool,
         arguments: receipt ? { ...failure.arguments, params: receipt } : failure.arguments,
         message: failure.message,
-      }, chosen.depth, chosen.trigger, exec.signal) }], source: { kind: 'ego-reflection' } }))
+      }, chosen.depth, chosen.trigger, exec.signal, chosen.countTowardDeep !== false) }],
+        source: { kind: 'ego-reflection' } }))
     }
     if (actions.has(exec.name)) state.acted = true
     if (top) {

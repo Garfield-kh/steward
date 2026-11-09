@@ -1717,7 +1717,7 @@ Phase 1 不调用 `sam3d`。度量深度已经给出可见部分的尺寸；在�
 | `head_camera` | 看前方与远处，主相机 | 头部，俯 30° | 60° | 2560×1920 |
 | `wide_camera` | 短焦广角，看身前台面、夹爪与手中物体 | 头部下方 5 厘米，俯 45° | 100°（水平约 115°） | 480×360 |
 
-头部相机 2560×1920：5.75 厘米的拼图块在 1 米外约占 90 像素，图案比对与边缘定位都更可靠（1280×960 时约 45 像素，640×480 时约 22 像素）；MuJoCo 离屏缓冲随场景里最大的相机放大。`detections` 模式下检测位置噪声按相机行数缩放：σ =（`pos_sigma_base` + `pos_sigma_per_m` × 距离）× `pos_sigma_rows`（240）/ 图像行数，世界端 `PerceptionConfig` 与估计器 `EstimatorConfig` 用同一公式；头部相机 1 米处每轴约 0.4 厘米，广角相机约 2 厘米。`POST /ego/inspect` 的结果带 `sourcePx`（顶面较短边在相机图像里的像素宽），不足 `detail_px`（24）时附 `detailHint`，说明要走到离相机多近才看得清图案。
+头部相机 2560×1920：5.75 厘米的拼图块在 1 米外约占 90 像素，图案比对与边缘定位都更可靠（1280×960 时约 45 像素，640×480 时约 22 像素）；MuJoCo 离屏缓冲随场景里最大的相机放大。`detections` 模式下检测位置噪声按相机行数缩放：σ =（`pos_sigma_base` + `pos_sigma_per_m` × 距离）× `pos_sigma_rows`（240）/ 图像行数，世界端 `PerceptionConfig` 与估计器 `EstimatorConfig` 用同一公式；头部相机 1 米处每轴约 0.4 厘米，广角相机约 2 厘米。记忆顶面按 `appearance_cell_m`（2 mm）采样；`POST /ego/inspect` 网格 4–128，结果带 `sourcePx`（顶面较短边在相机图像里的像素宽）、`spread` 与 `interiorSpread`（去掉一格边框后的颜色标准差，近 0 表示背面朝上；拼图块挨着时用它而不是整面 `spread`），不足 `detail_px`（24）时附 `detailHint`；`POST /ego/match-face` 默认每块短边 24 格（上限 32），参考图一侧最多 192 格，使相机分辨率真正进入图案比对。
 
 两台相机都按理想针孔渲染，不模拟广角镜头的畸变。
 

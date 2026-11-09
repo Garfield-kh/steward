@@ -2,8 +2,8 @@
  * Ego Harness safety policy for robot motion.
  *
  * - `tools/pre-execute`: a `skill_run` call is allowed only when its receipt exists on the
- *   robot, is feasible, unused, unexpired and within `maxRisk`; otherwise the call is denied with
- *   the reason, so the model re-plans.
+ *   robot, is feasible, unused, unexpired and within the receipt's own `maxRisk` (falling back to
+ *   the plugin `maxRisk`); otherwise the call is denied with the reason, so the model re-plans.
  * - `ctx.tools.guard`: a monotonic final denial of `skill_run` without a receipt argument, which
  *   later policy listeners cannot undo.
  * - `/estop`: a human command that stops all motion without a model turn.
@@ -24,7 +24,10 @@ export const inject = ['tools', 'ego']
 
 /** Validated plugin configuration. */
 export interface Config {
-  /** Highest receipt risk the Harness lets the model execute. */
+  /**
+   * Fallback risk ceiling when a receipt omits `maxRisk`. The Ego Runtime stamps each receipt with
+   * its own limit (pick may be higher than place); this value does not override that stamp.
+   */
   maxRisk: number
 }
 
@@ -43,14 +46,18 @@ function receiptArgument(args: unknown): string | undefined {
 /**
  * Decide whether a receipt may be executed.
  * @param receipt - receipt read from the robot.
- * @param maxRisk - configured Harness risk limit.
+ * @param maxRisk - configured Harness fallback when the receipt has no `maxRisk`.
  * @returns the denial reason, or undefined when execution may proceed.
  */
 export function receiptDenial(receipt: PredictionReceipt, maxRisk: number): string | undefined {
   if (receipt.used) return `receipt ${receipt.id} was already executed; call ego_predict again`
   if (!receipt.feasible) return `receipt ${receipt.id} is not feasible: ${receipt.issues.join('; ')}`
-  if (receipt.risk > maxRisk) {
-    return `receipt ${receipt.id} has risk ${receipt.risk} above the limit ${maxRisk}: ${receipt.issues.join('; ')}`
+  if (receipt.expired || (receipt.now !== undefined && receipt.now > receipt.expiresAt)) {
+    return `receipt ${receipt.id} expired at t=${receipt.expiresAt}; call ego_predict again`
+  }
+  const limit = typeof receipt.maxRisk === 'number' ? receipt.maxRisk : maxRisk
+  if (receipt.risk > limit) {
+    return `receipt ${receipt.id} has risk ${receipt.risk} above the limit ${limit}: ${receipt.issues.join('; ')}`
   }
   return undefined
 }
@@ -59,7 +66,7 @@ export function receiptDenial(receipt: PredictionReceipt, maxRisk: number): stri
  * Pre-execution decision for one tool call.
  * @param ego - robot Ego service.
  * @param exec - the tool execution under review.
- * @param maxRisk - configured Harness risk limit.
+ * @param maxRisk - configured Harness fallback risk limit.
  * @returns a deny decision, or undefined to delegate to the next policy.
  */
 export async function reviewExecution(ego: EgoService, exec: Readonly<ToolExecution>, maxRisk: number):

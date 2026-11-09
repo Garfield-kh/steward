@@ -24,7 +24,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from steward.ego.perception import (box_of, decode_rgbd, match_face, resample_face, segments, top_face, top_face_array,
+from steward.ego.perception import (box_of, decode_rgbd, face_colour_stats, match_face, resample_face, segments, top_face,
+                                    top_face_array,
                                     world_up_face)
 from steward.ego.kinematics import gripper_pose
 from steward.ego.arm import Arm
@@ -46,7 +47,7 @@ from steward.viewloop import ViewLoop
 class RuntimeConfig:
     perception_hz: float = 10.0
     telemetry_hz: float = 2.0
-    appearance_cell_m: float = 0.005  # cell size of the remembered top faces
+    appearance_cell_m: float = 0.002  # cell size of the remembered top faces (~2 mm; a 5.75 cm piece is ~29 cells)
     appearance_max_m: float = 0.6  # larger objects' faces are remembered only when asked for
     appearance_range_m: float = 1.5  # faces farther from the camera are not looked at
     detail_px: int = 24  # pixels across a face in the source image below which ego_inspect says to come closer
@@ -224,7 +225,7 @@ class RobotLink:
 
 ALERT_TEXT_MAX = 1500
 QUERY_MIN_PROBABILITY = 0.2
-MATCH_REFERENCE_CELLS_MAX = 96  # cells along a reference side for match_face
+MATCH_REFERENCE_CELLS_MAX = 192  # cells along a reference side for match_face
 MATCH_MIN_COVERAGE = 0.5  # share of a face that must have been seen to match it
 ACTIVITY_MAX = 300
 PLAN_STEP_STATES = frozenset({"pending", "active", "done", "failed", "skipped"})
@@ -920,14 +921,16 @@ class EgoRuntime:
         Reads one fresh RGB-D frame; no World State.
 
         :param entity: Ego-State object id.
-        :param px: grid size, 4 to 64.
-        :returns: ``{entity, px, yawDeg, sizeM, coverage, sourcePx, rows, worldRows, worldTurnDeg, stamp}``,
-            ``hint`` (:func:`view_hint`) when less than :data:`VIEW_HINT_COVERAGE` of the face is seen,
-            and ``detailHint`` when the face's shorter side spans fewer than ``detail_px`` pixels of
-            the camera image (``sourcePx``): a finer grid than that only interpolates.
+        :param px: grid size, 4 to 128.
+        :returns: ``{entity, px, yawDeg, sizeM, coverage, sourcePx, spread, interiorSpread,
+            interiorCoverage, rows, worldRows, worldTurnDeg, stamp}``, ``hint`` (:func:`view_hint`)
+            when less than :data:`VIEW_HINT_COVERAGE` of the face is seen, and ``detailHint`` when the
+            face's shorter side spans fewer than ``detail_px`` pixels of the camera image
+            (``sourcePx``): a finer grid than that only interpolates. ``interiorSpread`` near 0 means
+            a plain face (likely the back); use it rather than ``spread``, which mixes in neighbours.
         :raises KeyError: unknown object; :raises ValueError: ``px`` out of range."""
-        if not 4 <= px <= 64:
-            raise ValueError("px must be between 4 and 64")
+        if not 4 <= px <= 128:
+            raise ValueError("px must be between 4 and 128")
         with self._lock:
             track = self.estimator.tracks.get(entity)
             if track is None:
@@ -958,7 +961,7 @@ class EgoRuntime:
                                   f"{distance:.2f} m; its picture is reliable within {within:.2f} m of the camera")
         return {"entity": entity, "px": px, "camera": frame["camera"], "yawDeg": round(math.degrees(yaw), 2),
                 "sizeM": [round(float(v), 3) for v in size], "coverage": round(coverage, 3),
-                "sourcePx": round(source_px, 1), **hint,
+                "sourcePx": round(source_px, 1), **face_colour_stats(rows), **hint,
                 "rows": rows, "worldRows": world_rows, "worldTurnDeg": turn, "stamp": frame["header"]["stamp"]}
 
     def _view_hint(self, odometry: dict, centre: np.ndarray, top: float) -> str:
@@ -1002,9 +1005,9 @@ class EgoRuntime:
                 return {"appearance": None}
             return {"appearance": {"seenAgoS": round(self.estimator.stamp - known.stamp, 1),
                                    "coverage": round(known.coverage, 2), "spread": round(known.spread, 1),
-                                   "stale": known.stale}}
+                                   "interiorSpread": round(known.interior_spread, 1), "stale": known.stale}}
 
-    def match_face(self, entities: list[str], reference: str, px: int = 12) -> dict:
+    def match_face(self, entities: list[str], reference: str, px: int = 24) -> dict:
         """Where the top face of each of ``entities`` appears on the top face of ``reference``
         printed at the same scale (puzzle pieces on the picture of their box, tiles on a pattern),
         from the faces the robot remembers (:meth:`_look_at_faces`), refreshed first with one fresh
@@ -1013,19 +1016,19 @@ class EgoRuntime:
 
         :param entities: Ego-State ids of the objects whose faces are sought.
         :param reference: Ego-State id of the object showing the whole picture.
-        :param px: cells across each object's shorter side, 4 to 16.
+        :param px: cells across each object's shorter side, 4 to 32.
         :returns: ``{reference, referenceCoverage, results, stamp}``; each result holds ``entity``,
-            ``cellM``, ``spread``, ``faceCoverage``, ``seenAgoS`` and ``matches`` (``offsetM``: the
-            face centre's place in the reference frame from its centre; ``turnDeg``: quarter turns
-            counter-clockwise that align the face with the reference; ``placeYawDeg``: the object
-            heading that does so with the reference's heading; ``score``: correlation, 1 =
+            ``cellM``, ``spread``, ``interiorSpread``, ``faceCoverage``, ``seenAgoS`` and ``matches``
+            (``offsetM``: the face centre's place in the reference frame from its centre; ``turnDeg``:
+            quarter turns counter-clockwise that align the face with the reference; ``placeYawDeg``:
+            the object heading that does so with the reference's heading; ``score``: correlation, 1 =
             identical), or ``entity`` and ``error`` when its face is not known well enough.
         :raises KeyError: unknown object; :raises ValueError: ``px`` out of range or the reference
             face not known well enough."""
         if not isinstance(entities, list) or not entities or not all(isinstance(e, str) for e in entities):
             raise ValueError("entities must be a non-empty list of object ids")
-        if not 4 <= px <= 16:
-            raise ValueError("px must be between 4 and 16")
+        if not 4 <= px <= 32:
+            raise ValueError("px must be between 4 and 32")
         frames = self._camera_frames()
         frame = frames[0]
         with self._lock:
@@ -1055,14 +1058,15 @@ class EgoRuntime:
                 elif known.coverage < MATCH_MIN_COVERAGE:
                     faces[eid] = f"only {known.coverage:.0%} of its face has been seen: {why(track)}"
                 else:
-                    faces[eid] = (known.rgb.copy(), track.size.copy(), round(est.stamp - known.stamp, 1), known.spread)
+                    faces[eid] = (known.rgb.copy(), track.size.copy(), round(est.stamp - known.stamp, 1),
+                                  known.spread, known.interior_spread)
         results = []
         for eid in entities:
             face = faces[eid]
             if isinstance(face, str):
                 results.append({"entity": eid, "error": face})
                 continue
-            rgb, size, ago, spread = face
+            rgb, size, ago, spread, interior = face
             cell = float(min(size[0], size[1])) / px
             ox, oy = max(1, round(size[0] / cell)), max(1, round(size[1] / cell))
             rx, ry = round(ref_size[0] / cell), round(ref_size[1] / cell)
@@ -1080,6 +1084,7 @@ class EgoRuntime:
                         "placeYawDeg": round(math.degrees(wrap_angle(ref_yaw + m["turns"] * math.pi / 2)), 1),
                         "score": m["score"]} for m in found["matches"]]
             results.append({"entity": eid, "cellM": round(cell, 4), "spread": round(spread, 1),
+                            "interiorSpread": round(interior, 1),
                             "faceCoverage": round(float(np.isfinite(rgb[..., 0]).mean()), 2), "seenAgoS": ago,
                             "matches": matches})
         return {"reference": reference, "referenceCoverage": round(float(np.isfinite(ref_rgb[..., 0]).mean()), 2),
@@ -1167,9 +1172,14 @@ class EgoRuntime:
             return dict(self.estimator.dropped[-1])
 
     def receipt(self, receipt_id: str) -> dict:
+        """A Prediction Receipt with the robot clock now, so a caller can see whether it has expired."""
         if receipt_id not in self.receipts:
             raise KeyError(f"unknown receipt {receipt_id!r}")
-        return self.receipts[receipt_id]
+        receipt = dict(self.receipts[receipt_id])
+        now = float(self.estimator.stamp)
+        receipt["now"] = round(now, 3)
+        receipt["expired"] = now > float(receipt["expiresAt"])
+        return receipt
 
     # ------------------------------------------------------------------ alerts
     def alert(self, message: str, source: str, level: str = "error", goal: str = "", step: str = "",

@@ -18,8 +18,8 @@ from PIL import Image
 
 from steward.assets.generators import steward_bot
 from steward.authoring.service import PUZZLE_PIECE_M, AuthoringService, puzzle_box_m
-from steward.ego.estimator import EgoEstimator, Track
-from steward.ego.perception import top_face
+from steward.ego.estimator import Appearance, EgoEstimator, Track
+from steward.ego.perception import face_colour_stats, top_face
 from steward.ego.runtime import EgoRuntime, RobotLink
 from steward.ego.server import ego_api
 from steward.math3d import quat_rotate, wrap_angle
@@ -601,6 +601,7 @@ def test_a_remembered_face_gathers_views_and_is_replaced_after_the_object_is_put
     track = est.tracks["e:3"]
     cols, rows = est.face_grid(track, 0.005)
     assert (cols, rows) == (23, 23)
+    assert est.face_grid(track, 0.002) == (58, 58), "the default 2 mm cell resolves a piece into dozens of cells"
     left, right = np.full((rows, cols, 3), np.nan), np.full((rows, cols, 3), np.nan)
     left[:, :12], right[:, 12:] = 100.0, 200.0
     est.remember_face("e:3", left, 1.0)
@@ -613,6 +614,21 @@ def test_a_remembered_face_gathers_views_and_is_replaced_after_the_object_is_put
     assert track.appearance.stale, "put down, it may lie turned over"
     est.remember_face("e:3", left, 3.0)
     assert track.appearance.coverage == pytest.approx(12 / 23) and not track.appearance.stale
+
+
+def test_interior_face_stats_ignore_a_neighbour_tinting_the_edge():
+    plain = [[[200, 200, 200]] * 8 for _ in range(8)]
+    assert face_colour_stats(plain)["interiorSpread"] == 0.0
+    edged = [list(row) for row in plain]
+    for i in range(8):
+        edged[0][i] = edged[i][0] = [40, 180, 40]  # a neighbour's green along two edges
+    stats = face_colour_stats(edged)
+    assert stats["spread"] > 20 and stats["interiorSpread"] == 0.0
+    rgb = np.full((8, 8, 3), 200.0)
+    rgb[0, :], rgb[:, 0] = 40.0, 40.0
+    track = _track("e:3", "puzzle_piece", [0.5, 0.0, 0.753], [0.115, 0.115, 0.006])
+    track.appearance = Appearance(rgb, (0.115, 0.115), 1.0)
+    assert track.appearance.spread > 20 and track.appearance.interior_spread == 0.0
 
 
 def test_a_fine_face_averages_into_coarser_cells_over_the_same_extent():

@@ -55,6 +55,16 @@ class Appearance:
         seen = self.rgb[np.isfinite(self.rgb[..., 0])]
         return float(seen.std()) if len(seen) else 0.0
 
+    @property
+    def interior_spread(self) -> float:
+        """Colour standard deviation of seen cells excluding a one-cell border: edge cells often
+        mix in a neighbour's colour when pieces lie packed, so a plain back only looks plain inside."""
+        h, w = self.rgb.shape[:2]
+        margin = 1 if min(h, w) > 2 else 0
+        region = self.rgb[margin:h - margin or None, margin:w - margin or None] if margin else self.rgb
+        seen = region[np.isfinite(region[..., 0])]
+        return float(seen.std()) if len(seen) else 0.0
+
 
 @dataclass
 class Track:

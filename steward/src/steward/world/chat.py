@@ -67,7 +67,7 @@ ROBOT_BRIEF = (
     "就用 ego_forget 把它从 Ego State 删除，reason 里写明它为什么不合理、你是怎样复查的。\n"
     "机器人工具或程序失败后，你会收到一条【反思】消息，里面有原始指令、之前的失败、失败归类和相关物体的证据；"
     "同类失败再次出现或多次反思仍受阻时，收到的是【深度反思】，还附有场景摘要；连续多个程序没有反思时，会收到【阶段回顾】。"
-    "【反思】和【阶段回顾】用几句话逐条回答；【深度反思】先在思考中充分推敲（先宏观：任务、场景和指令的措辞；再微观：物理原因；"
+    "【反思】和【阶段回顾】逐条回答，每条一句话；【深度反思】先在思考中充分推敲（先宏观：任务、场景和指令的措辞；再微观：物理原因；"
     "最后是方法和效率），再分层逐条作答。回答完再决定下一步。没有工具报错、但结果和目标不符或一直没有进展时，"
     "在程序里调用 reflect 描述困难并打印返回的问题；认为做不到、或想改用低于指令要求的做法（例如不按图案对位）之前，"
     "也先调用 reflect 深度反思，核实这个结论的依据没有被你自己的动作改变（例如参照物被压住或翻面）。\n"
@@ -471,7 +471,8 @@ class HarnessChat:
                                                  start_new_session=True)  # locale (GBK) would kill the reader
             prefix = agent.brief if first else agent.follow_up
             if first and agent.key == "robot":
-                prefix += capabilities_digest(agent.home)
+                # Reflection quotes the text after the last follow_up marker as the instruction.
+                prefix = prefix.removesuffix(agent.follow_up) + capabilities_digest(agent.home) + agent.follow_up
             proc.stdin.write(prefix + text)
             proc.stdin.close()
             err_reader = threading.Thread(target=lambda: stderr_tail.extend(proc.stderr), daemon=True)

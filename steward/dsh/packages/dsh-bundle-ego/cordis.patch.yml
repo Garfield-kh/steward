@@ -17,15 +17,16 @@
       name: '@steward/dsh-ego-reflection'
       config:
         instructionMarker: '操作员任务：'
-        # A routine step after a program thinks briefly; a new instruction, a failure and every
-        # reflection think long, a deep reflection longest.
+        # One effort for every step: the DeepSeek API caches prompt prefixes per effort, so a
+        # request at another effort than the previous one re-reads the conversation since the
+        # last request at its own effort. Reflection depth is asked for in the message text.
         effort:
           act: low
-          instruction: high
-          recover: high
-          shallow: high
-          deep: max
-          checkpoint: high
+          instruction: low
+          recover: low
+          shallow: low
+          deep: low
+          checkpoint: low
     - id: steward-tool-ego-capabilities
       name: '@steward/dsh-tool-ego-capabilities'
       config:

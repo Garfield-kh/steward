@@ -139,6 +139,7 @@ def test_robot_chat_takes_control_for_the_turn_and_gives_it_back(tmp_path):
     stdin = (robot / "stdin").read_text(encoding="utf-8")
     assert stdin.startswith("你是家用服务机器人") and "World State" not in stdin
     assert "flip_flat_objects_face_up（skill，verified）" in stdin
+    assert stdin.endswith("\n\n操作员任务：把杯子放到餐桌上"), "the capability list precedes the instruction marker"
     assert "interiorSpread" in ROBOT_BRIEF and "相关系数" in ROBOT_BRIEF
     assert capabilities_digest(None) == "" and capabilities_digest(tmp_path / "empty") == ""
     assert [m["agent"] for m in chat.state()["messages"]] == ["robot"] * 3

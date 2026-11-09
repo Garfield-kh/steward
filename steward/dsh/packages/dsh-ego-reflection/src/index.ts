@@ -24,8 +24,11 @@
  *
  * Each model request gets the reasoning effort configured for the kind of step it follows:
  * `instruction` after an operator message, the reflection's depth after a reflection, `recover`
- * after a failure that got no reflection, `act` otherwise. Routine steps think briefly and
- * reflections think long. The effort is written to the request header of the Session log.
+ * after a failure that got no reflection, `act` otherwise. The effort is written to the request
+ * header of the Session log. The DeepSeek API caches prompt prefixes per effort: a request whose
+ * effort differs from the previous request's reads the cache left by the last request at its own
+ * effort and prefills everything after it, so a deployment that values time to first token
+ * configures one effort for all kinds and lets the reflection text ask for depth.
  *
  * - `agent/inbox/claimed`: an operator message (source `user`) joins the messages quoted by later
  *   reflections of that agent and resets its reflection history and budget.
@@ -84,7 +87,7 @@ export interface Config {
   actionTools: string[]
   /** Idle top-level calls in a row after which a checkpoint review is attached; 0: never. */
   idleEvery: number
-  /** Reasoning effort of the request following each kind of step. */
+  /** Reasoning effort of the request following each kind of step; differing efforts split the provider's prefix cache. */
   effort: Efforts
   /** Objects listed per reflection (the call's targets first, then candidates). */
   candidateLimit: number
@@ -415,13 +418,13 @@ export function reflectionText(failure: Failure, context: ReflectionContext,
   if (deep && context.scene?.length) lines.push(`当前场景（Ego State 摘要，这条指令下已运行 ${context.steps} 个程序）：`, ...context.scene)
   if (!programBug) lines.push(...evidenceLines(evidence, config.candidateLimit))
   if (deep) {
-    lines.push(`这是这条指令下的第 ${context.ordinal} 次反思，是一次深度反思。先在思考中充分推敲，再分层逐条作答，每条几句话：`)
+    lines.push(`这是这条指令下的第 ${context.ordinal} 次反思，是一次深度反思。先在思考中充分推敲，再分层逐条作答，每条一两句话：`)
     if (context.ordinal > 1) lines.push(...RECURRING_QUESTIONS)
     lines.push(...DEEP_QUESTIONS)
   } else if (programBug) {
     lines.push(`这是程序本身的错误，不是机器人动作失败。用一两句话回答后改程序重试：`, ...PROGRAM_QUESTIONS)
   } else {
-    lines.push(`这是这条指令下的第 ${context.ordinal} 次反思。下一次行动之前，用几句话逐条回答：`, ...SHALLOW_QUESTIONS,
+    lines.push(`这是这条指令下的第 ${context.ordinal} 次反思。下一次行动之前，逐条回答，每条一句话：`, ...SHALLOW_QUESTIONS,
       '同一类失败再次出现时，会进入深度反思。')
   }
   if (!programBug) {
@@ -445,7 +448,7 @@ export function checkpointText(context: Pick<ReflectionContext, 'instructions' |
       : `【阶段回顾】这条指令下已运行 ${context.steps} 个程序，自上次反思以来的 ${context.since} 个程序没有工具报错。`,
     ...instructionLines(context.instructions),
     ...context.scene?.length ? ['当前场景（Ego State 摘要）：', ...context.scene] : [],
-    '用几句话逐条回答，再继续：',
+    '逐条回答，每条一句话，再继续：',
     ...idle ? IDLE_QUESTIONS : CHECKPOINT_QUESTIONS,
   ].join('\n')
 }

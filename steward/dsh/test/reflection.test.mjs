@@ -78,7 +78,7 @@ test('a shallow reflection lists the facts, then asks a few questions', () => {
   assert.deepEqual(lines.slice(0, 4), ['【反思】ego_query 失败：no box in the ego state', '操作员的原始指令：「把拼图盒里的拼图倒在桌上」',
     '失败归类：感知缺失：需要的物体不在 Ego State 里。常见对策：到能看清目标的位置环顾。', '可能就是指令所指、或名字存疑的其他物体（对照 box）：'])
   assert.ok(lines[4].startsWith('- e:5 picture'))
-  assert.equal(lines[5], '这是这条指令下的第 1 次反思。下一次行动之前，用几句话逐条回答：')
+  assert.equal(lines[5], '这是这条指令下的第 1 次反思。下一次行动之前，逐条回答，每条一句话：')
   assert.deepEqual(lines.slice(6, 6 + SHALLOW_QUESTIONS.length), SHALLOW_QUESTIONS)
   assert.ok(!text.includes('【宏观】') && !text.includes('当前场景'))
 })
@@ -92,7 +92,7 @@ test('a deep reflection says why, digests the scene and asks macro, micro and st
   assert.deepEqual(lines.slice(0, 10), ['【深度反思】你遇到的困难：只匹配上 9 块', '为什么深入反思：同样的失败又出现了一次',
     '操作员的消息（从早到晚）：', '- 「拼好拼图」', '- 「继续」', '这条指令下之前的失败：', '- skill_run：pick failed: missed',
     '当前场景（Ego State 摘要，这条指令下已运行 14 个程序）：', '- puzzle_piece ×16',
-    '这是这条指令下的第 3 次反思，是一次深度反思。先在思考中充分推敲，再分层逐条作答，每条几句话：'])
+    '这是这条指令下的第 3 次反思，是一次深度反思。先在思考中充分推敲，再分层逐条作答，每条一两句话：'])
   assert.deepEqual(lines.slice(10, 10 + RECURRING_QUESTIONS.length + DEEP_QUESTIONS.length), [...RECURRING_QUESTIONS, ...DEEP_QUESTIONS])
   assert.ok(!text.includes('失败归类'))
 })
@@ -107,7 +107,7 @@ test('without Ego evidence the reflection still quotes the failure and the instr
 test('a checkpoint reviews progress with the scene', () => {
   const lines = checkpointText({ instructions: ['拼好拼图'], steps: 9, since: 8, scene: ['- puzzle_piece ×16'] }).split('\n')
   assert.deepEqual(lines, ['【阶段回顾】这条指令下已运行 9 个程序，自上次反思以来的 8 个程序没有工具报错。', '操作员的原始指令：「拼好拼图」',
-    '当前场景（Ego State 摘要）：', '- puzzle_piece ×16', '用几句话逐条回答，再继续：', ...CHECKPOINT_QUESTIONS])
+    '当前场景（Ego State 摘要）：', '- puzzle_piece ×16', '逐条回答，每条一句话，再继续：', ...CHECKPOINT_QUESTIONS])
 })
 
 const EFFORT = { act: 'low', instruction: 'high', recover: 'high', shallow: 'high', deep: 'max', checkpoint: 'high' }

@@ -421,11 +421,11 @@
     instructionMarker: 操作员任务：
     effort:
       act: low
-      instruction: high
-      recover: high
-      shallow: high
-      deep: max
-      checkpoint: high
+      instruction: low
+      recover: low
+      shallow: low
+      deep: low
+      checkpoint: low
 - id: steward-tool-ego-capabilities
   name: '@steward/dsh-tool-ego-capabilities'
   config:

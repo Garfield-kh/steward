@@ -24,6 +24,8 @@ open http://127.0.0.1:7400/console   # 浏览器控制台：斜视主视图、�
 
 The robot has two head RGB-D cameras: `head_camera` looks ahead; the short-focal-length `wide_camera` sees the nearby worktop and gripper. Both contribute to perception; see [steward.md 13.8](../steward.md#138-机器人本体的双相机).
 
+The `cobot-magic` arms start with joint1–joint6 at zero radians and their fingers open. The `cobot-magic` grippers use simplified palm, guide, slider and finger geometry. Their fingers extend along the tool axis and open symmetrically to a 100 mm inner aperture; the grasp point lies between the pads, 5 mm behind the tips. These visual primitives are not manufacturer CAD or contact-based gripping.
+
 ## Run with DeepSeek Harness
 
 ```sh

@@ -12,6 +12,8 @@ Arm kinematics are transcribed verbatim from the vendored URDF
 (pinned upstream commit in ``third_party/piper_description/PROVENANCE.md``).
 Every joint origin, axis and limit matches the URDF; link collision geometry is
 approximated by capsules between consecutive joint origins at the zero pose.
+The grippers use visual-only palm, slider and finger primitives; their dimensions
+are a simplified envelope, not manufacturer CAD. Phase 0 uses ideal attachment.
 
 Chassis and lift dimensions are MEASURE placeholders pending the physical survey
 of the agilex workstation; see ``steward/embodiments/cobot-magic.yaml``. The
@@ -64,7 +66,7 @@ HEAD_AT = [0.16, 0.0]
 ARM_MOUNT_X = 0.24
 
 # Grasp geometry, measured in the simulation at the open-aperture posture (see tests/test_cobot.py):
-# the pinch point sits 0.135 m along link6's +z, and the fingers separate along link6's y axis,
+# the pinch point sits 0.135 m along link6's +z, and the fingers separate along link6's x axis,
 # 0.05 m per finger. Closed means both finger joints at 0 (the URDF ranges are 0..0.05 and
 # -0.05..0), so the aperture is the distance travelled from 0.
 TCP_OFFSET = [0.0, 0.0, 0.135]   # in the link6 frame, for either arm
@@ -162,6 +164,33 @@ def _link_geometry(spec: tuple, rgba: list[float], collision: bool = True) -> di
     return {key: [primitive("capsule", [radius, length], at, rgba)]}
 
 
+def _palm_geometry() -> dict[str, list[dict]]:
+    """Wrist flange, palm housing and transverse guide in the link6 frame (metres)."""
+    return {"visual": [
+        primitive("cylinder", [0.027, 0.025], pose([0.0, 0.0, 0.0125]), ROBOT_ARM),
+        primitive("box", [0.138, 0.048, 0.044], pose([0.0, 0.0, 0.041]), GRIPPER_RGBA),
+        primitive("box", [0.138, 0.024, 0.008], pose([0.0, 0.0, 0.067]), STEEL),
+    ]}
+
+
+def _finger_geometry(name: str) -> dict[str, list[dict]]:
+    """Slider, axial finger and inward pad in the mirrored URDF link7/link8 frames.
+
+    Local +/-y points back toward the palm; local -z points away from the pinch
+    axis on both fingers. Pad inner faces meet at zero travel, with the TCP
+    between the pads, 5 mm behind their tips. Dimensions are in metres.
+    """
+    toward_palm = -1.0 if name == "link7" else 1.0
+    return {"visual": [
+        primitive("box", [0.028, 0.014, 0.022],
+                  pose([0.0, toward_palm * 0.064, -0.011]), GRIPPER_RGBA),
+        primitive("box", [0.024, 0.064, 0.010],
+                  pose([0.0, toward_palm * 0.027, -0.008]), STEEL),
+        primitive("box", [0.020, 0.026, 0.003],
+                  pose([0.0, toward_palm * 0.008, -0.0015]), GRIPPER_RGBA),
+    ]}
+
+
 def _piper_arm(prefix: str, mount_p: list[float]) -> tuple[list[Link], list[Joint]]:
     """One Piper arm (arm_base..link6 + two fingers), link/joint ids prefixed ``L_``/``R_``."""
     links: list[Link] = []
@@ -172,30 +201,27 @@ def _piper_arm(prefix: str, mount_p: list[float]) -> tuple[list[Link], list[Join
         lid = f"{prefix}_{name}"
         affordances = [exact("grasp-point"), exact({"tcp-offset": {"p": TCP_OFFSET, "q": [1.0, 0.0, 0.0, 0.0]}})] \
             if name == "link6" else None
-        # The wrist (link6) is visual only: its capsule spans the gap to the pinch point, so a
-        # colliding wrist would shove aside the very object the fingers are closing on. The same
-        # reasoning the mobile robot uses for its whole arm.
-        link = Link(id=lid, name=f"{prefix} {name}", geometry=_link_geometry(spec, ROBOT_ARM, collision=name != "link6"),
+        # The gripper is visual-only; grasping uses the link6 TCP and ideal attachment.
+        geometry = _palm_geometry() if name == "link6" else _link_geometry(spec, ROBOT_ARM)
+        link = Link(id=lid, name=f"{prefix} {name}", geometry=geometry,
                     inertial=exact({"mass": spec[2]}), affordances=affordances or [])
         links.append(link)
         if name == "arm_base":
             joints.append(Joint(id=f"{prefix}_mount", parent="frame", child=lid, type=exact("fixed"),
                                 origin=exact(pose(mount_p)), q=exact([]), qd=exact([])))
     for j in _PIPER_CHAIN:
-        index = int(j["jid"][-1]) - 1
         joints.append(Joint(
             id=f"{prefix}_{j['jid']}", parent=f"{prefix}_{j['parent']}", child=f"{prefix}_{j['child']}",
             type=exact("revolute"), origin=exact(pose(j["xyz"], _rpy_quat(j["rpy"]))),
             axis=exact([0.0, 0.0, 1.0]), limits=exact({"lo": j["lo"], "hi": j["hi"]}),
-            q=exact([park(prefix)[index]]), qd=exact([0.0]), dynamics=exact({"damping": 60.0}),
+            q=exact([0.0]), qd=exact([0.0]), dynamics=exact({"damping": 60.0}),
             actuator={"kind": "position", "limits": {"effort": 100.0, "velocity": 3.0}, "gains": {"kp": 1500.0}}))
     for name, spec in _PIPER_LINKS.items():
         if name not in ("link7", "link8"):
             continue
         lid = f"{prefix}_{name}"
         links.append(Link(id=lid, name=f"{prefix} finger {name[-1]}",
-                          geometry={"visual": [primitive("box", [0.024, 0.016, 0.06],
-                                                         pose([0.0, 0.0, -0.03]), GRIPPER_RGBA)]},
+                          geometry=_finger_geometry(name),
                           inertial=exact({"mass": spec[2]})))
     for j in _PIPER_FINGERS:
         joints.append(Joint(
@@ -212,6 +238,7 @@ def cobot_magic(separation: float = 0.62, mount_height: float = 0.855) -> Entity
     """Cobot Magic twin: mobile chassis, lifting torso, two Piper arms, and the mobile kitchen
     robot's head (:func:`~steward.assets.generators.head_link`: a survey camera and a
     short-focal-length work camera) on a mast fixed to the chassis.
+    Both arms start with joint1–joint6 at zero radians and their fingers open.
 
     ``separation``/``mount_height``/``CHASSIS``/``LIFT_*`` are MEASURE placeholders (see module
     docstring); URDF-derived joint data is exact. ``mount_height`` is the arm mounting height above

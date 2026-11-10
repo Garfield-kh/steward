@@ -349,3 +349,26 @@ def test_the_ego_state_puts_the_robot_and_its_load_where_they_are_now(kitchen_sc
     runtime.link = Dead()
     me = next(e for e in runtime.ego_state().entities if e.id == SELF_ID)
     assert me.pose.value["p"][:2] == [0.0, 0.0], "an unreachable body leaves the belief's own pose"
+
+
+def test_a_load_is_put_down_on_a_support_smaller_than_the_edge_margin(kitchen_scene):
+    """The free-spot search kept the held object ``place_edge_margin`` plus its own half extent
+    from every edge; a bowl onto a plate (or a cup onto one) left no spot at all, and place
+    answered "no free spot on <plate>" however the robot stood. A support that narrow takes the
+    load at its centre, wholly on it."""
+    from steward.ego.estimator import Track
+
+    sim = WorldSim(kitchen_scene, seed=6)
+    model = steward_bot().to_dict()
+    est = EgoEstimator(robot_model=model)
+    _observe(sim, est, 3)
+    plate = next(t for t in est.tracks.values() if t.category == "plate")
+    est.tracks["e:load"] = Track(id="e:load", category_counts={"bowl": 1.0}, pos=est.gripper_position().copy(),
+                                 var=np.full(3, 1e-4), yaw=0.0, yaw_var=1e-4, size=np.array([0.15, 0.15, 0.06]),
+                                 observations=5, first_seen=0.0, last_seen=est.stamp)
+    est.mark_held("e:load", since=est.stamp)
+    assert max(plate.size[:2]) / 2 < Esim(model).config.place_edge_margin + 0.075
+    receipt = Esim(model).predict(est.to_scene(), "place", {"on": plate.id})
+    assert receipt["feasible"], receipt["issues"]
+    spot = np.asarray(receipt["plan"]["spot"])
+    assert np.linalg.norm(spot - plate.pos[:2]) < 0.03

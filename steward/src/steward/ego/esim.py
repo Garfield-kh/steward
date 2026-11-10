@@ -882,7 +882,8 @@ class Esim:
             area = sbox
             surface = top
             height = top + held_h / 2 + 0.02 + self._hold_dz(es, held)
-            edge = self._edge_distance(sbox, spot) - held_half
+            ex, ey = self._turned_half(held_box, final_yaw, sbox.yaw)
+            edge = self._edge_margin(sbox, spot, ex, ey)
             sigma = self._sigma_xy(support)
             risk = 0.02
             if edge < 2 * sigma + 0.03:
@@ -1237,6 +1238,22 @@ class Esim:
         return self._receipt(es, skill, params, max(0.03, p_miss), issues, plan)
 
     @staticmethod
+    def _turned_half(held_box: Box2D, yaw: float, axis_yaw: float) -> tuple[float, float]:
+        """Half extents of ``held_box`` turned to ``yaw``, along the axes of a frame at ``axis_yaw``."""
+        turn = yaw - axis_yaw
+        c, s = abs(math.cos(turn)), abs(math.sin(turn))
+        return c * held_box.hx + s * held_box.hy, s * held_box.hx + c * held_box.hy
+
+    @staticmethod
+    def _edge_margin(sbox: Box2D, xy: tuple[float, float], ex: float, ey: float) -> float:
+        """Smallest gap between a footprint of half extents (ex, ey) on the support's axes, centred
+        at ``xy``, and the support's edges (negative when it overhangs)."""
+        dx, dy = xy[0] - sbox.cx, xy[1] - sbox.cy
+        c, s = math.cos(-sbox.yaw), math.sin(-sbox.yaw)
+        lx, ly = c * dx - s * dy, s * dx + c * dy
+        return min(sbox.hx - abs(lx) - ex, sbox.hy - abs(ly) - ey)
+
+    @staticmethod
     def _edge_distance(sbox: Box2D, xy: tuple[float, float]) -> float:
         dx, dy = xy[0] - sbox.cx, xy[1] - sbox.cy
         c, s = math.cos(-sbox.yaw), math.sin(-sbox.yaw)
@@ -1252,7 +1269,19 @@ class Esim:
         ``spot_shift_max`` away, and an issue says where; none that near is an error. Every spot
         keeps ``edge_keep`` (default: the held object's half extent) from the support's edges."""
         cfg = self.config
-        keep = max(held_box.hx, held_box.hy) if edge_keep is None else edge_keep
+        # The held footprint, turned to the heading it is put down with, projected on the support's
+        # own axes: max(hx, hy) is not its half width once turned (at 45 degrees a 0.20 m half-wide
+        # load passed a 0.28 m half-wide support and overhung it by up to 8 cm).
+        ex, ey = self._turned_half(held_box, held_box.yaw if yaw is None else yaw, sbox.yaw)
+        keep_x, keep_y = (ex, ey) if edge_keep is None else (edge_keep, edge_keep)
+        keep = max(keep_x, keep_y)
+
+        def inside(xy: tuple[float, float]) -> bool:
+            dx, dy = xy[0] - sbox.cx, xy[1] - sbox.cy
+            lx = math.cos(sbox.yaw) * dx + math.sin(sbox.yaw) * dy
+            ly = -math.sin(sbox.yaw) * dx + math.cos(sbox.yaw) * dy
+            return sbox.hx - abs(lx) >= keep_x - 1e-9 and sbox.hy - abs(ly) >= keep_y - 1e-9
+
         others = []
         for rel in es.relations:
             if rel.type == "supported-by" and rel.b.get("entity") == support.id and rel.a["entity"] != held.id:
@@ -1266,7 +1295,7 @@ class Esim:
 
         if offset is not None:
             spot = world(float(offset[0]), float(offset[1]))
-            if self._edge_distance(sbox, spot) < keep:
+            if not inside(spot):
                 raise PredictionError(f"requested offset is within {keep:.2f} m of the edge of {support.id}")
             if clearance <= 0.0:
                 # The caller allows contact or overlap (interlocking pieces, stacking): the spot stands.
@@ -1290,21 +1319,25 @@ class Esim:
                             key=lambda d: math.hypot(*d))
             for dx, dy in shifts:
                 moved = (spot[0] + dx, spot[1] + dy)
-                if self._edge_distance(sbox, moved) >= keep and blocker(moved) is None:
+                if inside(moved) and blocker(moved) is None:
                     return moved, [f"requested spot is occupied by {occupant}; using the free spot nearest it, "
                                    f"{math.hypot(dx, dy) * 100:.0f} cm away at ({moved[0]:.3f}, {moved[1]:.3f})"]
             raise PredictionError(f"requested spot is occupied by {occupant} and no free spot lies within "
                                   f"{reach:.2f} m of it")
         rx, ry, _ = self._robot_xy_yaw(es)
-        margin = max(cfg.place_edge_margin + max(held_box.hx, held_box.hy), keep)
+        # A support narrower than the margin on a side (a bowl onto a plate, a cup onto a saucer)
+        # still takes the load wholly on it: there the spot only keeps the load's own projection.
+        want_x, want_y = max(cfg.place_edge_margin + ex, keep_x), max(cfg.place_edge_margin + ey, keep_y)
+        margin_x = want_x if sbox.hx >= want_x else keep_x
+        margin_y = want_y if sbox.hy >= want_y else keep_y
         # How deep into a surface the held object's centre can go from a docked base: the arm's
         # longest reach past the dock, plus how far the object hangs ahead of the gripper.
         lx0, ly0, _, _, _ = self._held_relative(es) or (0.0, 0.0, 0.0, 0.0, 0.0)
         hang = math.hypot(lx0 - self.tool_offset - self._arm_joints(es).get("reach", 0.0), ly0 - self.lateral)
         deepest = self.reach_max + self.tool_offset - self.half_x - cfg.dock_gap + hang
         best, best_cost = None, math.inf
-        for lx in np.arange(-sbox.hx + margin, sbox.hx - margin + 1e-9, 0.05):
-            for ly in np.arange(-sbox.hy + margin, sbox.hy - margin + 1e-9, 0.05):
+        for lx in _spots(sbox.hx, margin_x):
+            for ly in _spots(sbox.hy, margin_y):
                 spot = world(float(lx), float(ly))
                 if any(math.hypot(spot[0] - o.cx, spot[1] - o.cy)
                        < max(cfg.place_clearance, max(held_box.hx, held_box.hy) + max(o.hx, o.hy) + 0.02) for o in others):
@@ -1318,3 +1351,12 @@ class Esim:
         if best is None:
             raise PredictionError(f"no free spot on {support.id}")
         return best, []
+
+
+def _spots(half: float, margin: float, step: float = 0.05) -> np.ndarray:
+    """Candidate offsets along one support axis of half extent ``half``, at least ``margin`` from
+    either edge: every ``step``, or the centre alone when the span is shorter than a step."""
+    if half - margin < -1e-9:
+        return np.zeros(0)
+    ticks = np.arange(-half + margin, half - margin + 1e-9, step)
+    return ticks if len(ticks) > 1 else np.zeros(1)

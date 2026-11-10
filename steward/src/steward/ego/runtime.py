@@ -309,6 +309,8 @@ class EgoRuntime:
         self.alerts: list[dict] = []
         self.plan: dict | None = None
         self._episode: int | None = None  # the world's episode number of the last sensor frame
+        self._generation = 0  # counts restarts: state read in one episode is not applied in the next
+        self._receipt_generation: dict[str, int] = {}  # receipt id -> the generation it was predicted in
         self._looked_at: dict[str, float] = {}  # target id -> body stamp of its last fresh look
         self._roles: dict[str, str] = {}  # the latest role assignment, kept unless clearly outweighed
         self.activity: collections.deque[dict] = collections.deque(maxlen=ACTIVITY_MAX)
@@ -617,8 +619,10 @@ class EgoRuntime:
         Ego-State and everything derived from it (receipts, roles, looks, keyframes) and
         cancel any running skill. Track ids start again at ``e:1``."""
         self.executor.cancel()
+        self._generation += 1
         self.estimator = EgoEstimator(robot_model=self.estimator.robot_model, config=self.estimator.config)
         self.receipts.clear()
+        self._receipt_generation.clear()  # skills predicted before now are of another episode
         self._roles.clear()
         self._looked_at.clear()
         self._keyframe = {}
@@ -682,17 +686,25 @@ class EgoRuntime:
         the last update can be tens of seconds and a whole drive old, and a plan made from that
         self pose (a dock, a place height from the load in the hand) belongs to where the robot
         no longer is."""
+        # The body is read after waiting out an RGB-D update in progress (seconds under load) --
+        # read before it, the self pose and the load in the hand were already that old when
+        # composed -- but not while holding the lock, so a slow sensor service does not stall
+        # perception. A belief that moved on meanwhile (another update, or a reset) has a body at
+        # least as new as the one read: that one is the answer then.
+        with self._lock:
+            generation = self._generation
         try:
             live = self.link.sensors()
         except Exception:  # noqa: BLE001 - the belief's own self pose is a usable answer when the body cannot be reached
             live = None
         with self._lock:
             est = self.estimator
-            if live is not None and (live.get("odometry") is None or live.get("stamp") is None
+            if live is not None and (generation != self._generation
+                                     or live.get("odometry") is None or live.get("stamp") is None
                                      or live["stamp"] < est.stamp - 1e-6
                                      or (live.get("episode") is not None and self._episode is not None
                                          and live["episode"] != self._episode)):
-                live = None  # another episode's body (a reset race): the belief's own is the answer
+                live = None  # older than the belief, or another episode's body: the belief's own
             return est.to_scene(live)
 
     def _motion_state(self) -> dict:
@@ -721,22 +733,28 @@ class EgoRuntime:
                 with self._lock:
                     belief = self._keep_motion_belief()
         state = {key: dict(value) if isinstance(value, dict) else value for key, value in belief.items()}
+        state.pop("generation", None)
         try:
             live = self.link.sensors()
         except Exception:  # noqa: BLE001 - the belief is still a usable answer when the body cannot be reached
             return self.arm.virtualize(state)
+        # A body from another episode than the objects (a reset race: a clock behind the belief's,
+        # or another episode number) is not mixed in: the body and the objects of one answer
+        # belong to one episode, so the belief is returned whole.
+        if (live.get("stamp") is not None and belief.get("stamp") is not None and live["stamp"] < belief["stamp"] - 1e-6) \
+                or (live.get("episode") is not None and belief.get("episode") is not None
+                    and live["episode"] != belief["episode"]) or belief.get("generation") != self._generation:
+            return self.arm.virtualize(state)
         for key in ("stamp", "odometry", "joints", "gripper", "grippers"):
             if live.get(key) is not None:
                 state[key] = live[key]
-        if live.get("stamp") is not None and live["stamp"] < state["stamp"] - 1e-6:
-            state["stamp"] = belief["stamp"]  # an episode reset race: prefer the belief's own clock
         return self.arm.virtualize(state)
 
     def _keep_motion_belief(self) -> dict:
         """Record (and return) the belief part of the motion state; the caller holds ``_lock``."""
         est = self.estimator
         self._motion_belief = {
-            "stamp": est.stamp, "odometry": dict(est.odometry), "joints": dict(est.joints),
+            "generation": self._generation, "episode": self._episode, "stamp": est.stamp, "odometry": dict(est.odometry), "joints": dict(est.joints),
             "gripper": dict(est.gripper), "grippers": dict(est.grippers),
             "entities": {t.id: {"p": t.pos.tolist()} for t in est.tracks.values()}}
         return self._motion_belief
@@ -746,24 +764,47 @@ class EgoRuntime:
         perception update can be a slow segmentation old, from before the base docked and the arm
         reached down, and an offset taken against it leaves the load believed half a metre from
         the hand (every place then plans its height from there)."""
-        at, body = self.estimator.stamp, None
+        generation, at, body = self._skill_generation(), self.estimator.stamp, None
         try:
             body = self.link.sensors()
             at = float(body.get("stamp", at))  # the body's clock, now
         except Exception:  # noqa: BLE001 - the belief's own clock and pose are a usable second best
             body = None
         with self._lock:
+            if not self._same_episode(generation, body):  # the skill or the body is another episode's
+                return track_id
             return self.estimator.mark_held(track_id, at, gripper=self.arm.geometry.gripper, body=body)
 
     def _released(self, track_id: str, spot: list[float]) -> None:
         """A place knows where it let go; the belief is told, not left to infer it later -- at the
         height the hand is at now, not the carry height the last perception update saw."""
+        generation = self._skill_generation()
         try:
             body = self.link.sensors()
         except Exception:  # noqa: BLE001 - the last estimated height is a usable second best
             body = None
         with self._lock:
+            if not self._same_episode(generation, body):  # the skill or the body is another episode's
+                return
             self.estimator.release_at(track_id, spot, body=body)
+
+    def _skill_generation(self) -> int:
+        """The generation the running skill was predicted in: a callback reached after a reset (the
+        old skill thread paused past it) belongs to that skill's episode, not to the current one.
+        Outside a skill thread, the current generation."""
+        name = threading.current_thread().name
+        job = self.executor.jobs.get(name[len("skill-"):]) if name.startswith("skill-") else None
+        if job is None:
+            return self._generation
+        return self._receipt_generation.get(job.receipt, -1)
+
+    def _same_episode(self, generation: int, body: dict | None) -> bool:
+        """Whether a skill event of ``generation``, with ``body`` read for it, belongs to the
+        current episode; the caller holds ``_lock``."""
+        if generation != self._generation:
+            return False
+        return not (body is not None and body.get("episode") is not None and self._episode is not None
+                    and body["episode"] != self._episode)
 
     def _shift_track(self, track_id: str, delta: list[float]) -> None:
         with self._lock:
@@ -1187,6 +1228,7 @@ class EgoRuntime:
         receipt["maxRisk"] = limit
         with self._lock:
             self.receipts[receipt["id"]] = receipt
+            self._receipt_generation[receipt["id"]] = self._generation
         return receipt
 
     def annotate(self, request: dict) -> dict:

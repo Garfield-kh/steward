@@ -677,8 +677,23 @@ class EgoRuntime:
 
     # --------------------------------------------------------------- state
     def ego_state(self) -> SceneState:
+        """The belief, with the robot itself as it is now: objects are as old as the last
+        perception update, but the body's own pose and joints are read live. With a slow segmenter
+        the last update can be tens of seconds and a whole drive old, and a plan made from that
+        self pose (a dock, a place height from the load in the hand) belongs to where the robot
+        no longer is."""
+        try:
+            live = self.link.sensors()
+        except Exception:  # noqa: BLE001 - the belief's own self pose is a usable answer when the body cannot be reached
+            live = None
         with self._lock:
-            return self.estimator.to_scene()
+            est = self.estimator
+            if live is not None and (live.get("odometry") is None or live.get("stamp") is None
+                                     or live["stamp"] < est.stamp - 1e-6
+                                     or (live.get("episode") is not None and self._episode is not None
+                                         and live["episode"] != self._episode)):
+                live = None  # another episode's body (a reset race): the belief's own is the answer
+            return est.to_scene(live)
 
     def _motion_state(self) -> dict:
         """What the body is doing now, for the motion loop.

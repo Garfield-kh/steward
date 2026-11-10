@@ -1382,12 +1382,12 @@ class EgoEstimator:
         return (track.footprint < container.footprint and _inside(container, track.pos, margin)
                 and container.bottom() - margin <= track.bottom() and track.pos[2] <= container.top() + margin)
 
-    def _tipped(self, track: Track) -> bool:
+    def _tipped(self, track: Track, rot: np.ndarray | None = None) -> bool:
         """Whether the held ``track`` is tilted beyond ``poured_roll`` from how it was taken, so what
-        lay in it has slid out."""
+        lay in it has slid out. ``rot``: the gripper rotation to judge by (default: the belief's)."""
         if track.held_up is None:
             return False
-        up = self.gripper_rotation(self.held_gripper) @ track.held_up
+        up = (self.gripper_rotation(self.held_gripper) if rot is None else rot) @ track.held_up
         return math.acos(min(1.0, max(-1.0, float(up[2])))) > self.config.poured_roll
 
     def _fuse(self, track: Track, det: dict, pos: np.ndarray, yaw: float, sigma: float) -> None:
@@ -1543,9 +1543,6 @@ class EgoEstimator:
         track = self.tracks[track_id]
         # Offsets are kept in the gripper's frame: what it holds turns with it (a lid taken by its
         # edge swings round the hand when the base turns), and so does what lies in that.
-        joints, odometry = (body or {}).get("joints"), (body or {}).get("odometry")
-        if joints is None or odometry is None:
-            joints = odometry = None
         rot = self.gripper_rotation(gripper, joints, odometry)
         for other in self.tracks.values():
             if other is not track and not other.held and (self.support_of(other) is track or self._within(track, other)):
@@ -1666,14 +1663,35 @@ class EgoEstimator:
             else:
                 content.pos = track.pos + rot @ content.carried_offset
 
-    def held_position(self, joints: dict | None = None):
-        """Where the load is, for the given joint state: in the gripper that took it."""
+    def held_pose(self, joints: dict | None = None, odometry: dict | None = None) -> dict[str, tuple]:
+        """``{track id: (position, yaw)}`` of the load and of what is carried in it, for the given
+        joint state and base pose (the formula of :meth:`_follow_held`; the tracks are not changed).
+        Empty when nothing is held or the load has no grasp offset."""
+        if not self.held_id or self.held_id not in self.tracks:
+            return {}
+        track = self.tracks[self.held_id]
+        if track.held_offset is None:
+            return {}
+        rot = self.gripper_rotation(self.held_gripper, joints, odometry)
+        pos = self.gripper_position(self.held_gripper, joints, odometry) + rot @ track.held_offset
+        out = {track.id: (pos, wrap_angle(math.atan2(rot[1, 0], rot[0, 0]) + track.held_yaw))}
+        # Tipped or not by the same body: an upright belief with a live wrist rolled over has
+        # poured, and its contents are no longer carried along (to_scene drops their relation).
+        if not self._tipped(track, rot):
+            for content in self.tracks.values():
+                if content.carried and content.id != track.id:
+                    out[content.id] = (pos + rot @ content.carried_offset, None)
+        return out
+
+    def held_position(self, joints: dict | None = None, odometry: dict | None = None):
+        """Where the load is, for the given joint state and base pose: in the gripper that took it."""
         if not self.held_id or self.held_id not in self.tracks:
             return None
         track = self.tracks[self.held_id]
         if track.held_offset is None:
             return np.asarray(track.pos, dtype=float)
-        return self.gripper_position(self.held_gripper, joints) + self.gripper_rotation(self.held_gripper, joints) @ track.held_offset
+        return (self.gripper_position(self.held_gripper, joints, odometry)
+                + self.gripper_rotation(self.held_gripper, joints, odometry) @ track.held_offset)
 
     # ------------------------------------------------------------------ output
     def support_of(self, track: Track) -> Track | None:
@@ -1780,17 +1798,30 @@ class EgoEstimator:
         ``self_frame`` is the robot's *current* sensor frame, when the caller has one. Proprioception
         is continuous — the robot knows its joint angles without looking — so a console can show the
         arm where it is now while the object beliefs stay as old as the last look. Object tracks are
-        never refreshed by it.
+        never refreshed by it. Odometry is proprioception too: a frame that carries it places the
+        robot (and the load in its hand) where it stands now, not where the last look -- with a
+        slow segmenter, tens of seconds and a whole drive ago -- left it.
         """
         entities = [self._self_entity(self_frame)]
         # A held object is not where the last look saw it: it is in the hand. That is a kinematic
         # fact, so it is read here rather than mutating the track from a rendering thread.
-        held_at = self.held_position(None if self_frame is None else self_frame.get("joints"))
+        # The load and what lies in it, as the body now holds them: position, heading and the
+        # contents all from one body snapshot (the same transform as _follow_held, without
+        # writing it into the tracks). A heading left at the last look made a load turned with the
+        # base by 90 degrees read as unturned, and the place wrist angle was planned from it.
+        live = self.held_pose(*((None, None) if self_frame is None else
+                                (self_frame.get("joints"), self_frame.get("odometry"))))
         relations: list[Relation] = []
         # A snapshot of the track objects: the Ego-State is also read from a view thread while the
         # perception thread adds and drops tracks, and a dict that changes size mid-iteration raises.
         for track in list(self.tracks.values()):
-            entities.append(self._track_entity(track, at=held_at if track.id == self.held_id else None))
+            at, yaw = live.get(track.id, (None, None)) if live else (None, None)
+            entities.append(self._track_entity(track, at=at, yaw=yaw))
+            # Carried in a load the live body has tipped: it has slid out, so it is not reported
+            # as in the container (the next look perceives it where it landed).
+            poured_live = bool(live) and track.carried and track.id not in live
+            if poured_live:
+                continue
             if track.held:
                 relations.append(Relation(type="attached", a={"entity": track.id}, b={"entity": SELF_ID, "link": "gripper"},
                                           mode="rigid", derived=False, confidence=1.0))
@@ -1807,10 +1838,11 @@ class EgoEstimator:
         joints = self.joints if frame is None else (frame.get("joints") or self.joints)
         gripper = self.gripper if frame is None else (frame.get("gripper") or self.gripper)
         stamp = self.stamp if frame is None else float(frame.get("stamp", self.stamp))
-        o = self.odometry
-        pos_var = o["sigma"]["pos"] ** 2
-        yaw_var = o["sigma"]["yaw"] ** 2
-        ent.pose = Est(value=self.base_pose(), unc=_gaussian6([pos_var, pos_var, 1e-8, 1e-8, 1e-8, yaw_var]),
+        o = self.odometry if frame is None or frame.get("odometry") is None else {**self.odometry, **frame["odometry"]}
+        sigma = o.get("sigma") or self.odometry.get("sigma") or {"pos": 0.01, "yaw": 0.01}
+        pos_var = sigma["pos"] ** 2
+        yaw_var = sigma["yaw"] ** 2
+        ent.pose = Est(value=self.base_pose(o), unc=_gaussian6([pos_var, pos_var, 1e-8, 1e-8, 1e-8, yaw_var]),
                        t=stamp, src="observed")
         tree: RigidTree = ent.body
         for joint in tree.joints:
@@ -1860,7 +1892,7 @@ class EgoEstimator:
         self._drop(track, f"forgotten by the agent: {reason}")
         self.version += 1
 
-    def _track_entity(self, track: Track, at=None) -> Entity:
+    def _track_entity(self, track: Track, at=None, yaw: float | None = None) -> Entity:
         p = prior(track.category)
         total = sum(track.category_counts.values())
         cat_unc = {"kind": "categorical", "p": {track.label: 1.0} if track.label else
@@ -1881,7 +1913,7 @@ class EgoEstimator:
             role=p["role"],
             category=Est(value=track.category, unc=cat_unc, t=track.last_seen, src=src),
             pose=Est(value={"p": (track.pos if at is None else np.asarray(at, dtype=float)).tolist(),
-                            "q": quat_from_yaw(track.yaw)},
+                            "q": quat_from_yaw(track.yaw if yaw is None else yaw)},
                      unc=_gaussian6([*track.var.tolist(), 1e-4, 1e-4, track.yaw_var]), t=track.last_seen, src=src),
             body=RigidTree(root=Est(value=root_value, unc={"kind": "categorical", "p": p["root"]}, src="prior"),
                            links=[link]),

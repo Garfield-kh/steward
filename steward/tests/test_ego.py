@@ -307,3 +307,45 @@ def test_a_grasp_is_measured_against_the_body_now_not_the_last_look():
     est.update_body(now)
     assert np.linalg.norm(est.tracks["e:7"].pos - load) < 1e-6
     assert np.linalg.norm(est.held_position() - load) < 1e-6
+
+
+def test_the_ego_state_puts_the_robot_and_its_load_where_they_are_now(kitchen_scene):
+    """The self pose in the Ego State was the one of the last perception update: with a slow
+    segmenter, a navigate reported success while the state still showed the robot where it set
+    out from, and plans (docks, place heights) were made from there. Objects stay as old as the
+    last look; the body, and the load in its hand, are read live."""
+    from steward.ego.estimator import SELF_ID, Track
+    from steward.ego.runtime import EgoRuntime, RobotLink
+    from steward.math3d import yaw_from_quat
+
+    runtime = EgoRuntime(RobotLink("http://127.0.0.1:1"), steward_bot().to_dict())
+    est = runtime.estimator
+    est.stamp = 5.0
+    est.odometry = {"x": 0.0, "y": 0.0, "yaw": 0.0, "sigma": {"pos": 0.01, "yaw": 0.01}}
+    est.joints = {"lift": 1.1, "reach": 0.0}
+    now = {"stamp": 9.0, "odometry": {"x": 1.0, "y": 2.0, "yaw": 0.5}, "joints": {"lift": 0.8, "reach": 0.2},
+           "gripper": {"state": "closed", "holding": True}}
+
+    class Live:
+        @staticmethod
+        def sensors() -> dict:
+            return now
+
+    class Dead:
+        @staticmethod
+        def sensors() -> dict:
+            raise OSError("robot port unavailable")
+
+    load = est.gripper_position(None, now["joints"], now["odometry"])
+    est.tracks["e:7"] = Track(id="e:7", category_counts={"cup": 1.0}, pos=load.copy(), var=np.full(3, 1e-4), yaw=0.0,
+                              yaw_var=1e-4, size=np.array([0.08, 0.08, 0.1]), observations=3, first_seen=0.0, last_seen=5.0)
+    est.mark_held("e:7", since=9.0, body=now)
+    runtime.link = Live()
+    es = runtime.ego_state()
+    me = next(e for e in es.entities if e.id == SELF_ID)
+    assert me.pose.value["p"][:2] == [1.0, 2.0] and abs(yaw_from_quat(me.pose.value["q"]) - 0.5) < 1e-9
+    cup = next(e for e in es.entities if e.id == "e:7")
+    assert np.linalg.norm(np.asarray(cup.pose.value["p"]) - load) < 1e-6, "the load is in the hand, where the hand is now"
+    runtime.link = Dead()
+    me = next(e for e in runtime.ego_state().entities if e.id == SELF_ID)
+    assert me.pose.value["p"][:2] == [0.0, 0.0], "an unreachable body leaves the belief's own pose"

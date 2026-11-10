@@ -264,9 +264,38 @@ def _bottom_seen(mask: np.ndarray, depth: np.ndarray, instance: int, ys: np.ndar
     return float(hidden.sum()) / total < cfg.occluded_share
 
 
+def _interior(pts: np.ndarray) -> np.ndarray:
+    """Points strictly inside the polygon of the extremes along eight directions (Akl–Toussaint).
+
+    Such a point is strictly inside the hull and never one of its vertices, so the monotone chain
+    can skip it. A depth cloud fills its footprint: tens of thousands of points per region, of which
+    only a thin rim is left after this, and the pure-Python chain over all of them held the belief's
+    lock for seconds per RGB-D frame (17 s per poll on a loaded host)."""
+    x, y = pts[:, 0], pts[:, 1]
+    keys = (x, x + y, y, y - x, -x, -x - y, -y, x - y)  # counter-clockwise directions
+    ring = []
+    for k in keys:
+        i = int(np.argmax(k))
+        if not ring or i != ring[-1]:
+            ring.append(i)
+    if len(ring) > 1 and ring[0] == ring[-1]:
+        ring.pop()
+    inside = np.zeros(len(pts), dtype=bool)
+    if len(ring) < 3:
+        return inside
+    poly = pts[ring]
+    inside[:] = True
+    for a, b in zip(poly, np.roll(poly, -1, axis=0)):
+        inside &= (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]) > 0
+    return inside
+
+
 def _hull(xy: np.ndarray) -> np.ndarray:
     """Convex hull of 2D points (monotone chain), counter-clockwise."""
-    pts = np.unique(np.round(xy, 4), axis=0)
+    pts = np.round(xy, 4)
+    if len(pts) > 64:
+        pts = pts[~_interior(pts)]
+    pts = np.unique(pts, axis=0)
     if len(pts) < 3:
         return pts
     pts = pts[np.lexsort((pts[:, 1], pts[:, 0]))]
@@ -280,7 +309,8 @@ def _hull(xy: np.ndarray) -> np.ndarray:
             out.append(p)
         return out
 
-    lower, upper = half(pts), half(pts[::-1])
+    seq = pts.tolist()  # plain floats: the same arithmetic, without a numpy scalar per index
+    lower, upper = half(seq), half(seq[::-1])
     return np.array(lower[:-1] + upper[:-1])
 
 

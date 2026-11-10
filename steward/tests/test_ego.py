@@ -244,3 +244,42 @@ def test_motion_state_reads_the_live_body_not_the_perception_clock(kitchen_scene
     assert state["joints"] == {"lift": 0.4, "reach": 0.2} and state["gripper"]["holding"]
     runtime.link = Dead()
     assert runtime._motion_state()["stamp"] == 5.0, "an unreachable body leaves the belief as the answer"
+
+
+def test_motion_state_does_not_wait_for_a_perception_update_in_progress(kitchen_scene):
+    """An RGB-D update holds the belief's lock for seconds. A turn that waited for it would let
+    the world clock pass its deadline with the base still at its first set point ("turn did not
+    converge"); the motion loop reads the live body and the objects of the last finished update."""
+    import threading
+    import time
+
+    from steward.ego.runtime import EgoRuntime, RobotLink
+
+    runtime = EgoRuntime(RobotLink("http://127.0.0.1:1"), steward_bot().to_dict())
+
+    class Live:
+        @staticmethod
+        def sensors() -> dict:
+            return {"stamp": 9.0, "odometry": {"x": 1.0, "y": 2.0, "yaw": 0.5}, "joints": {"lift": 0.4},
+                    "gripper": {"state": "open", "holding": False}}
+
+    runtime.link = Live()
+    runtime._motion_state()  # a read while nothing holds the lock
+    held, done = threading.Event(), threading.Event()
+
+    def long_update():
+        with runtime._lock:
+            held.set()
+            done.wait(5.0)
+
+    worker = threading.Thread(target=long_update)
+    worker.start()
+    try:
+        assert held.wait(2.0)
+        t0 = time.monotonic()
+        state = runtime._motion_state()
+        assert time.monotonic() - t0 < 0.5, "the motion loop waited for the perception update"
+        assert state["stamp"] == 9.0 and state["odometry"]["yaw"] == 0.5
+    finally:
+        done.set()
+        worker.join()

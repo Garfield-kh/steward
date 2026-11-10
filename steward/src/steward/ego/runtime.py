@@ -323,6 +323,9 @@ class EgoRuntime:
                                       on_finish=self._skill_finished, on_release=self._released,
                                       on_begin=self._skill_begin, clock=self.link)
         self._view_scene: tuple[dict, int, float] | None = None  # (ES dict, version, stamp) for the view
+        # The belief part of the motion state, recorded under ``_lock`` at each read and around each
+        # perception update; :meth:`_motion_state` falls back on it while another thread holds the lock.
+        self._motion_belief: dict | None = None
         self.face_error: str | None = None  # why the latest camera image for faces could not be fetched
         self._face_thread: threading.Thread | None = None
         renderer = EgoViewRenderer()
@@ -379,20 +382,24 @@ class EgoRuntime:
             with self._lock:
                 if self._new_episode(frame):
                     self._restart()
+                self._keep_motion_belief()  # what a motion loop reads while this update runs
                 if not frames:
                     self.estimator.update_body(frame)
                 for rgbd in frames:
                     self.estimator.update_rgbd(rgbd, defer=self._handoff(rgbd, frames))
                     self._look_at_faces(rgbd)
                 self._publish_view_scene()
+                self._keep_motion_belief()
             return
         frame = {**frame, "cameras": [c for c in frame.get("cameras", []) if c["id"] in cameras],
                  "detections": [d for d in frame.get("detections", []) if d.get("camera") in cameras]}
         with self._lock:
             if self._new_episode(frame):
                 self._restart()
+            self._keep_motion_belief()  # what a motion loop reads while this update runs
             self.estimator.update(frame)
             self._publish_view_scene()
+            self._keep_motion_belief()
 
     def _cameras(self, frame: dict) -> list[str]:
         """The cameras to perceive with: those of the robot model (or ``RuntimeConfig.cameras``) that
@@ -617,6 +624,7 @@ class EgoRuntime:
         self._keyframe = {}
         self._pose_sample = None
         self._still_since = None
+        self._motion_belief = None
 
     def _loop(self) -> None:
         """Perceive every ``1 / perception_hz`` seconds of world time, from the time the runtime started;
@@ -679,12 +687,25 @@ class EgoRuntime:
         belief: with a real segmenter the next RGB-D frame can be seconds or tens of seconds
         away, and a motion loop that grades its progress on the perception clock either stalls
         or reads a frame rendered before it started and calls the turn failed. Objects stay the
-        estimate they are — the body only needs to know where it is."""
-        with self._lock:
-            est = self.estimator
-            entities = {t.id: {"p": t.pos.tolist()} for t in est.tracks.values()}
-            state = {"stamp": est.stamp, "odometry": dict(est.odometry), "joints": dict(est.joints),
-                     "gripper": dict(est.gripper), "grippers": dict(est.grippers), "entities": entities}
+        estimate they are — the body only needs to know where it is.
+
+        Nor may the loop wait for the belief's lock: an RGB-D update holds it for its whole
+        duration (seconds on a loaded host), the world clock goes on once the loop's hold lapses,
+        and a turn or drive that set its ramp before the wait finds its deadline passed with the
+        base still at the first set point. While another thread holds the lock, the objects are
+        those recorded when the perception update in progress began (everything changed before
+        it is in there) or at the last read, whichever came later."""
+        if self._lock.acquire(blocking=False):
+            try:
+                belief = self._keep_motion_belief()
+            finally:
+                self._lock.release()
+        else:
+            belief = self._motion_belief
+            if belief is None:  # nothing recorded yet: nothing to fall back on but waiting
+                with self._lock:
+                    belief = self._keep_motion_belief()
+        state = {key: dict(value) if isinstance(value, dict) else value for key, value in belief.items()}
         try:
             live = self.link.sensors()
         except Exception:  # noqa: BLE001 - the belief is still a usable answer when the body cannot be reached
@@ -693,8 +714,17 @@ class EgoRuntime:
             if live.get(key) is not None:
                 state[key] = live[key]
         if live.get("stamp") is not None and live["stamp"] < state["stamp"] - 1e-6:
-            state["stamp"] = est.stamp  # an episode reset race: prefer the belief's own clock
+            state["stamp"] = belief["stamp"]  # an episode reset race: prefer the belief's own clock
         return self.arm.virtualize(state)
+
+    def _keep_motion_belief(self) -> dict:
+        """Record (and return) the belief part of the motion state; the caller holds ``_lock``."""
+        est = self.estimator
+        self._motion_belief = {
+            "stamp": est.stamp, "odometry": dict(est.odometry), "joints": dict(est.joints),
+            "gripper": dict(est.gripper), "grippers": dict(est.grippers),
+            "entities": {t.id: {"p": t.pos.tolist()} for t in est.tracks.values()}}
+        return self._motion_belief
 
     def _mark_held(self, track_id: str) -> str:
         at = self.estimator.stamp

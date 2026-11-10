@@ -307,18 +307,20 @@ class EgoEstimator:
         self._joint_tree = (children, root_id)
         return self._joint_tree
 
-    def link_pose(self, link_id: str, joints: dict | None = None) -> dict:
+    def link_pose(self, link_id: str, joints: dict | None = None, odometry: dict | None = None) -> dict:
         """Pose of any link in the world frame, from joint encoders.
 
         ``joints`` overrides the estimator's own last-seen encoders: the Ego-State view asks for
-        the pose the arm is in *now*, which is a read, not a perception update."""
+        the pose the arm is in *now*, which is a read, not a perception update. ``odometry`` does
+        the same for where the base stands: a read of the body now needs both, or the arm is put
+        where it is now on a base where it stood at the last look."""
         children, root_id = self._tree()
         path: list[tuple[dict, str]] = []
         found = self._path_to(children, root_id, link_id, path, set())
         if not found:
             raise KeyError(f"robot model has no link {link_id!r} reachable from {root_id!r}")
         q = self.joints if joints is None else joints
-        pose = self.base_pose()
+        pose = self.base_pose(odometry)
         for joint, _ in path:
             pose = _apply_joint(pose, joint, q.get(joint["id"], 0.0))
         return pose
@@ -340,8 +342,8 @@ class EgoEstimator:
         """World pose of every camera the robot carries, keyed by sensor id."""
         return {camera: self.camera_pose(camera=camera) for camera in self.cameras}
 
-    def base_pose(self) -> dict:
-        o = self.odometry
+    def base_pose(self, odometry: dict | None = None) -> dict:
+        o = self.odometry if odometry is None else odometry
         return {"p": [o["x"], o["y"], 0.0], "q": quat_from_yaw(o["yaw"])}
 
     def camera_pose(self, odometry: dict | None = None, camera: str | None = None) -> dict:
@@ -412,15 +414,17 @@ class EgoEstimator:
         return next(link["id"] for link in self.robot_model["body"]["links"]
                     if any((a if isinstance(a, str) else a.get("value")) == "grasp-point" for a in link.get("affordances", [])))
 
-    def gripper_rotation(self, gripper_link: str | None = None, joints: dict | None = None) -> np.ndarray:
+    def gripper_rotation(self, gripper_link: str | None = None, joints: dict | None = None,
+                         odometry: dict | None = None) -> np.ndarray:
         """World rotation matrix of a gripper link, from the robot's own kinematics."""
-        return matrix_from_quat(self.link_pose(self._grasp_link(gripper_link), joints)["q"])
+        return matrix_from_quat(self.link_pose(self._grasp_link(gripper_link), joints, odometry)["q"])
 
-    def gripper_position(self, gripper_link: str | None = None, joints: dict | None = None) -> np.ndarray:
+    def gripper_position(self, gripper_link: str | None = None, joints: dict | None = None,
+                         odometry: dict | None = None) -> np.ndarray:
         """Pinch point of a gripper, from the robot's own kinematics."""
         tree = self.robot_model["body"]
         gripper_link = self._grasp_link(gripper_link)
-        pose = self.link_pose(gripper_link, joints)
+        pose = self.link_pose(gripper_link, joints, odometry)
         link = next(link for link in tree["links"] if link["id"] == gripper_link)
         for affordance in link.get("affordances", []):
             value = affordance.get("value") if isinstance(affordance, dict) else affordance
@@ -1498,7 +1502,7 @@ class EgoEstimator:
 
     # ---------------------------------------------------------------- holding
     def mark_held(self, track_id: str, since: float | None = None, gripper: str | None = None,
-                  at: list[float] | None = None) -> str:
+                  at: list[float] | None = None, body: dict | None = None) -> str:
         """Record the grasp, and carry its load with the arm, together with what lies in it.
 
         ``since`` is the body's clock at the moment the gripper closed: a frame rendered before
@@ -1510,6 +1514,10 @@ class EgoEstimator:
         arm that is actually holding it, and the other arm's state says nothing about it. ``at`` is
         the pinch point the gripper closed at -- without it the offset is measured against the
         encoders from *before* the approach, and the load hangs half a metre from the hand.
+        ``body`` (a sensor header: ``odometry`` and ``joints``) is the body at the grasp: the
+        gripper's pose -- its rotation, and its pinch point unless ``at`` is given -- is read there
+        rather than at the last perception update, which a slow segmenter leaves seconds behind,
+        from before the base docked and the arm reached down.
 
         A previous mark still standing when a new grasp is recorded cannot still be true (the
         gripper opened to take this load), and no frame may ever arrive to clear it when skills run
@@ -1520,8 +1528,14 @@ class EgoEstimator:
         :raises KeyError: no track is near the gripper."""
         if track_id != self.held_id:
             self._unmark_held(self.tracks.get(self.held_id))
+        # The body at the grasp, resolved first: the fallback search for the load and its offset
+        # both read the gripper there (the last perception update can be a drive old).
+        joints, odometry = (body or {}).get("joints"), (body or {}).get("odometry")
+        if joints is None or odometry is None:
+            joints = odometry = None
+        closed_at = self.gripper_position(gripper, joints, odometry) if at is None else np.asarray(at, dtype=float)
         if track_id not in self.tracks:
-            grip = self.gripper_position(gripper)
+            grip = closed_at
             near = min(self.tracks.values(), key=lambda t: float(np.linalg.norm(t.pos - grip)), default=None)
             if near is None or float(np.linalg.norm(near.pos - grip)) > HELD_FALLBACK_M:
                 raise KeyError(f"{track_id} is no longer in the ego state and nothing else is in the gripper")
@@ -1529,7 +1543,10 @@ class EgoEstimator:
         track = self.tracks[track_id]
         # Offsets are kept in the gripper's frame: what it holds turns with it (a lid taken by its
         # edge swings round the hand when the base turns), and so does what lies in that.
-        rot = self.gripper_rotation(gripper)
+        joints, odometry = (body or {}).get("joints"), (body or {}).get("odometry")
+        if joints is None or odometry is None:
+            joints = odometry = None
+        rot = self.gripper_rotation(gripper, joints, odometry)
         for other in self.tracks.values():
             if other is not track and not other.held and (self.support_of(other) is track or self._within(track, other)):
                 other.carried_offset = rot.T @ (other.pos - track.pos)
@@ -1537,7 +1554,6 @@ class EgoEstimator:
                 other.span = None
         self.held_since = max(self.stamp, float(since) if since is not None else self.stamp)
         self.held_gripper = gripper
-        closed_at = self.gripper_position(gripper) if at is None else np.asarray(at, dtype=float)
         track.held = True
         track.held_offset = rot.T @ (track.pos - closed_at)
         track.var = np.maximum(track.var, self.config.grasp_shift_m**2)

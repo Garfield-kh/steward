@@ -283,3 +283,27 @@ def test_motion_state_does_not_wait_for_a_perception_update_in_progress(kitchen_
     finally:
         done.set()
         worker.join()
+
+
+def test_a_grasp_is_measured_against_the_body_now_not_the_last_look():
+    """With a slow segmenter the last perception update is from before the base docked and the arm
+    reached down. A grasp offset measured against that pose left the load believed 0.7 m from the
+    hand, and every place then planned its height from there ("height 0.20 m is outside the lift
+    range"). Measured against the body the skill reads when it closes, the load is in the hand."""
+    from steward.ego.estimator import Track
+
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    est.stamp = 1.0
+    est.odometry = {"x": 0.0, "y": 0.0, "yaw": 0.0, "sigma": {"pos": 0.01, "yaw": 0.01}}
+    est.joints = {"lift": 1.1, "reach": 0.0}
+    now = {"stamp": 9.0, "odometry": {"x": 0.6, "y": -0.3, "yaw": 0.4, "sigma": {"pos": 0.01, "yaw": 0.01}},
+           "joints": {"lift": 0.8, "reach": 0.25}, "gripper": {"state": "closed", "holding": True}}
+    load = est.gripper_position(None, now["joints"], now["odometry"]) + np.array([0.0, 0.0, -0.02])
+    assert np.linalg.norm(load - est.gripper_position()) > 0.3, "the stale pose is far from the hand"
+    track = Track(id="e:7", category_counts={"bowl": 1.0}, pos=load.copy(), var=np.full(3, 1e-4), yaw=0.0,
+                  yaw_var=1e-4, size=np.array([0.15, 0.15, 0.06]), observations=3, first_seen=0.0, last_seen=1.0)
+    est.tracks[track.id] = track
+    est.mark_held(track.id, since=9.0, body=now)
+    est.update_body(now)
+    assert np.linalg.norm(est.tracks["e:7"].pos - load) < 1e-6
+    assert np.linalg.norm(est.held_position() - load) < 1e-6

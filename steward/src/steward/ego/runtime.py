@@ -727,13 +727,18 @@ class EgoRuntime:
         return self._motion_belief
 
     def _mark_held(self, track_id: str) -> str:
-        at = self.estimator.stamp
+        """Record the grasp the skill just felt, measured against the body as it is now: the last
+        perception update can be a slow segmentation old, from before the base docked and the arm
+        reached down, and an offset taken against it leaves the load believed half a metre from
+        the hand (every place then plans its height from there)."""
+        at, body = self.estimator.stamp, None
         try:
-            at = float(self.link.sensors().get("stamp", at))  # the body's clock, now
-        except Exception:  # noqa: BLE001 - the belief's own clock is a usable second best
-            pass
+            body = self.link.sensors()
+            at = float(body.get("stamp", at))  # the body's clock, now
+        except Exception:  # noqa: BLE001 - the belief's own clock and pose are a usable second best
+            body = None
         with self._lock:
-            return self.estimator.mark_held(track_id, at, gripper=self.arm.geometry.gripper)
+            return self.estimator.mark_held(track_id, at, gripper=self.arm.geometry.gripper, body=body)
 
     def _released(self, track_id: str, spot: list[float]) -> None:
         """A place knows where it let go; the belief is told, not left to infer it later."""

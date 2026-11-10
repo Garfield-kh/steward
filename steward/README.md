@@ -42,6 +42,40 @@ AgileX preserves its arm posture until docking succeeds. Placement checks the re
 
 Passing `--misnames-config ''` disables name mappings. A switch to `phase0-misnamed` without a mapping is rejected, and the running world and later episodes retain the previous phase.
 
+## Import a USD robot
+
+The optional `usd` extra uses MuJoCo 4.0's native OpenUSD decoder. Install it in a separate Python 3.12 environment to keep the regular simulation environment unchanged. From the repository root:
+
+```sh
+uv venv --python 3.12 steward/var/usd-env
+uv pip install --python steward/var/usd-env/bin/python -e './steward[usd]'
+steward/var/usd-env/bin/steward import-usd steward/assets/agilex/robot.usd --name agilex-usd \
+  --meters-per-unit 1 --orient-joints --fixed-base \
+  --bound-mass 0.001 --bound-inertia 0.000001 --inertia-from-bounds --drive-frequency 5
+steward/.venv/bin/steward world --scenario agilex-usd --phase phase0 \
+  --wca-port 7450 --robot-port 7460 --ego-api '' --world-harness '' --robot-harness ''
+```
+
+Open `http://127.0.0.1:7450/console`. Import creates a floor inspection scene and writes `template.json`, binary meshes and `report.json` under `var/steward/imports/<name>/`. Existing names are refused. Keep this directory at its original location: mesh references are absolute. Viewing the result also works with MuJoCo 3.17 and does not read the source USD. Source files are never edited.
+
+The example options address the supplied AgileX asset: its centimeter metadata describes meter-valued geometry, one base joint is reversed, and inertias are missing. Bounds, uniform-box inertia estimates and 5 Hz critically damped drives are explicit simulation approximations, recorded in the report. Omit these options for a correctly authored asset; inspect the report before relying on dynamics. Drives hold the imported rest pose at startup, rather than applying USD drive targets.
+
+The importer accepts one rigid robot tree with fixed, revolute and prismatic joints, meshes and basic solids, force position drives and scalar PhysX mimic constraints. Joint limits, pivots and explicit inertias survive conversion. Mesh collisions use MuJoCo convex hulls. Shader networks, textures and cameras are not transferred; missing MDL shaders are reported, while missing geometry dependencies abort import. Closed loops and unsupported dynamics are rejected. A generic import has no assigned task controller; named joints can be driven through the robot port's `/command` endpoint. The supplied dual-Piper model has a separate registered adapter, `agilex-usd`, described below.
+
+
+After importing the bundled [robot.usd](assets/agilex/robot.usd) as `agilex-usd`, run it in a task scene:
+
+```sh
+steward/.venv/bin/steward up --scenario cobot-table --body agilex-usd --phase phase0 \
+  --speed 1 --no-dispatch-task
+```
+
+Open `http://127.0.0.1:7400/console` and select **AgileX USD 双 Piper** in the body selector. It can also replace the robot in kitchen scenarios. `up` starts its Ego Runtime; navigation, pick and place use the same prediction receipts and skill API as the other bodies. The raw import inspection scene remains separate and unregistered.
+
+[The simulation calibration](config/agilex-usd.toml) locates the template and defines servo gains, lift home and simulated camera pitch. Paths are relative to that file; set `STEWARD_AGILEX_USD_CONFIG` to another profile when importing under a different data root. Missing or incompatible templates fail explicitly. The adapter preserves USD meshes, arm transforms, limits, inertias and finger coupling, adds grasp points and maps the mobile base to planar position control. Wheel joints are fixed. Both dual-Piper embodiments (`cobot-magic` and `agilex-usd`) start with joint1–joint6 of each arm at zero radians. Two simulated RGB-D views mount on `top_camera_link` and move with the lift; their calibration is not imported from USD. Phase 0 uses ideal attachment, not contact-based gripping. This supports simulation tasks, not real-hardware control or validated wheel dynamics.
+
+For the local asset integration test, run `STEWARD_TEST_AGILEX_USD=1 steward/.venv/bin/python -m pytest -q steward/tests/test_agilex.py`. It navigates, picks a bowl and places it elsewhere on the table through the Ego API, then checks the world position. The kinematics fixture contains source joint data with small box stand-ins; the integration test uses the actual imported meshes and is opt-in because it requires the import step above.
+
 ## Run with DeepSeek Harness
 
 ```sh

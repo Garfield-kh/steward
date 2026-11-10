@@ -69,6 +69,41 @@ def _wait_forever(stoppers: list, pump=None) -> None:
         stop()
 
 
+def cmd_import_usd(args) -> int:
+    """Import a robot and publish a standalone inspection scenario under the data root."""
+    from steward.assets.usd import UsdImportError, import_usd
+    from steward.assets.validator import _floor
+    from steward.scene.schema import Entity, SceneState
+
+    if not args.name or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for c in args.name):
+        raise SystemExit("import-usd: name must contain only letters, digits, hyphens and underscores")
+    root = Path(args.root).resolve()
+    paths = {kind: root / kind / f"{args.name}.json" for kind in ("scenes", "scenarios")}
+    if any(p.exists() for p in paths.values()):
+        raise SystemExit(f"import-usd: scenario {args.name!r} already exists; choose a new --name")
+    try:
+        report = import_usd(Path(args.source), root / "imports" / args.name,
+                            meters_per_unit=args.meters_per_unit, orient_joints=args.orient_joints,
+                            fixed_base=args.fixed_base, bound_mass=args.bound_mass, bound_inertia=args.bound_inertia,
+                            inertia_from_bounds=args.inertia_from_bounds, drive_frequency=args.drive_frequency)
+    except UsdImportError as exc:
+        raise SystemExit(f"import-usd: {exc}") from exc
+    robot = Entity.from_dict(json.loads(Path(report["template"]).read_text()))
+    robot.id = "w:robot-1"
+    robot.category.value = f"usd-import:{args.name}"
+    robot.asset = {"id": f"usd-import:{args.name}"}
+    scene = SceneState(mode="world", entities=[_floor(), robot]).to_dict()
+    height = report["sizeMeters"][2]
+    scenario = {"name": args.name, "scene": args.name, "robots": [robot.id], "task": "",
+                "phase": "phase0", "view": {"lookat": [0, 0, height / 2],
+                "distance": max(report["sizeMeters"]) * 2, "azimuth": 135, "elevation": -20}}
+    for kind, record in (("scenes", scene), ("scenarios", scenario)):
+        paths[kind].parent.mkdir(parents=True, exist_ok=True)
+        paths[kind].write_text(json.dumps(record, indent=2) + "\n")
+    print(json.dumps(report | {"scenario": args.name}, indent=2, ensure_ascii=False))
+    return 0
+
+
 def cmd_build_kitchen(args) -> int:
     from steward.authoring.service import AuthoringService, build_default_kitchen
 
@@ -960,6 +995,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="steward")
     parser.add_argument("--root", default=str(DEFAULT_ROOT), help="Steward data root (assets, scenes, runs)")
     sub = parser.add_subparsers(dest="cmd", required=True)
+    usd = sub.add_parser("import-usd", help="import a USD robot and create an inspection scenario")
+    usd.add_argument("source", help="USD file (.usd/.usda/.usdc/.usdz)")
+    usd.add_argument("--name", default="usd-robot", help="new asset/scenario name")
+    usd.add_argument("--meters-per-unit", type=float, help="override USD length-unit metadata")
+    usd.add_argument("--orient-joints", action="store_true", help="orient an anchored acyclic joint graph")
+    usd.add_argument("--fixed-base", action="store_true", help="remove top-level free joints")
+    usd.add_argument("--bound-mass", type=float, default=0.0, help="minimum body mass in kg; default: no repair")
+    usd.add_argument("--bound-inertia", type=float, default=0.0, help="minimum diagonal inertia in kg m^2; default: no repair")
+    usd.add_argument("--inertia-from-bounds", action="store_true", help="estimate missing inertias from uniform link bounding boxes")
+    usd.add_argument("--drive-frequency", type=float, help="replace source gains with critically damped position drives at this frequency (Hz)")
+    usd.set_defaults(fn=cmd_import_usd)
     sub.add_parser("build-kitchen").set_defaults(fn=cmd_build_kitchen)
     sub.add_parser("build-toy-assembly").set_defaults(fn=cmd_build_toy_assembly)
     sub.add_parser("build-screw-board").set_defaults(fn=cmd_build_screw_board)

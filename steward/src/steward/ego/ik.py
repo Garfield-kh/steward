@@ -48,7 +48,7 @@ class IkError(RuntimeError):
 
 
 class CobotIK:
-    """FK/IK for one Cobot Magic twin, on the robot's own kinematic model."""
+    """FK/IK for a dual Piper twin, using the robot's own transforms and declared pinch points."""
 
     def __init__(self, robot: dict | None = None, timestep: float = 0.002, self_clearance: float = 0.01) -> None:
         """``self_clearance``: the least distance :meth:`solve_body` keeps between an arm's links
@@ -58,7 +58,11 @@ class CobotIK:
         ent = dict(self.robot)
         ent["id"] = _ENT
         build = build_mjcf(SceneState(mode="world", entities=[_as_entity(ent)]), timestep=timestep)
-        self.model = mujoco.MjModel.from_xml_string(_with_pinch_sites(build.xml), build.assets or None)
+        self.tcp_offsets = {arm: next(a["value"]["tcp-offset"]["p"]
+                            for link in self.robot["body"]["links"] if link["id"] == f"{arm}_link6"
+                            for a in link["affordances"] if isinstance(a["value"], dict) and "tcp-offset" in a["value"])
+                            for arm in ARMS}
+        self.model = mujoco.MjModel.from_xml_string(_with_pinch_sites(build.xml, self.tcp_offsets), build.assets or None)
         self.data = mink.Configuration(self.model)
         # Asset initial coordinates include the chassis pose, torso and finger opening;
         # MuJoCo's qpos0 alone does not carry those values.
@@ -110,7 +114,8 @@ class CobotIK:
         # The torso sinks as the arm tips a held box past upright, swinging the upper arm into the
         # frame (measured: the twin's L_link2 stopped against it, the tip fell 3 cm short and the
         # box came down on the table): a whole-body solve keeps the arm clear of its own body.
-        body = self._collidable({f"{_ENT}/frame", f"{_ENT}/base"})
+        body = self._collidable({f'{_ENT}/{link["id"]}' for link in self.robot["body"]["links"]
+                                 if not link["id"].startswith(("L_", "R_"))})
         for arm in ARMS:
             links = self._collidable({f"{_ENT}/{arm}_link{k}" for k in range(2, _DOF_PER_ARM)})
             self._arms[arm]["avoid"] = mink.CollisionAvoidanceLimit(
@@ -456,8 +461,8 @@ def _check_len(values, n: int, what: str) -> None:
         raise ValueError(f"{what} must have {n} values, got {len(values)}")
 
 
-def _with_pinch_sites(xml: str) -> str:
-    """The compiled robot's MJCF with a site at each arm's pinch point, ``TCP_OFFSET`` out of link6."""
+def _with_pinch_sites(xml: str, offsets: dict) -> str:
+    """The compiled robot's MJCF with a site at each arm's declared pinch offset."""
     import xml.etree.ElementTree as ET
 
     root = ET.fromstring(xml)
@@ -465,7 +470,7 @@ def _with_pinch_sites(xml: str) -> str:
         body = next((b for b in root.iter("body") if b.get("name") == f"{_ENT}/{arm}_link6"), None)
         if body is None:
             raise KeyError(f"the robot model has no body {_ENT}/{arm}_link6")
-        ET.SubElement(body, "site", name=f"{_ENT}/{arm}_pinch", pos=" ".join(str(v) for v in TCP_OFFSET), size="0.005")
+        ET.SubElement(body, "site", name=f"{_ENT}/{arm}_pinch", pos=" ".join(str(v) for v in offsets[arm]), size="0.005")
     return ET.tostring(root, encoding="unicode")
 
 

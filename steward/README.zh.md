@@ -42,6 +42,40 @@ AgileX 在停靠成功前保持机械臂姿态。放置规划检查目标腕姿�
 
 传入 `--misnames-config ''` 会禁用名称映射。缺少映射时切换到 `phase0-misnamed` 会被拒绝，当前世界和后续 Episode 保留原感知级别。
 
+## 导入 USD 机器人
+
+可选的 `usd` extra 使用 MuJoCo 4.0 的原生 OpenUSD 解码器。在独立的 Python 3.12 环境中安装它，以保留常规仿真环境。从仓库根目录运行：
+
+```sh
+uv venv --python 3.12 steward/var/usd-env
+uv pip install --python steward/var/usd-env/bin/python -e './steward[usd]'
+steward/var/usd-env/bin/steward import-usd steward/assets/agilex/robot.usd --name agilex-usd \
+  --meters-per-unit 1 --orient-joints --fixed-base \
+  --bound-mass 0.001 --bound-inertia 0.000001 --inertia-from-bounds --drive-frequency 5
+steward/.venv/bin/steward world --scenario agilex-usd --phase phase0 \
+  --wca-port 7450 --robot-port 7460 --ego-api '' --world-harness '' --robot-harness ''
+```
+
+打开 `http://127.0.0.1:7450/console`。导入会创建带地面的检查场景，并将 `template.json`、二进制网格和 `report.json` 写入 `var/steward/imports/<name>/`。已有名称会被拒绝。网格引用使用绝对路径，因此应保留该目录的位置。查看结果也支持 MuJoCo 3.17，不再读取源 USD。源文件始终不会被修改。
+
+示例选项用于提供的 AgileX 资产：文件将米制几何数值标记为厘米，一个底盘关节方向相反，且缺少惯量。质量和惯量下限、均匀盒体惯量估算以及 5 Hz 临界阻尼驱动均为显式仿真近似，会记入报告。正确编写的资产可省略这些选项；依赖动力学结果前应检查报告。驱动在启动时保持导入的静止姿态，不执行 USD 中的驱动目标。
+
+导入器支持一棵刚体机器人树，包括固定、旋转和平移关节、网格与基本几何体、力式位置驱动以及标量 PhysX mimic 联动约束。转换保留关节限位、枢轴和显式惯量。网格碰撞使用 MuJoCo 凸包。着色网络、贴图和相机不会转移；缺失的 MDL 着色器会记入报告，缺失的几何依赖则会中止导入。闭环和不支持的动力学会被拒绝。通用导入不会自动分配任务控制器；可通过机器人端口的 `/command` 接口按名称驱动关节。提供的双 Piper 模型另有已注册的适配器 `agilex-usd`，使用方式如下。
+
+
+将仓库附带的 [robot.usd](assets/agilex/robot.usd) 以 `agilex-usd` 名称导入后，可在任务场景中启动：
+
+```sh
+steward/.venv/bin/steward up --scenario cobot-table --body agilex-usd --phase phase0 \
+  --speed 1 --no-dispatch-task
+```
+
+打开 `http://127.0.0.1:7400/console`，在本体选择器中选择 **AgileX USD 双 Piper**。也可用它替换厨房场景中的机器人。`up` 会启动其 Ego Runtime；导航、抓取和放置使用与其他本体相同的预测回执和技能 API。原始导入检查场景仍独立保留，不注册为可执行任务的本体。
+
+[仿真标定配置](config/agilex-usd.toml) 指定模板位置、伺服增益、升降初始位置及仿真相机俯角。路径相对此文件解析；导入到其他数据根目录时，可用 `STEWARD_AGILEX_USD_CONFIG` 指定另一份配置。模板缺失或不兼容会明确报错。适配器保留 USD 网格、手臂变换、关节限位、惯量和手指联动，添加抓取点，并将移动底盘映射为平面位置控制。轮子关节固定。两种双 Piper 本体（`cobot-magic` 和 `agilex-usd`）的左右臂 joint1～joint6 初始角度均为 0 弧度。两个仿真 RGB-D 视角安装在 `top_camera_link` 上，随升降运动；其标定不来自 USD。Phase 0 使用理想附着，不依赖夹爪接触抓取。此功能支持仿真任务，不提供真机控制或经过验证的轮式动力学。
+
+本地资产集成测试命令为 `STEWARD_TEST_AGILEX_USD=1 steward/.venv/bin/python -m pytest -q steward/tests/test_agilex.py`。它通过 Ego API 导航、抓起碗并放到桌面另一处，最后核对世界坐标。运动学测试夹具包含源关节数据，以小盒体替代网格；集成测试使用导入的真实网格，因为需要先执行上述导入步骤，所以需显式启用。
+
 ## 与 DeepSeek Harness 一起运行
 
 ```sh

@@ -167,9 +167,25 @@ class Esim:
         tree = robot_model["body"]
         base = next(link for link in tree["links"] if link["id"] == "base")
         base_geom = base["geometry"]["collision"][0]
-        bx, by, bz = base_geom["size"]
-        self.half_x, self.half_y = bx / 2, by / 2
-        self.ground_clearance = base_geom["pose"]["p"][2] - bz / 2
+        if base_geom["kind"] == "primitive" and base_geom["shape"] == "box":
+            bx, by, bz = base_geom["size"]
+            self.half_x, self.half_y = bx / 2, by / 2
+            self.ground_clearance = base_geom["pose"]["p"][2] - bz / 2
+        else:
+            from steward.scene.mjcf import build_mjcf
+            from steward.scene.extent import entity_obb
+            import mujoco
+
+            entity = Entity.from_dict(robot_model)
+            entity.pose.value = {"p": [0, 0, 0], "q": [1, 0, 0, 0]}
+            build = build_mjcf(SceneState(mode="world", entities=[entity]))
+            model = build.compile()
+            data = mujoco.MjData(model)
+            build.apply_initial(model, data)
+            bounds = entity_obb(model, data, build.names[entity.id], ["base"])
+            self.half_x = abs(bounds.center[0]) + bounds.size[0] / 2
+            self.half_y = abs(bounds.center[1]) + bounds.size[1] / 2
+            self.ground_clearance = bounds.center[2] - bounds.size[2] / 2
         self.radius = math.hypot(self.half_x, self.half_y)
         cfg = self.config
         self.arm = arm or slide_arm(robot_model, (cfg.reach_min, cfg.reach_max), (cfg.lift_min, cfg.lift_max),

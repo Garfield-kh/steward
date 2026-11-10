@@ -1,0 +1,15 @@
+# Runtime calibration for the imported split_aloha_mid_360_with_piper robot.
+# Paths are relative to this file; STEWARD_AGILEX_USD_CONFIG selects another profile.
+template = "../var/steward/imports/agilex-usd/template.json"
+lift_home = -0.45
+arm_kp = 1500.0
+arm_damping = 60.0
+arm_effort = 100.0
+lift_kp = 30000.0
+lift_damping = 1800.0
+lift_effort = 5000.0
+finger_kp = 300.0
+finger_damping = 5.0
+# Simulated RGB-D rig on the USD top-camera link; not a physical calibration.
+survey_pitch_deg = 30.0
+work_pitch_deg = 45.0

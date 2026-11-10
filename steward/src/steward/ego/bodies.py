@@ -22,7 +22,7 @@ def robot_model(body: str) -> dict:
 
 def body_arm(body: str, model: dict) -> Arm | None:
     """The body's planar arm; None for the kitchen robot, whose own joints are the planar arm."""
-    if body == "cobot-magic":
+    if body in ("cobot-magic", "agilex-usd"):
         from steward.ego.cobot_arm import PiperArm, PiperArmConfig
 
         # Match MotionConfig working tip so deploy_working and skills land on the same hole-free seed.
@@ -94,9 +94,8 @@ def _cobot_envelope(arm: Arm, retract_reach: float) -> dict[str, float]:
 def runtime_config(body: str, base: RuntimeConfig | None = None) -> RuntimeConfig:
     """``base`` (default settings) with the body's planner and motion settings."""
     cfg = base or RuntimeConfig()
-    if body != "cobot-magic":
+    if body not in ("cobot-magic", "agilex-usd"):
         return cfg
-    from steward.assets.cobot import HOME, LIFT_HOME, cobot_magic
     from steward.ego.cobot_arm import PiperArm
 
     # The TRACER base is servoed at 0.5 m/s and 1 rad/s (assets.cobot.ROOT_ACTUATOR): commanded faster,
@@ -109,8 +108,8 @@ def runtime_config(body: str, base: RuntimeConfig | None = None) -> RuntimeConfi
     # Under the USD mounts, tool-down at stow height (0.60 m) only reaches from about 0.18 m out:
     # retract_reach 0.15 left every drawer open stuck when drawing the arm back.
     retract_reach = 0.28
-    arm = PiperArm(cobot_magic().to_dict())
-    arm.virtualize({"joints": {"lift": LIFT_HOME, **dict(zip(arm.names, HOME, strict=True))},
+    arm = PiperArm(robot_model(body))
+    arm.virtualize({"joints": dict(arm.initial),
                     "odometry": {"x": 0.0, "y": 0.0, "yaw": 0.0}})
     floors = _cobot_envelope(arm, retract_reach)
     motion = dataclasses.replace(cfg.motion, linear_speed=0.45, angular_speed=0.9, look_angular_speed=0.6,

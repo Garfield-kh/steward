@@ -24,6 +24,8 @@ open http://127.0.0.1:7400/console   # 浏览器控制台：斜视主视图、�
 
 The robot has two head RGB-D cameras: `head_camera` looks ahead; the short-focal-length `wide_camera` sees the nearby worktop and gripper. Both contribute to perception; see [steward.md 13.8](../steward.md#138-机器人本体的双相机).
 
+Passing `--misnames-config ''` disables name mappings. A switch to `phase0-misnamed` without a mapping is rejected, and the running world and later episodes retain the previous phase.
+
 ## Run with DeepSeek Harness
 
 ```sh

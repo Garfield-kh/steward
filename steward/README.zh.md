@@ -24,6 +24,8 @@ open http://127.0.0.1:7400/console   # 浏览器控制台：斜视主视图、�
 
 机器人头部有两台 RGB-D 相机：`head_camera` 看前方，`wide_camera` 是短焦广角相机，看身前台面与夹爪；两台都进入感知，见 [steward.md 13.8](../steward.md#138-机器人本体的双相机)。
 
+传入 `--misnames-config ''` 会禁用名称映射。缺少映射时切换到 `phase0-misnamed` 会被拒绝，当前世界和后续 Episode 保留原感知级别。
+
 ## 与 DeepSeek Harness 一起运行
 
 ```sh

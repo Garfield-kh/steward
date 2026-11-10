@@ -372,3 +372,25 @@ def test_a_load_is_put_down_on_a_support_smaller_than_the_edge_margin(kitchen_sc
     assert receipt["feasible"], receipt["issues"]
     spot = np.asarray(receipt["plan"]["spot"])
     assert np.linalg.norm(spot - plate.pos[:2]) < 0.03
+
+
+def test_a_load_let_go_is_believed_at_the_height_the_hand_lowered_it_to():
+    """The last frame before a place saw the load at the carry height; the release told the
+    belief its new x and y but kept that height, so a cup put on the table was believed 0.3 m
+    above it, and the next view of it there started a second cup."""
+    from steward.ego.estimator import Track
+
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    est.stamp = 1.0
+    est.odometry = {"x": 0.0, "y": 0.0, "yaw": 0.0, "sigma": {"pos": 0.01, "yaw": 0.01}}
+    est.joints = {"lift": 1.1, "reach": 0.1}
+    carried = est.gripper_position()
+    est.tracks["e:7"] = Track(id="e:7", category_counts={"cup": 1.0}, pos=carried.copy(), var=np.full(3, 1e-4),
+                              yaw=0.0, yaw_var=1e-4, size=np.array([0.08, 0.08, 0.1]), observations=3,
+                              first_seen=0.0, last_seen=1.0)
+    est.mark_held("e:7", since=1.0)
+    now = {"stamp": 6.0, "odometry": {"x": 0.3, "y": 0.0, "yaw": 0.0}, "joints": {"lift": 0.8, "reach": 0.3}}
+    lowered = est.gripper_position(None, now["joints"], now["odometry"])
+    assert est.release_at("e:7", [float(lowered[0]), float(lowered[1])], body=now)
+    assert abs(est.tracks["e:7"].pos[2] - lowered[2]) < 1e-6 and lowered[2] < carried[2] - 0.25
+    assert est.held_id is None and not est.tracks["e:7"].held

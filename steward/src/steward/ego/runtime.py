@@ -756,9 +756,14 @@ class EgoRuntime:
             return self.estimator.mark_held(track_id, at, gripper=self.arm.geometry.gripper, body=body)
 
     def _released(self, track_id: str, spot: list[float]) -> None:
-        """A place knows where it let go; the belief is told, not left to infer it later."""
+        """A place knows where it let go; the belief is told, not left to infer it later -- at the
+        height the hand is at now, not the carry height the last perception update saw."""
+        try:
+            body = self.link.sensors()
+        except Exception:  # noqa: BLE001 - the last estimated height is a usable second best
+            body = None
         with self._lock:
-            self.estimator.release_at(track_id, spot)
+            self.estimator.release_at(track_id, spot, body=body)
 
     def _shift_track(self, track_id: str, delta: list[float]) -> None:
         with self._lock:

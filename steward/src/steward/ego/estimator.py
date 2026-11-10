@@ -1754,18 +1754,28 @@ class EgoEstimator:
         self.version += 1
         return True
 
-    def release_at(self, track_id: str, spot: list[float]) -> bool:
+    def release_at(self, track_id: str, spot: list[float], body: dict | None = None) -> bool:
         """Record where a placed object was actually let go.
 
         While the gripper holds something the track follows the gripper, and the last frame the
         ego saw it holding can precede the release by a whole perception period — long enough
         for the arm to extend and the base to back away. Without this the object stays believed
         where it was still held, often half a metre from where it now stands, and the next pick
-        of it aims at the pose the robot had back then."""
+        of it aims at the pose the robot had back then.
+
+        The same holds for its height: the last frame saw it carried at the carry height, a few
+        tenths of a metre above where the arm then lowered it. With ``body`` (the sensor header
+        at the release) the height is the hand's there; without it, it stays the last estimate.
+        Left at the carry height, the object put down on a table is believed floating above it,
+        and the next view of it there starts a second track."""
         track = self.tracks.get(track_id)
         if track is None:
             return False
-        track.pos = np.array([float(spot[0]), float(spot[1]), float(track.pos[2])])
+        z = float(track.pos[2])
+        if body and body.get("joints") is not None and body.get("odometry") is not None \
+                and track.held and self.held_id == track_id and track.held_offset is not None:
+            z = float(self.held_position(body["joints"], body["odometry"])[2])
+        track.pos = np.array([float(spot[0]), float(spot[1]), z])
         track.var = np.maximum(track.var, 0.02**2)
         track.voxels = None
         track.settled = False  # it drops the last few millimetres when the grip opens

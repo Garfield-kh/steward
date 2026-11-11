@@ -18,23 +18,25 @@ import sys
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
-from steward.ego.perception import (box_of, decode_rgbd, face_colour_stats, match_face, resample_face, segments, top_face,
+from steward.ego.perception import (PerceptionConfig, box_of, decimated, decode_rgbd, face_colour_stats, match_face, resample_face, segments,
+                                    top_face,
                                     top_face_array,
                                     world_up_face)
 from steward.ego.kinematics import gripper_pose
 from steward.ego.arm import Arm
 from steward.ego.esim import Esim, EsimConfig
-from steward.ego.estimator import SELF_ID, EgoEstimator
+from steward.ego.estimator import SELF_ID, EgoEstimator, _CONTENT
 from steward.ego import reflection
 from steward.ego.reflection import ReflectionConfig
 from steward.ego.roles import RoleConfig, assign_roles
-from steward.ego.segmenter import Segmenter, SegmenterError
+from steward.ego.segmenter import DepthClusters, Segmenter, SegmenterError
 from steward.ego.skills import MotionConfig, SkillExecutor, SkillFailed
 from steward.ego.view import EgoViewRenderer
 from steward.math3d import matrix_from_quat, pose_compose, pose_inverse, quat_rotate, wrap_angle, yaw_from_quat
@@ -84,6 +86,19 @@ class RuntimeConfig:
     # the gripper opened, closed, took or let go of something.
     keyframe_arm_m: float = 0.05
     hold_renew_s: float = 0.5  # below the world's hold lease (HOLD_LEASE_S)
+    perception_rows_per_degree: float = 8.0
+    """Most image rows per degree of a camera's vertical field of view in an RGB-D frame that is
+    segmented and fused; a finer frame is reduced by the smallest whole factor that fits
+    (:func:`steward.ego.perception.decimated`). The wide camera's 360 rows over 100 degrees pass
+    unchanged and the head camera's 1920 rows over 60 degrees become 480. The head camera's full
+    frame is for reading a face up close (:meth:`EgoRuntime.inspect`) and for the segmenter's
+    enlarged crops, which both keep it whole; segmenting and fusing every one of its five million
+    pixels takes some twenty seconds a frame. The rows left over are not thrown away: each depth
+    of the reduced frame is the mean of a block of them, with a quarter of the noise at four rows
+    to one."""
+    depth_join: float = 0.02
+    """Greatest difference in depth, as a share of the depth, between the pixels of a block that
+    are averaged into one depth of the reduced frame; farther apart, they are two surfaces."""
     # Cameras perception uses (sensor ids of the robot model); None: every camera the model has.
     # A frame from each is fused every perception period, so each camera adds its rendering (and,
     # with robot-side segmentation, its segmentation requests) to the period's cost.
@@ -295,7 +310,8 @@ class EgoRuntime:
         self._pose_sample: tuple[float, float, float] | None = None
         self._still_since: float | None = None
         self._missing_cameras: frozenset[str] = frozenset()
-        self.segmentation = {"frames": 0, "cached": 0, "failures": 0, "lastSeconds": None, "lastError": None}
+        self.segmentation = {"frames": 0, "cached": 0, "skipped": 0, "failures": 0, "lastSeconds": None,
+                             "lastError": None}
         self.esim = Esim(robot_model, self.config.esim, arm)
         self.arm = self.esim.arm
         self.out_dir = out_dir
@@ -324,6 +340,10 @@ class EgoRuntime:
                                       shift=self._shift_track, on_error=lambda msg: self.alert(msg, "skill"),
                                       on_finish=self._skill_finished, on_release=self._released,
                                       on_begin=self._skill_begin, clock=self.link,
+                                      closed_drawers=self._closed_drawer_ids, drawer_plan=self._drawer_plan,
+                                      pin=self._pin_track, furniture=self._furniture_id,
+                                      contents=self._content_ids, content_positions=self._content_positions,
+                                      resettle=self._resettle_contents,
                                       home_empty=lambda tick: self.arm.home_empty(self.link.command, tick))
         self._view_scene: tuple[dict, int, float] | None = None  # (ES dict, version, stamp) for the view
         # The belief part of the motion state, recorded under ``_lock`` at each read and around each
@@ -377,20 +397,23 @@ class EgoRuntime:
         cameras = self._cameras(frame)
         if mode in ("rgbd", "rgbd-segmenter"):
             due = [c for c in cameras if mode == "rgbd" or self._keyframe_due(frame, c)]
-            frames = []
-            for camera in due:
-                rgbd = decode_rgbd(self.link.rgbd(camera))
-                if rgbd["mask"] is not None or self._segment(rgbd):
-                    frames.append(rgbd)
+            whole = [decode_rgbd(self.link.rgbd(camera)) for camera in due]
+            if mode == "rgbd-segmenter":
+                whole = [rgbd for rgbd in whole if not self._idle_near_frame(rgbd)]
+            pairs = [(decimated(rgbd, self._perception_rows(rgbd), self.config.depth_join), rgbd) for rgbd in whole]
+            unmasked = [pair for pair in pairs if pair[0]["mask"] is None]
+            if unmasked and not self._segment(unmasked):
+                pairs = [pair for pair in pairs if pair[0]["mask"] is not None]
+            frames = [rgbd for rgbd, _whole in pairs]
             with self._lock:
                 if self._new_episode(frame):
                     self._restart()
                 self._keep_motion_belief()  # what a motion loop reads while this update runs
                 if not frames:
                     self.estimator.update_body(frame)
-                for rgbd in frames:
+                for rgbd, full in pairs:
                     self.estimator.update_rgbd(rgbd, defer=self._handoff(rgbd, frames))
-                    self._look_at_faces(rgbd)
+                    self._look_at_faces(full)
                 self._publish_view_scene()
                 self._keep_motion_belief()
             return
@@ -454,10 +477,18 @@ class EgoRuntime:
         if elapsed < 0 or elapsed >= cfg.keyframe_max_s:
             return True
         moved = math.hypot(odo["x"] - was["x"], odo["y"] - was["y"]) >= cfg.keyframe_move_m
-        turned = abs(wrap_angle(odo["yaw"] - was["yaw"])) >= cfg.keyframe_turn_rad
         handled = camera == self.near_camera and self._arm_moved(last, frame)
+        # A closed look dwells within a degree of a frame taken while the base was still
+        # moving. That stop is its own image. A look that goes on to open drawers keeps the
+        # coarser stop: those drawers are approached from the estimate the turn already made.
+        closed_look = self.executor._look and not self.executor.config.inspect_closed_drawers
+        yaw_eps = 0.005 if closed_look else 0.02
+        # The same closed look samples the turn every 0.04 rad. The coarser step is the one
+        # a drawer visit keeps, so that approach stays on the frames it already measured.
+        turn_rad = 0.04 if closed_look else cfg.keyframe_turn_rad
+        turned = abs(wrap_angle(odo["yaw"] - was["yaw"])) >= turn_rad
         changed = math.hypot(odo["x"] - was["x"], odo["y"] - was["y"]) >= 0.02 \
-            or abs(wrap_angle(odo["yaw"] - was["yaw"])) >= 0.02
+            or abs(wrap_angle(odo["yaw"] - was["yaw"])) >= yaw_eps
         settled = self._still_since is not None and float(frame["stamp"]) - self._still_since >= cfg.keyframe_still_s \
             and changed
         return elapsed >= cfg.keyframe_min_s and (moved or turned or handled or settled)
@@ -498,33 +529,113 @@ class EgoRuntime:
                        for is_near, pose, intrinsics in views if is_near == near_region)
         return defer
 
-    def _segment(self, rgbd: dict) -> bool:
-        """Fill ``rgbd["mask"]`` and ``rgbd["labels"]`` from the robot's segmenter; False (and an
-        operator alert on the first failure in a row) when the frame could not be segmented."""
-        header = rgbd["header"]
-        self._keyframe[rgbd["camera"]] = header
+    def _perception_rows(self, rgbd: dict) -> int:
+        """Most image rows ``rgbd`` is segmented and fused at
+        (:attr:`RuntimeConfig.perception_rows_per_degree`)."""
+        return max(1, math.ceil(self.config.perception_rows_per_degree * rgbd["fovy"]))
+
+    def _idle_near_frame(self, rgbd: dict) -> bool:
+        """Whether ``rgbd`` is a frame of the near camera with nothing in the range that camera is
+        in charge of: fewer pixels than a region needs lie nearer than ``near_range_m`` once the
+        floor and the robot's own links are left out. Such a frame is not segmented (it is counted
+        as ``skipped``); what it shows farther away is the other cameras' to measure, and they
+        see it with several times the pixels."""
+        if rgbd["camera"] != self.near_camera:
+            return False
+        limits = PerceptionConfig()
+        _ys, _xs, points, on_body = self._seen_points(rgbd, self.config.near_range_m)
+        with self._lock:
+            cam = np.asarray(self.estimator.camera_pose(rgbd["header"]["odometry"], rgbd["camera"])["p"], float)
+        near = ~on_body & (points[:, 2] > limits.floor_cut) & (np.linalg.norm(points - cam, axis=1) < self.config.near_range_m)
+        if int(near.sum()) >= limits.min_points:
+            return False
+        self._keyframe[rgbd["camera"]] = rgbd["header"]
+        self.segmentation["skipped"] += 1
+        return True
+
+    def _seen_points(self, rgbd: dict, max_depth: float | None = None,
+                     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """The pixels of ``rgbd`` with a depth (under ``max_depth`` when given) as map-frame points.
+
+        :returns: ``(ys, xs, points, on_body)``: pixel rows and columns, the N×3 points, and which
+            of them lie on the robot's own links as the frame's header reports the body."""
+        depth = rgbd["depth"]
+        valid = np.isfinite(depth) & (depth > 0.05)
+        if max_depth is not None:
+            valid &= depth < max_depth
+        ys, xs = np.nonzero(valid)
+        h, w = depth.shape
+        f = (h / 2.0) / math.tan(math.radians(rgbd["fovy"]) / 2.0)
+        d = depth[ys, xs].astype(np.float64)
+        local = np.stack([d, -(xs - (w - 1) / 2.0) * d / f, -(ys - (h - 1) / 2.0) * d / f], axis=1)
+        with self._lock:
+            cam = self.estimator.camera_pose(rgbd["header"]["odometry"], rgbd["camera"])
+            points = local @ matrix_from_quat(cam["q"]).T + np.asarray(cam["p"], float)
+            on_body = self.estimator.on_body_at(points, rgbd["header"])
+        return ys, xs, points, on_body
+
+    def _depth_without_body(self, rgbd: dict) -> np.ndarray:
+        """The depth of ``rgbd`` with the pixels on the robot's own links set to 0, for the
+        geometric fill: depth clustering, unlike a world mask, cannot tell the arm from an object
+        standing on the table under it. Only pixels within the body's reach of the camera are tested."""
+        depth = np.array(rgbd["depth"], dtype=np.float32, copy=True)
+        with self._lock:
+            reach = self.estimator.body_reach(self.estimator.camera_pose(camera=rgbd["camera"])["p"])
+        ys, xs, _points, on_body = self._seen_points(rgbd, reach)
+        depth[ys[on_body], xs[on_body]] = 0.0
+        return depth
+
+    def _depth_clusters(self, rgbd: dict) -> tuple[np.ndarray, np.ndarray, DepthClusters]:
+        """For one frame: its depth without the robot's body, the world's up direction in its
+        camera frame, and the segmenter's depth clusters of it (:meth:`Segmenter.clusters`)."""
+        with self._lock:
+            cam = self.estimator.camera_pose(rgbd["header"]["odometry"], rgbd["camera"])
+        up_cam = matrix_from_quat(cam["q"]).T @ np.array([0.0, 0.0, 1.0])
+        depth = self._depth_without_body(rgbd)
+        return depth, up_cam, self.segmenter.clusters(depth, rgbd["fovy"], up_cam)
+
+    def _segment(self, pairs: list[tuple[dict, dict]]) -> bool:
+        """Fill ``mask`` and ``labels`` of the frames of one instant from the robot's segmenter.
+
+        :param pairs: ``(frame, whole)`` per camera: the frame perception fuses and the frame as
+            the camera took it, from which the segmenter enlarges its crops.
+        :returns: False (and an operator alert on the first failure in a row) when the frames
+            could not be segmented; none of them is filled then."""
+        for rgbd, _whole in pairs:
+            self._keyframe[rgbd["camera"]] = rgbd["header"]
         stats = self.segmentation
         if self.segmenter is None:
             error = "this phase level sends no instance masks and the robot has no segmenter (steward ego --segmentation-config)"
         else:
             try:
-                with self._holding("perception"):
-                    result = self.segmenter.segment(rgbd["rgb"])
-                with self._lock:
-                    cam = self.estimator.camera_pose(header["odometry"], rgbd["camera"])
-                up_cam = matrix_from_quat(cam["q"]).T @ np.array([0.0, 0.0, 1.0])
-                result = self.segmenter.fill(result, rgbd["depth"], rgbd["fovy"], up_cam)
+                # What the depth alone shows is worked out while the service is asked about the
+                # colours: the wait for its answer is otherwise idle, and longer than this work.
+                with ThreadPoolExecutor(max_workers=len(pairs), thread_name_prefix="depth") as pool:
+                    ahead = [pool.submit(self._depth_clusters, rgbd) for rgbd, _whole in pairs]
+                    results = self.segmenter.segment_frames(
+                        [(rgbd["rgb"], None if whole is rgbd else whole["rgb"]) for rgbd, whole in pairs])
+                    views = [future.result() for future in ahead]
+                zoomed = self.segmenter.zoom_frames(
+                    [(result, rgbd["rgb"], depth, rgbd["fovy"], up_cam, None if whole is rgbd else whole["rgb"])
+                     for (rgbd, whole), result, (depth, up_cam, _clusters) in zip(pairs, results, views)],
+                    [clusters for _depth, _up_cam, clusters in views])
+                for (rgbd, _whole), result, (depth, up_cam, clusters) in zip(pairs, zoomed, views):
+                    result = self.segmenter.fill(result, depth, rgbd["fovy"], up_cam, clusters)
+                    result = self.segmenter.peel(result, rgbd["rgb"], depth, rgbd["fovy"])
+                    rgbd["mask"], rgbd["labels"] = result.mask, result.labels
             except SegmenterError as exc:
                 error = str(exc)
+                for rgbd, _whole in pairs:
+                    rgbd["mask"] = None
             else:
-                rgbd["mask"], rgbd["labels"] = result.mask, result.labels
-                stats["frames"] += 1
-                stats["cached"] += int(result.cached)
-                if not result.cached:
-                    stats["lastSeconds"] = round(result.seconds, 2)
+                stats["frames"] += len(results)
+                stats["cached"] += sum(result.cached for result in results)
+                asked = [result.seconds for result in results if not result.cached]
+                if asked:
+                    stats["lastSeconds"] = round(max(asked), 2)
                 stats["lastError"] = None
                 return True
-        stats["failures"] += 1
+        stats["failures"] += len(pairs)
         if stats["lastError"] is None:
             self.alert(f"图像分割失败，本帧只更新机器人自身状态：{error}", "runtime")
         stats["lastError"] = error
@@ -646,7 +757,11 @@ class EgoRuntime:
                 time.sleep(period)
                 continue
             try:
-                self._poll_once()
+                # The whole update runs under the hold, not only the remote request: a fill, peel
+                # or fusion longer than the lease would let the world step mid-update, and the
+                # frames a look samples would then depend on this machine's speed.
+                with self._holding("perception"):
+                    self._poll_once()
                 k += 1
                 if k % telemetry_every == 0:
                     self.link.telemetry(self._telemetry_scene())
@@ -756,7 +871,7 @@ class EgoRuntime:
         est = self.estimator
         self._motion_belief = {
             "generation": self._generation, "episode": self._episode, "stamp": est.stamp, "odometry": dict(est.odometry), "joints": dict(est.joints),
-            "gripper": dict(est.gripper), "grippers": dict(est.grippers),
+            "gripper": dict(est.gripper), "grippers": dict(est.grippers), "posed": est.posed,
             "entities": {t.id: {"p": t.pos.tolist()} for t in est.tracks.values()}}
         return self._motion_belief
 
@@ -810,6 +925,49 @@ class EgoRuntime:
     def _shift_track(self, track_id: str, delta: list[float]) -> None:
         with self._lock:
             self.estimator.shift(track_id, delta)
+
+    def _pin_track(self, track_id: str, pinned: bool) -> None:
+        """Keep a track's box still while a drawer in it is opened and closed.
+
+        A drawer keeps the name ``drawer`` while it is pinned, so a view of the open drawer
+        cannot rename it and make the close refuse. Furniture is only held still: its name stays."""
+        with self._lock:
+            track = self.estimator.tracks.get(track_id)
+            if track is None:
+                return
+            track.pinned = pinned
+            if pinned and track.category == "drawer":
+                track.label = "drawer"
+
+    def _furniture_id(self, drawer_id: str) -> str | None:
+        """The floor-standing piece whose footprint holds ``drawer_id``, if one is known."""
+        with self._lock:
+            drawer = self.estimator.tracks.get(drawer_id)
+            if drawer is None:
+                return None
+            host = self.estimator._furniture_of(drawer)
+            return None if host is None else host.id
+
+    def _content_ids(self, drawer_id: str) -> list[str]:
+        """Small tracks on a drawer's floor, held still while the robot looks along the drawer."""
+        with self._lock:
+            drawer = self.estimator.tracks.get(drawer_id)
+            if drawer is None:
+                return []
+            # Only the bear, pistol and bottles. A bowl born on the first side step
+            # is not held: pinning it froze a wrong name onto the pistol.
+            return [tid for tid in self.estimator._near_drawer(drawer)
+                    if self.estimator.tracks[tid].category in _CONTENT]
+
+    def _content_positions(self, drawer_id: str) -> dict[str, list[float]]:
+        """Positions of those tracks just before the drawer is pushed back."""
+        with self._lock:
+            return self.estimator.content_positions(drawer_id)
+
+    def _resettle_contents(self, drawer_id: str, delta: list[float], before: dict[str, list[float]]) -> list[str]:
+        """Bring back contents a late view of the open drawer left in front of it."""
+        with self._lock:
+            return self.estimator.resettle(drawer_id, np.asarray(delta, float), before)
 
     # ------------------------------------------------------------- Ego API
     def summary(self) -> dict:
@@ -1196,8 +1354,9 @@ class EgoRuntime:
         if frame.get("imaging") == "rgbd":
             visible = []
             for camera in cameras:
-                rgbd = decode_rgbd(self.link.rgbd(camera))
-                if rgbd["mask"] is None and not self._segment(rgbd):
+                whole = decode_rgbd(self.link.rgbd(camera))
+                rgbd = decimated(whole, self._perception_rows(whole), self.config.depth_join)
+                if rgbd["mask"] is None and not self._segment([(rgbd, whole)]):
                     raise RuntimeError(f"the {camera} image could not be segmented: {self.segmentation['lastError']}")
                 with self._lock:
                     cam = self.estimator.camera_pose(rgbd["header"]["odometry"], camera)
@@ -1223,6 +1382,10 @@ class EgoRuntime:
 
     def predict(self, skill: str, params: dict) -> dict:
         es = self.ego_state()
+        if skill == "close":
+            # The drawer the robot pulled open is closed by that pull (handle, axis, distance)
+            # unless the caller names another: views of the open drawer box it deeper than it is.
+            params = {**self.executor.pull_of(str(params.get("target", ""))), **params}
         receipt = self.esim.predict(es, skill, params)
         limit = self.config.max_pick_risk if receipt.get("skill") == "pick" else self.config.max_risk
         receipt["withinRiskLimit"] = receipt["feasible"] and receipt["risk"] <= limit
@@ -1595,9 +1758,52 @@ class EgoRuntime:
         return job
 
     def explore(self, owner: str | None = None) -> dict:
-        """Look around in place. Rotation without translation needs no receipt."""
+        """Look around in place. Rotation without translation needs no receipt.
+
+        When ``MotionConfig.inspect_closed_drawers`` is set, each closed drawer is opened, looked
+        into, and closed afterwards. Those visits are planned from the ego state at the time and
+        skipped when they are not feasible."""
         self._check_control(owner)
         return self.executor.start("look_around", {"id": "look-around", "plan": {}}).to_dict()
+
+    def _closed_drawer_ids(self) -> list[str]:
+        """Closed pullable drawers already seen enough times to open, nearest first."""
+        with self._lock:
+            est = self.estimator
+            ox, oy = float(est.odometry.get("x", 0.0)), float(est.odometry.get("y", 0.0))
+            found = [t for t in est.tracks.values()
+                     if t.category == "drawer" and "pullable" in t.affordances
+                     and t.existence >= 0.5 and t.observations >= 3
+                     and est.drawer_opening(t) < 0.08]
+            found.sort(key=lambda t: math.hypot(float(t.pos[0]) - ox, float(t.pos[1]) - oy))
+            return [t.id for t in found]
+
+    def _drawer_plan(self, skill: str, target: str, distance: float | None = None,
+                     handle: list[float] | None = None, axis: list[float] | None = None) -> tuple[dict | None, str]:
+        """Plan for opening or closing ``target``, or why that plan cannot be run.
+
+        ``distance`` is how far a close must travel when the track no longer shows the opening
+        that was just pulled. ``handle`` and ``axis`` are that pull, so the close does not follow
+        a box the look has shifted."""
+        from steward.ego.esim import PredictionError
+        params: dict = {"target": target}
+        if distance is not None:
+            params["distance"] = distance
+        if handle is not None:
+            params["handle"] = handle
+        if axis is not None:
+            params["axis"] = axis
+        try:
+            receipt = self.predict(skill, params)
+        except PredictionError as exc:
+            return None, str(exc)
+        plan = receipt.get("plan")
+        if not receipt.get("feasible") or not plan:
+            return None, "; ".join(receipt.get("issues") or ["not feasible"])
+        receipt["used"] = True
+        if receipt.get("withinRiskLimit"):
+            return plan, ""
+        return plan, "; ".join(receipt.get("issues") or ["risk above the limit"])
 
     def job(self, job_id: str) -> dict:
         if job_id not in self.executor.jobs:

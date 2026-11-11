@@ -23,6 +23,7 @@ import threading
 import time
 import zlib
 import uuid
+import zipfile
 from dataclasses import dataclass, field
 
 import mujoco
@@ -48,6 +49,19 @@ _COLOR_NAMES = {
     "white": (0.95, 0.95, 0.96), "gray": (0.60, 0.62, 0.65), "brown": (0.58, 0.40, 0.24), "beige": (0.80, 0.67, 0.50),
     "yellow": (0.90, 0.85, 0.20),
 }
+
+
+def _npz(arrays: dict[str, np.ndarray]) -> bytes:
+    """``arrays`` as the bytes of an ``npz`` archive (read with ``np.load``), deflated at the fastest
+    level. A head-camera frame (2560 x 1920 colour and depth) packs in about 0.2 s to the 5 MB that
+    ``np.savez_compressed`` (level 6) takes 0.75 s for, and a robot that segments its own images
+    waits for every frame it asks for."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
+        for name, value in arrays.items():
+            with archive.open(f"{name}.npy", "w", force_zip64=True) as member:
+                np.lib.format.write_array(member, np.asanyarray(value), allow_pickle=False)
+    return buf.getvalue()
 
 
 def speed_json(speed: float) -> float | str:
@@ -614,7 +628,12 @@ class WorldSim:
         if any(h.woken for name, h in live.items() if name != hold):
             return False
         mine = self._holds[hold]
-        return min((h.step, h.rank, name) for name, h in live.items() if not h.woken) >= (mine.step, mine.rank, hold)
+        ahead = [(h.step, h.rank, name) for name, h in live.items() if not h.woken]
+        # A hold can be the only waiter and still be outside ``live`` for this check (its lease
+        # was refreshed by the wait loop after). Nothing ahead of it means it may wake.
+        if not ahead:
+            return True
+        return min(ahead) >= (mine.step, mine.rank, hold)
 
     def _pulled(self) -> bool:
         """True when a caller waits for world time to pass (see ``freeze_idle``)."""
@@ -1142,15 +1161,15 @@ class WorldSim:
             renderer.disable_segmentation_rendering()
             part_of, transparent = self._geom_parts(robot_id)
         geom = np.where(seg[..., 1] == int(mujoco.mjtObj.mjOBJ_GEOM), seg[..., 0], -1)
-        parts = np.where(geom >= 0, part_of[np.clip(geom, 0, None)], -1)
         clear = np.where(geom >= 0, transparent[np.clip(geom, 0, None)], False)
         rng = self._sensor_rng(robot_id, f"rgbd/{sensor['id']}")
-        masks = {"mask": self._anonymous_masks(parts, rng)} if self.perception.masks else {}
+        masks = {}
+        if self.perception.masks:
+            parts = np.where(geom >= 0, part_of[np.clip(geom, 0, None)], -1)
+            masks = {"mask": self._anonymous_masks(parts, rng)}
         depth_mm = self._noisy_depth(depth, clear, rng)
-        buf = io.BytesIO()
-        np.savez_compressed(buf, camera=np.array(sensor["id"]), rgb=rgb, depth=depth_mm, fovy=np.float32(sensor["intrinsics"]["fovy"]),
-                            header=np.array(json.dumps(header)), **masks)
-        return buf.getvalue()
+        return _npz({"camera": np.array(sensor["id"]), "rgb": rgb, "depth": depth_mm,
+                     "fovy": np.float32(sensor["intrinsics"]["fovy"]), "header": np.array(json.dumps(header)), **masks})
 
     def _geom_parts(self, robot_id: str) -> tuple[np.ndarray, np.ndarray]:
         """Per geom: the index of the perception part it belongs to (-1 for the floor and the

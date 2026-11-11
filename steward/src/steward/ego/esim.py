@@ -38,6 +38,11 @@ from steward.scene.schema import Entity, SceneState
 @dataclass
 class EsimConfig:
     capture_radius: float = 0.05
+    # Where the drawer skill closes the gripper again when the planned handle point held nothing:
+    # reach offsets along the arm, then base steps across it (m). A swollen drawer front puts the
+    # estimate past or short of the real handle, and a miss only costs the next closing.
+    handle_probes_along_m: tuple[float, ...] = (0.04, 0.08, 0.12, -0.05, -0.09)
+    handle_probes_side_m: tuple[float, ...] = (0.06, -0.06)
     # The grasp point passes this far above the rim of what it reaches into (a drawer's front, a
     # bowl's wall), and what it carries out clears the rim by as much: the arm comes in over the wall
     # and goes straight down, instead of sweeping through it.
@@ -81,7 +86,10 @@ class EsimConfig:
     handle_reach: float = 0.18
     drawer_pull: float = 0.30
     drawer_pull_max: float = 0.33
-    drawer_viewing_backoff: float = 0.25
+    # The head camera looks 30° down and its lower edge is 60° down. At 0.25 m the open
+    # drawer's floor is below that edge, so a flat pistol has no pixels. 0.55 m puts the floor
+    # near 45° down, inside the frame.
+    drawer_viewing_backoff: float = 0.55
     nest_fit: float = 0.92
     floor_carry_lift: float = 0.05
     floor_lift_max_m: float = 0.3  # an object off the floor no larger than this is lifted clear of the base to carry
@@ -232,6 +240,21 @@ class Esim:
         """The entity's footprint with +x pointing out of its front (the face looking into the room)."""
         boxes = [entity_box(e)[0] for e in es.entities if e.id != es.self_id]
         return front_box(entity_box(ent)[0], room_centre(boxes))
+
+    def _drawer_furniture(self, es: SceneState, drawer: Entity) -> Entity | None:
+        """The sideboard or cabinet the drawer sits in, or None when it is still an orphan box."""
+        centre = entity_box(drawer)[0]
+        found, best = None, math.inf
+        for ent in es.entities:
+            if ent.category.value not in ("sideboard", "cabinet"):
+                continue
+            box = entity_box(ent)[0]
+            if not box.contains(centre.cx, centre.cy, inflate=0.20):
+                continue
+            gap = math.hypot(box.cx - centre.cx, box.cy - centre.cy)
+            if gap < best:
+                found, best = ent, gap
+        return found
 
     def _opening(self, es: SceneState, drawer: Entity) -> float:
         furniture = [entity_box(e)[0] for e in es.entities
@@ -1235,8 +1258,28 @@ class Esim:
             raise PredictionError("the gripper must be empty to use a handle")
         _, bottom, top = entity_box(drawer)
         box = self._front(es, drawer)
-        n = (math.cos(box.yaw), math.sin(box.yaw))
-        handle = [box.cx + n[0] * (box.hx - 0.015), box.cy + n[1] * (box.hx - 0.015), (bottom + top) / 2]
+        n = tuple(params["axis"]) if params.get("axis") else (math.cos(box.yaw), math.sin(box.yaw))
+        # A look along the open drawer can shift the estimated box. The handle just pulled, moved
+        # by that pull, is the one to push back.
+        if params.get("handle"):
+            handle = [float(v) for v in params["handle"]]
+        else:
+            handle = [box.cx + n[0] * (box.hx - 0.015), box.cy + n[1] * (box.hx - 0.015), (bottom + top) / 2]
+            # The drawer box wanders along the furniture. The handle is centred on the piece, and
+            # it is not proud of that piece's front: a swollen drawer puts the hand on empty air.
+            host = self._drawer_furniture(es, drawer)
+            if host is not None:
+                hbox = self._front(es, host)
+                hn = (math.cos(hbox.yaw), math.sin(hbox.yaw))
+                if n[0] * hn[0] + n[1] * hn[1] > 0.5:
+                    lateral = (-n[1], n[0])
+                    side = hbox.cx * lateral[0] + hbox.cy * lateral[1]
+                    along = handle[0] * n[0] + handle[1] * n[1]
+                    face = hbox.cx * hn[0] + hbox.cy * hn[1] + hbox.hx + 0.02
+                    if along > face + 0.03:
+                        along = face
+                    handle[0] = n[0] * along + lateral[0] * side
+                    handle[1] = n[1] * along + lateral[1] * side
         opening = self._opening(es, drawer)
         if skill == "open":
             if opening > 0.2:
@@ -1244,9 +1287,16 @@ class Esim:
             distance = min(max(float(params.get("distance", cfg.drawer_pull)), 0.05), cfg.drawer_pull_max)
             sign = 1.0
         else:
-            if opening < 0.05:
+            # The look into an open drawer rebuilds the box, and the opening left on the track can
+            # shrink to a few centimetres while the drawer is still out. The distance just pulled
+            # is the one that puts it back.
+            requested = params.get("distance")
+            if opening < 0.05 and requested is None:
                 raise PredictionError(f"{drawer.id} is already closed")
-            distance = min(opening + 0.02, cfg.drawer_pull_max + 0.04)
+            if requested is None:
+                distance = min(opening + 0.02, cfg.drawer_pull_max + 0.04)
+            else:
+                distance = min(max(float(requested), 0.05), cfg.drawer_pull_max + 0.04)
             sign = -1.0
         standoff = self.tool_offset + cfg.handle_reach
         yaw = math.atan2(-n[1], -n[0])
@@ -1257,9 +1307,29 @@ class Esim:
         predock = (dock[0] + n[0] * cfg.predock_backoff, dock[1] + n[1] * cfg.predock_backoff)
         if not (self.lift_min <= handle[2] <= self.lift_max):
             raise PredictionError(f"handle height {handle[2]:.2f} m is outside the lift range")
-        obstacles = self._floor_obstacles(es, set())
+        # Contents ride the drawer. A bottle at the open mouth is where the robot stands
+        # at the end of the close, and is not a fixed obstacle.
+        exclude = {drawer.id}
+        dp = drawer.pose.value["p"]
+        for ent in es.entities:
+            if ent.id in exclude or ent.role in ("environment", "robot"):
+                continue
+            if ent.category.value in ("cabinet", "sideboard", "counter", "table", "wall", "drawer"):
+                continue
+            box, bottom, top = entity_box(ent)
+            if 2 * max(box.hx, box.hy) > 0.35:
+                continue
+            if abs((bottom + top) / 2 - dp[2]) > 0.25:
+                continue
+            if math.hypot(box.cx - dp[0], box.cy - dp[1]) <= 0.75:
+                exclude.add(ent.id)
+        obstacles = self._floor_obstacles(es, exclude)
+        # A wall boxed thicker than the panel fills the floor in front of the cabinet, and the
+        # close is then refused while the base is still in open floor. The path keeps the wall.
+        wall_ids = {ent.id for ent in es.entities if ent.category.value == "wall"}
+        stance = [box for box in obstacles if box.id not in wall_ids]
         for name, xy in (("dock", dock), ("end", end), ("viewing", clear)):
-            blocked = self._footprint_blocked(obstacles, xy, yaw)
+            blocked = self._footprint_blocked(stance, xy, yaw)
             if blocked:
                 raise PredictionError(f"{name} pose in front of {drawer.id} collides with {blocked}")
         blocked = self._turn_blocked(obstacles, predock)
@@ -1272,12 +1342,31 @@ class Esim:
             raise PredictionError(f"no collision-free path to the front of {drawer.id}")
         sigma = math.hypot(self._sigma_xy(drawer), self._sigma_xy(self._self(es)))
         r = cfg.capture_radius
-        p_miss = math.exp(-(r * r) / (2 * sigma * sigma)) if sigma > 0 else 0.0
+        p_miss = self._handle_miss(sigma)
         issues = [f"handle position uncertainty {sigma * 100:.1f} cm gives {p_miss:.0%} miss probability"] if p_miss > 0.05 else []
         plan = {"path": [list(q) for q in path], "predock": list(predock), "dock": list(dock), "yaw": yaw,
                 "end": list(end), "viewing": list(clear), "handle": handle, "distance": distance, "direction": sign,
-                "axis": list(n), "drawer": drawer.id, "captureRadius": r, "pathLength": path_length(path)}
+                "axis": list(n), "drawer": drawer.id, "captureRadius": r, "pathLength": path_length(path),
+                "handleProbesAlong": list(cfg.handle_probes_along_m), "handleProbesSide": list(cfg.handle_probes_side_m)}
         return self._receipt(es, skill, params, max(0.03, p_miss), issues, plan)
+
+    def _handle_miss(self, sigma: float) -> float:
+        """Probability that a handle whose position has standard deviation ``sigma`` (m, each
+        horizontal axis) lies outside what the drawer skill reaches for.
+
+        The skill closes the gripper at the planned handle and, when that holds nothing, again at
+        each ``handle_probes_along_m`` step along the arm and each ``handle_probes_side_m`` step
+        of the base across it; every closing takes a handle within ``capture_radius``."""
+        cfg = self.config
+        if sigma <= 0:
+            return 0.0
+
+        def within(lo: float, hi: float) -> float:
+            return 0.5 * (math.erf(hi / (sigma * math.sqrt(2))) - math.erf(lo / (sigma * math.sqrt(2))))
+
+        r = cfg.capture_radius
+        along, across = (0.0, *cfg.handle_probes_along_m), (0.0, *cfg.handle_probes_side_m)
+        return 1.0 - within(min(along) - r, max(along) + r) * within(min(across) - r, max(across) + r)
 
     @staticmethod
     def _turned_half(held_box: Box2D, yaw: float, axis_yaw: float) -> tuple[float, float]:

@@ -3,6 +3,10 @@
 
 [segmenter]
 service = "sam3"
+# Requests in flight at once: the service's worker count (`workers` of GET /api/health). A request
+# costs about 0.75 s plus 0.18 s per prompt, so the 22 prompts of one image take 4.6 s in one
+# request and 1.8 s divided over four.
+concurrency = 4
 # Score threshold sent with every request; detections scoring lower are discarded here too.
 threshold = 0.4
 # Detections of the same object under two prompts (a bowl also scored as a plate) overlapping by
@@ -14,24 +18,36 @@ min_pixels = 25
 crop_min_pixels = 8
 # Second pass: regions of these categories (support surfaces) are cropped, enlarged and segmented
 # again with `crop_prompts`, so small objects standing on them are found. 0 disables the pass.
-crop_categories = ["table", "counter", "sideboard", "cabinet"]
-crop_target_px = 480  # long side of each enlarged crop
+crop_categories = ["table", "counter", "sideboard", "cabinet", "drawer"]
+# Long side of each enlarged crop. A region already that long in the image is not asked again. The
+# crop is cut from the frame as the camera took it, which is larger than the frame perception fuses.
+crop_target_px = 480
 crop_max_scale = 4.0
 crop_up = 0.3  # share of the region's height added above it, where objects on its top appear
 crop_depth = 0.5  # share of the region's height kept below its top edge: the top surface, not the legs
-max_crops = 2  # crops per frame, largest first; each costs one request (about 1.5 s)
+# A drawer or cabinet crop keeps the whole opening. The bottles sit on the floor, which the
+# tabletop crop cuts off.
+drawer_crop_depth = 1.0
+max_crops = 2  # crops per frame, largest region first
 crop_prompts = ["bowl", "cup", "mug", "plate", "wine glass", "teddy bear", "scissors", "toy airplane",
                 "bottle", "box", "puzzle piece", "photo", "picture"]
+# Asked only inside a drawer crop. A pistol or a perfume is a few pixels inside the open drawer,
+# and naming them on the whole image is what the full pass is not for.
+drawer_prompts = ["pistol", "perfume"]
 # Semantic evidence and shape priors are combined as  p(c) ∝ L(c) · P_shape(c)^shape_weight,
 # where L is the mean SAM score of category c (or `label_floor` for categories SAM did not name).
 shape_weight = 0.5
 label_floor = 0.03
-# Depth clusters (steward.ego.providers.geometric_masks) of which at least this share SAM left
-# unlabelled become unnamed instances, classified by the shape priors alone. Off: the wide camera
-# also sees the robot's own arm and mast, which depth clustering, unlike world masks, does not
-# leave out (steward.md 13.7.7).
-geometric_fill = false
+# Depth clusters above a support, of which at least this share SAM left unlabelled, become unnamed
+# instances and are classified by the shape priors alone. The runtime clears the robot's own links
+# from that depth first, and clusters that are not standing on a support are not added.
+geometric_fill = true
 fill_free_share = 0.7
+# Only clusters standing on a raised surface are added. The rest of the depth image (walls, a
+# corner of the room, the floor) is not clustered.
+fill_supports_only = true
+# A cluster lying wholly on a named support is added only when it spans this height.
+fill_min_rise_m = 0.02
 
 # Prompt text → Ego-State category. Categories outside the shape priors are allowed: such an object
 # is named by its prompt and gets no prior-size completion.
@@ -54,6 +70,8 @@ fill_free_share = 0.7
 "scissors" = "scissors"
 "toy airplane" = "toy_airplane"
 "bottle" = "bottle"
+"pistol" = "pistol"
+"perfume" = "perfume_bottle"
 "plant" = "plant"
 "box" = "box"
 "puzzle piece" = "puzzle_piece"

@@ -10,11 +10,60 @@ import itertools
 import math
 import time
 
-from steward.net import HttpError, call
+from steward import net
+from steward.net import HttpError
+
+API_TIMEOUT_S = 120.0
+"""Wall seconds a mission waits for one Ego API reply. A request that can change the robot's state
+is applied between two perception updates (:meth:`steward.ego.runtime.EgoRuntime.apply`), and an
+update of a robot that segments its own images stops the world for the seconds its segmenter
+takes; the transport's own ten seconds are less than one slow update."""
+WAIT_SLICE_S = 20.0
+"""Wall seconds one ``/skill/wait`` request stays open before :func:`wait_job` asks again."""
+STALL_S = 600.0
+"""Wall seconds the world clock may stand still under a running job before :func:`wait_job` gives up on it."""
+
+
+def call(method: str, url: str, body=None, timeout: float = API_TIMEOUT_S):
+    """:func:`steward.net.call` with a mission's patience (:data:`API_TIMEOUT_S`)."""
+    return net.call(method, url, body, timeout)
 
 
 class MissionFailed(RuntimeError):
     pass
+
+
+def world_time(api: str) -> float:
+    """The world clock, in seconds, as the robot reads it now."""
+    return float(call("POST", f"{api}/clock/sleep", {"seconds": 0.0})["t"])
+
+
+def wait_job(api: str, job_id: str, timeout_s: float) -> dict:
+    """The job once it has ended, or as it stands when its budget is spent.
+
+    The budget is ``timeout_s`` seconds on the wall clock and as many on the world clock; it is
+    spent when both have passed. A skill takes the world time its motion takes, while the wall
+    time of the same skill grows with every image the robot has to segment on the way (the world
+    waits for each): a look-around of twenty world seconds lasts minutes with a remote segmenter
+    and must not be given up on for that. In a world that runs faster than the wall clock the
+    wall seconds are the longer wait, so such a mission is as patient as its ``timeout_s`` says.
+    A job under which the world clock has not moved for :data:`STALL_S` wall seconds is returned
+    as it is.
+
+    :param job_id: id of a job of ``/skill/run`` or ``/ego/explore``.
+    :param timeout_s: seconds to wait from now, on both clocks.
+    :returns: the job as ``/skill/wait`` reports it; ``state`` is still ``running`` when the budget ran out."""
+    started = last = world_time(api)
+    began = moved = time.monotonic()
+    while True:
+        job = call("POST", f"{api}/skill/wait", {"job": job_id, "timeoutS": min(WAIT_SLICE_S, timeout_s)},
+                   timeout=WAIT_SLICE_S + API_TIMEOUT_S)
+        now = world_time(api)
+        if now != last:
+            last, moved = now, time.monotonic()
+        spent = now - started >= timeout_s and time.monotonic() - began >= timeout_s
+        if job["state"] != "running" or spent or time.monotonic() - moved >= STALL_S:
+            return job
 
 
 class Blocked(MissionFailed):
@@ -109,7 +158,7 @@ def _approach_to_observe(api: str, target: dict, distance: float = 1.1, timeout_
 
 def _run(api: str, receipt: dict, timeout_s: float) -> dict:
     job = call("POST", f"{api}/skill/run", {"receipt": receipt["id"]})
-    job = call("POST", f"{api}/skill/wait", {"job": job["id"], "timeoutS": timeout_s}, timeout=timeout_s + 10)
+    job = wait_job(api, job["id"], timeout_s)
     if job["state"] != "succeeded":
         raise MissionFailed(f"{receipt['skill']} {job['state']}: {job['message']}")
     return job
@@ -117,7 +166,7 @@ def _run(api: str, receipt: dict, timeout_s: float) -> dict:
 
 def _explore(api: str, timeout_s: float) -> dict:
     job = call("POST", f"{api}/ego/explore")
-    return call("POST", f"{api}/skill/wait", {"job": job["id"], "timeoutS": timeout_s}, timeout=timeout_s + 10)
+    return wait_job(api, job["id"], timeout_s)
 
 
 def _safe_receipt(api: str, skill: str, params: dict, observe: dict, log: list) -> dict:

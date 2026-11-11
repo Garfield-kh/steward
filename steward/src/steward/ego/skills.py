@@ -95,6 +95,22 @@ class MotionConfig:
     """Most robot time a place waits for its joints to come within ``release_joint_tol``; then it lets go anyway."""
     handle_release_wait_s: float = 0.08
     look_dwell_s: float = 0.6
+    inspect_closed_drawers: bool = False
+    """After the four look-around turns, open each closed drawer, look inside, and close it.
+
+    A closed drawer hides its contents from every camera. The visit uses the drawer skill's
+    plan, taken at that moment, and is skipped when the plan is not feasible. Closing restores
+    the drawer; tracks seen inside it stay, because a closed drawer is not evidence they are gone."""
+    drawer_look_s: float = 4.5
+    """World time spent looking into an open drawer, long enough for a second keyframe."""
+    drawer_peek_m: float = 0.3
+    """How far the look along an open drawer steps toward it to see over the front panel."""
+    look_into_opened_drawers: bool = True
+    """After the ``open`` skill, look along and up to the drawer before reporting it opened.
+
+    The viewing pose the pull ends at frames the drawer floor from about 1.1 m, where a bottle
+    is some ten pixels tall in the head camera: too few to name. The look is the one the
+    look-around's drawer visit makes, so the contents get the same close views either way."""
     wrist_turn_s: float = 0.6
     """Robot time to turn the wrist yaw to a placing heading."""
     pour_tip_s: float = 2.5
@@ -148,11 +164,26 @@ class SkillExecutor:
                  on_begin: Callable[[str, dict], None] | None = None,
                  on_release: Callable[[str, list[float]], None] | None = None,
                  clock: RobotLink | None = None,
+                 closed_drawers: Callable[[], list[str]] | None = None,
+                 drawer_plan: Callable[..., tuple[dict | None, str]] | None = None,
+                 pin: Callable[[str, bool], None] | None = None,
+                 furniture: Callable[[str], str | None] | None = None,
+                 contents: Callable[[str], list[str]] | None = None,
+                 content_positions: Callable[[str], dict[str, list[float]]] | None = None,
+                 resettle: Callable[[str, list[float], dict[str, list[float]]], list[str]] | None = None,
                  home_empty: Callable[[Callable[[], dict]], bool] | None = None):
         """``clock`` is the robot link whose world clock times the control ticks (one hold per job,
-        ``skill/<job id>``); without it a tick sleeps ``tick_s`` of wall time. ``home_empty``, when
-        provided, returns empty arms home after successful work using the job's cancellable tick.
-        Homing failure fails the job without attempting Cartesian recovery; None leaves arms as-is."""
+        ``skill/<job id>``); without it a tick sleeps ``tick_s`` of wall time.
+
+        ``closed_drawers`` lists drawers to open after a look-around, and ``drawer_plan`` returns
+        the open or close plan for one of them, with the reason when there is no plan. A close may
+        be asked with the metres just opened, so the drawer is pushed back the same distance.
+        ``furniture`` is the piece that holds a drawer; it is held still for the visit so the
+        open drawer is not fused into it.
+
+        ``home_empty``, when provided, returns empty arms home after successful work using the job's
+        cancellable tick. Homing failure fails the job without attempting Cartesian recovery; None
+        leaves arms as-is."""
         self._on_error = on_error
         self._clock = clock
         self._now = 0.0
@@ -165,6 +196,13 @@ class SkillExecutor:
         self._state = state
         self._mark_held = mark_held
         self._shift = shift
+        self._closed_drawers = closed_drawers
+        self._drawer_plan = drawer_plan
+        self._pin = pin
+        self._furniture = furniture
+        self._contents = contents
+        self._content_positions = content_positions
+        self._resettle = resettle
         self.config = config or MotionConfig()
         self._ids = itertools.count(1)
         self._gentle = False  # the running plan moves a container with its contents
@@ -176,8 +214,20 @@ class SkillExecutor:
         self._stop = threading.Event()
         self.jobs: dict[str, Job] = {}
         self.current: Job | None = None
+        self._pulls: dict[str, dict] = {}  # drawer id -> the pull that left it open (:meth:`pull_of`)
 
     # ------------------------------------------------------------------ public
+    def pull_of(self, drawer_id: str) -> dict:
+        """The pull that left ``drawer_id`` open, as close parameters, or ``{}`` when the robot has
+        not opened it or has pushed it back since.
+
+        ``handle`` is where the gripper let the handle go, ``axis`` the direction it was pulled
+        and ``distance`` the metres it travelled. The robot knows them from its own motion, so a
+        close planned from them does not depend on how later views box the open drawer."""
+        pull = self._pulls.get(drawer_id)
+        return {} if pull is None else {"handle": list(pull["handle"]), "axis": list(pull["axis"]),
+                                        "distance": pull["distance"]}
+
     def start(self, skill: str, receipt: dict) -> Job:
         with self._lock:
             if self.current is not None and self.current.state == "running":
@@ -257,8 +307,10 @@ class SkillExecutor:
                 self._place_floor(job, plan)
             elif skill == "place":
                 self._place(job, plan)
-            elif skill in ("open", "close"):
-                self._drawer(job, plan)
+            elif skill == "open":
+                self._open(job, plan)
+            elif skill == "close":
+                self._close(job, plan)
             elif skill == "pour":
                 self._pour(job, plan)
             else:
@@ -330,7 +382,9 @@ class SkillExecutor:
         x, y, yaw0 = o["x"], o["y"], o["yaw"]
         delta = wrap_angle(yaw_target - yaw0)
         if self._look and self._keyframed:
-            speed = self.config.look_angular_speed
+            # A closed look turns half as fast. The cup is only a few pixels wide, and a
+            # tenth of a radian steps over the heading that separates it from the counter.
+            speed = self.config.look_angular_speed if self.config.inspect_closed_drawers else self.config.look_angular_speed * 0.5
         elif self._gentle:
             speed = self.config.gentle_turn_speed
         else:
@@ -409,12 +463,10 @@ class SkillExecutor:
                 return
             settled = st["stamp"] - t0 > self.config.settle_s
             if settled and not corrected:
-                # LOCAL EXPERIMENT (uncommitted): re-issue the absolute target instead of
-                # target + (target - q). In the split-process topology the command takes an
-                # HTTP round trip to reach the servo, so at the 1.5 s stamp the joint may not
-                # have started moving yet; inflating by the full remaining error then pegs the
-                # joint at ~2x the intended travel (observed: reach 0.101->0.310 landed at
-                # 0.519, lift 0.593->0.790 landed at 0.980 — exactly target + (target - rest)).
+                # Re-issue the absolute target instead of target + (target - q). The command
+                # takes an HTTP round trip to reach the servo, so at the settle stamp the joint
+                # may not have started moving yet. Inflating by the full remaining error then
+                # pegs the joint at about twice the intended travel.
                 self._command({name: target})
                 corrected = True
             if st["stamp"] - t0 > timeout:
@@ -570,11 +622,217 @@ class SkillExecutor:
 
     # ---------------------------------------------------------------- skills
     def _look_around(self, job: Job) -> None:
-        yaw0 = self._state()["odometry"]["yaw"]
+        st = self._state()
+        # Odometry stays at the origin until the first body frame. A look that commands that point
+        # drives the base there. A state without the flag (a test double) is already a pose.
+        while st.get("posed") is False:
+            st = self._tick()
+        yaw0 = st["odometry"]["yaw"]
         for k in range(1, 5):
             self._turn_to(wrap_angle(yaw0 + k * math.pi / 2))
             self._wait(self.config.look_dwell_s)
             job.log.append(f"looked toward {math.degrees(wrap_angle(yaw0 + k * math.pi / 2)):.0f} deg")
+        if self.config.inspect_closed_drawers:
+            self._inspect_closed_drawers(job)
+
+    def _inspect_closed_drawers(self, job: Job) -> None:
+        """Open every closed drawer the ego state still names, look in, and close it.
+
+        A drawer whose plan is not feasible, or whose handle is missed, is left as it is and the
+        look-around still succeeds. The other drawers are visited anyway."""
+        if self._closed_drawers is None or self._drawer_plan is None:
+            return
+        pending: list[tuple[str, list[float], dict[str, list[float]]]] = []
+        self._pending_resettle = pending
+        for drawer_id in self._closed_drawers():
+            host_id = self._furniture(drawer_id) if self._furniture is not None else None
+            if host_id and self._pin is not None:
+                self._pin(host_id, True)
+            try:
+                self._visit_drawer(job, drawer_id)
+            finally:
+                if host_id and self._pin is not None:
+                    self._pin(host_id, False)
+        if pending and self._resettle is not None:
+            # Late frames can land after the first close. Bring back anything still left out.
+            self._wait(self.config.look_dwell_s)
+            for drawer_id, delta, before in pending:
+                brought = self._resettle(drawer_id, delta, before)
+                if brought:
+                    job.log.append(f"brought back {', '.join(brought)}")
+
+    def _visit_drawer(self, job: Job, drawer_id: str) -> None:
+        """Open one drawer, look in from the front, and close it by the distance just pulled."""
+        plan, why = self._drawer_plan("open", drawer_id)
+        if plan is None:
+            job.log.append(f"left {drawer_id} closed ({why})")
+            return
+        if why:
+            # The handle is still too uncertain to grasp. The plan's path is safe, so walk
+            # there, look, and plan again from the closer view.
+            try:
+                self._drive(job, plan["path"], plan["yaw"])
+            except SkillFailed as exc:
+                job.log.append(f"could not approach {drawer_id}: {exc}")
+                return
+            self._wait(self.config.drawer_look_s)
+            job.log.append(f"approached {drawer_id}")
+            plan, why = self._drawer_plan("open", drawer_id)
+            if plan is None:
+                job.log.append(f"left {drawer_id} closed ({why})")
+                return
+            if why:
+                job.log.append(f"opening {drawer_id} with {why}")
+        axis = list(plan.get("axis") or [1.0, 0.0])
+        open_handle = plan.get("handle")
+        try:
+            opened = self._drawer(job, plan)
+        except SkillFailed as exc:
+            job.log.append(f"could not open {drawer_id}: {exc}")
+            return
+        self._wait(self.config.drawer_look_s)
+        job.log.append(f"looked inside {drawer_id}")
+        self._look_along_drawer(job, drawer_id, axis)
+        # Close by the distance just pulled, on the handle that was pulled.
+        if isinstance(opened, (int, float)) and abs(opened) >= 0.05 and open_handle is not None:
+            shifted = [float(open_handle[0]) + float(opened) * axis[0],
+                       float(open_handle[1]) + float(opened) * axis[1], float(open_handle[2])]
+            plan, why = self._drawer_plan("close", drawer_id, abs(opened), shifted, axis)
+        elif isinstance(opened, (int, float)) and abs(opened) >= 0.05:
+            plan, why = self._drawer_plan("close", drawer_id, abs(opened))
+        else:
+            plan, why = self._drawer_plan("close", drawer_id)
+        if plan is None:
+            job.log.append(f"left {drawer_id} open ({why})")
+            return
+        before = self._content_positions(drawer_id) if self._content_positions is not None else {}
+        try:
+            closed = self._drawer(job, plan)
+        except SkillFailed as exc:
+            job.log.append(f"could not close {drawer_id}: {exc}")
+            return
+        self._wait(self.config.look_dwell_s)
+        if self._resettle is not None and isinstance(closed, (int, float)) and abs(closed) >= 0.05:
+            delta = [float(closed) * axis[0], float(closed) * axis[1], 0.0]
+            pending = getattr(self, "_pending_resettle", None)
+            if pending is not None:
+                pending.append((drawer_id, delta, before))
+            brought = self._resettle(drawer_id, delta, before)
+            if brought:
+                job.log.append(f"brought back {', '.join(brought)}")
+
+    def _open(self, job: Job, plan: dict) -> None:
+        """The ``open`` skill: pull the drawer, remember that pull for the close, and look into it
+        as the look-around's visit does.
+
+        The furniture is held still meanwhile: neither the pull nor the look may move the carcass
+        or fuse the open drawer into it. A look that cannot be completed leaves the open as it is."""
+        drawer_id = plan["drawer"]
+        host_id = self._furniture(drawer_id) if self._furniture is not None else None
+        if host_id and self._pin is not None:
+            self._pin(host_id, True)
+        try:
+            opened = self._drawer(job, plan)
+            self._remember_pull(plan, opened)
+            if not self.config.look_into_opened_drawers:
+                return
+            message = job.message
+            try:
+                self._wait(self.config.drawer_look_s)
+                job.log.append(f"looked inside {drawer_id}")
+                self._look_along_drawer(job, drawer_id, list(plan.get("axis") or [1.0, 0.0]))
+            except SkillFailed as exc:
+                job.log.append(f"could not look along {drawer_id}: {exc}")
+            job.message = message
+        finally:
+            if host_id and self._pin is not None:
+                self._pin(host_id, False)
+
+    def _remember_pull(self, plan: dict, opened: float) -> None:
+        """Record where a pull of ``opened`` metres left the handle of the plan's drawer."""
+        axis, handle = plan.get("axis"), plan.get("handle")
+        if axis is None or handle is None or abs(opened) < 0.05:
+            return
+        self._pulls[plan["drawer"]] = {
+            "handle": [float(handle[0]) + opened * float(axis[0]), float(handle[1]) + opened * float(axis[1]),
+                       float(handle[2])],
+            "axis": [float(axis[0]), float(axis[1])], "distance": abs(opened)}
+
+    def _close(self, job: Job, plan: dict) -> None:
+        """The ``close`` skill: push the drawer back and bring its contents with it.
+
+        A view of the open drawer that lands after the push can leave a content in front of the
+        shut front; one dwell later it is brought back, as the look-around's visit does."""
+        drawer_id = plan["drawer"]
+        host_id = self._furniture(drawer_id) if self._furniture is not None else None
+        before = self._content_positions(drawer_id) if self._content_positions is not None else {}
+        if host_id and self._pin is not None:
+            self._pin(host_id, True)
+        try:
+            closed = self._drawer(job, plan)
+            self._pulls.pop(drawer_id, None)
+            message = job.message
+            self._wait(self.config.look_dwell_s)
+            if self._resettle is not None and abs(closed) >= 0.05:
+                axis = plan["axis"]
+                brought = self._resettle(drawer_id, [closed * float(axis[0]), closed * float(axis[1]), 0.0], before)
+                if brought:
+                    job.log.append(f"brought back {', '.join(brought)}")
+            job.message = message
+        finally:
+            if host_id and self._pin is not None:
+                self._pin(host_id, False)
+
+    def _look_along_drawer(self, job: Job, drawer_id: str, axis: list[float]) -> None:
+        """Step sideways in front of an open drawer and back, so both ends of it are in frame.
+
+        The drawer is held still for the step. A moving box would send the close at the wrong handle."""
+        if self._pin is None:
+            return
+        self._pin(drawer_id, True)
+        held = self._contents(drawer_id) if self._contents is not None else []
+        for tid in held:
+            self._pin(tid, True)
+        try:
+            st = self._state()["odometry"]
+            x, y, yaw = float(st["x"]), float(st["y"]), float(st["yaw"])
+            side = [-float(axis[1]), float(axis[0])]
+            for sign in (1.0, -1.0):
+                # 0.24 m puts the pistol on the drawer floor in frame. 0.40 m looks past the
+                # front panel, and that step also leaves the close short of the handle.
+                self._translate_to(x + side[0] * 0.24 * sign, y + side[1] * 0.24 * sign, yaw)
+                self._wait(2.0)
+                # The bear is first seen from the side. Hold it before the move back,
+                # or that move treats it as something that has left.
+                if self._contents is None:
+                    continue
+                for tid in self._contents(drawer_id):
+                    if tid not in held:
+                        held.append(tid)
+                        self._pin(tid, True)
+            # The front panel hides the near part of the drawer floor from the dock. A step
+            # toward the drawer looks over the panel; the pull left half a metre of room. The
+            # contents are let go for that look, so the closer view can place them, and held
+            # again before the step back.
+            try:
+                self._translate_to(x - axis[0] * self.config.drawer_peek_m, y - axis[1] * self.config.drawer_peek_m, yaw)
+                for tid in held:
+                    self._pin(tid, False)
+                self._wait(2.0)
+            except SkillFailed as exc:
+                job.log.append(f"could not step up to {drawer_id}: {exc}")
+            finally:
+                for tid in (self._contents(drawer_id) if self._contents is not None else []):
+                    if tid not in held:
+                        held.append(tid)
+                for tid in held:
+                    self._pin(tid, True)
+            self._translate_to(x, y, yaw)
+            job.log.append(f"looked along {drawer_id}")
+        finally:
+            for tid in held:
+                self._pin(tid, False)
+            self._pin(drawer_id, False)
 
     def _pick(self, job: Job, plan: dict) -> None:
         self._dock(job, plan)
@@ -737,7 +995,7 @@ class SkillExecutor:
                 break
         self._set_joint("wrist_roll", roll1)
 
-    def _drawer(self, job: Job, plan: dict) -> None:
+    def _drawer(self, job: Job, plan: dict) -> float:
         """Grasp a drawer handle, move the base along the drawer axis to slide it, release and back away."""
         self._dock(job, plan)
         handle = plan["handle"]
@@ -749,13 +1007,51 @@ class SkillExecutor:
             self._set_joint("reach", self.config.retract_reach)
             self._backoff(plan)
             raise SkillFailed(f"gripper is {miss * 100:.0f} cm from the handle of {plan['drawer']}; not closing")
+        reach = max(0.05, self._reach_to(handle[:2]))
         self._command({"gripper": "close"})
         self._wait(self.config.grasp_wait_s)
         if not self._state()["gripper"].get("holdingHandle"):
+            # A swollen front puts the hand past the real handle. Step the arm along its line.
+            # When the dock stopped short of the front, the arm is already at its limit, so
+            # the base has to come those centimetres closer.
+            for delta in (*plan.get("handleProbesAlong", ()), None):
+                self._command({"gripper": "open"})
+                if delta is None:
+                    o = self._state()["odometry"]
+                    heading = (math.cos(o["yaw"]), math.sin(o["yaw"]))
+                    self._translate_to(o["x"] + heading[0] * 0.08, o["y"] + heading[1] * 0.08, o["yaw"])
+                    reach = max(0.05, self._reach_to(handle[:2]))
+                    self._set_joint("reach", reach)
+                else:
+                    self._set_joint("reach", max(0.02, reach + delta))
+                self._command({"gripper": "close"})
+                self._wait(self.config.grasp_wait_s)
+                if self._state()["gripper"].get("holdingHandle"):
+                    job.log.append("came closer for the handle" if delta is None
+                                   else f"handle of {plan['drawer']} was {delta * 100:.0f} cm along the arm")
+                    break
+        if not self._state()["gripper"].get("holdingHandle"):
+            # The handle estimate is off to one side of the real one. Step the base across and
+            # reach again; the pull still ends on the planned pose.
+            o = self._state()["odometry"]
+            left = (-math.sin(o["yaw"]), math.cos(o["yaw"]))
+            for side in plan.get("handleProbesSide", ()):
+                self._command({"gripper": "open"})
+                self._translate_to(o["x"] + left[0] * side, o["y"] + left[1] * side, o["yaw"])
+                self._set_joint("reach", max(0.05, self._reach_to(handle[:2])))
+                self._command({"gripper": "close"})
+                self._wait(self.config.grasp_wait_s)
+                if self._state()["gripper"].get("holdingHandle"):
+                    job.log.append(f"handle of {plan['drawer']} was {side * 100:.0f} cm to the side")
+                    break
+        if not self._state()["gripper"].get("holdingHandle"):
+            grip = self._gripper_xy()
             self._command({"gripper": "open"})
             self._set_joint("reach", self.config.retract_reach)
             self._backoff(plan)
-            raise SkillFailed(f"missed the handle of {plan['drawer']}")
+            raise SkillFailed(
+                f"missed the handle of {plan['drawer']} at ({handle[0]:.2f}, {handle[1]:.2f}, {handle[2]:.2f}),"
+                f" gripper ({grip[0]:.2f}, {grip[1]:.2f})")
         job.log.append(f"grasped the handle of {plan['drawer']}")
         start = self._state()["odometry"]
         self._translate_to(plan["end"][0], plan["end"][1], plan["yaw"], self.config.drawer_speed)
@@ -771,6 +1067,7 @@ class SkillExecutor:
         self._translate_to(plan["viewing"][0], plan["viewing"][1], plan["yaw"])
         self._set_joint("lift", self.config.stow_lift)
         job.message = f"{verb} {plan['drawer']}"
+        return moved
 
     def _place_floor(self, job: Job, plan: dict) -> None:
         """Drive in with the held object, lower it to just above the floor, release and back away.

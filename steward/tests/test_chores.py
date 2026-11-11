@@ -232,6 +232,40 @@ def test_a_chair_blocking_the_sideboard_is_moved_out_of_the_way_before_the_drawe
         host.stop()
 
 
+def _piece(oid: str, category: str, xy: tuple[float, float], side: float, on: str | None = "e:1") -> dict:
+    return {"id": oid, "category": category, "role": category, "position": [xy[0], xy[1], 0.8],
+            "sizeM": [side, side, 0.06], "extentM": [side, side, 0.06], "existence": 1.0, "on": on}
+
+
+def test_drawer_contents_are_carried_largest_first():
+    """A place takes the free spot nearest the middle of the open part of a drawer: the toy airplane
+    put there leaves room for a bottle on each side, two bottles put there leave none for it."""
+    from steward.chores import _contents
+
+    drawer = {"id": "e:1"}
+    summary = {"objects": [_piece("e:2", "pill_bottle", (0.0, 0.0), 0.05), _piece("e:3", "toy_airplane", (0.1, 0.0), 0.22),
+                           _piece("e:4", "perfume_bottle", (0.2, 0.0), 0.07), _piece("e:5", "bowl", (0.3, 0.0), 0.3, on="e:9")]}
+    assert [o["id"] for o in _contents(summary, drawer)] == ["e:3", "e:4", "e:2"]
+
+
+def test_a_piece_renumbered_when_it_is_put_down_is_found_again_where_it_was_put(monkeypatch):
+    """With a real segmenter the track of a carried bowl is rebuilt under a new id when the gripper
+    lets go. The bowl nested in another stands on the same spot as that one: the width tells them apart."""
+    import steward.chores as chores_mod
+
+    carried = _piece("e:7", "bowl", (1.0, -1.0), 0.20)
+    base, nested, far = (_piece("e:20", "bowl", (-2.7, 0.6), 0.30), _piece("e:21", "bowl", (-2.71, 0.61), 0.21),
+                         _piece("e:22", "bowl", (0.5, -1.0), 0.20))
+    seen = {"objects": [base, far, _piece("e:23", "mug", (-2.7, 0.6), 0.2)]}
+    monkeypatch.setattr(chores_mod, "_summary", lambda api: seen)
+    # Only the wider bowl under it is seen there: the piece is reported where it was put, for a later look to find it by.
+    assert chores_mod._landed("api", carried, [-2.7, 0.6]) == {**carried, "position": [-2.7, 0.6, 0.8]}
+    seen["objects"].append(nested)
+    assert chores_mod._landed("api", carried, [-2.7, 0.6])["id"] == "e:21"
+    seen["objects"].append({**carried, "position": [-2.69, 0.6, 0.85]})
+    assert chores_mod._landed("api", carried, [-2.7, 0.6])["position"] == [-2.69, 0.6, 0.85]
+
+
 def test_a_repeating_failure_is_recognised_whatever_its_numbers():
     from steward.chores import _signature
 

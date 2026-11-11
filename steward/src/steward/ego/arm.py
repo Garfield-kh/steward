@@ -17,7 +17,8 @@ pick chooses it.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import math
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 VIRTUAL_JOINTS = ("lift", "reach", "wrist_yaw", "wrist_roll", "wrist_pitch")
@@ -69,18 +70,24 @@ class Arm:
         return {k: v for k, v in cmd.items() if k != "turnOver"}
 
     def turn_over(self, lift: float, reach: float, wrist_pitch: float, floor: float, surface_top: float,
-                  surface_edge: float) -> float | None:
+                  surface_edge: float, wrist_yaw: float = 0.0) -> float | None:
         """The lowest height, no lower than ``floor``, to which the arm lowers what it holds after
-        turning it over (a half roll) at ``lift`` and ``reach`` with the tool tilted ``wrist_pitch``,
+        turning it over (a half roll) at ``lift`` and ``reach`` with the tool tilted ``wrist_pitch``
+        and turned ``wrist_yaw``,
         none of its links coming down onto what it is set down on (its top at ``surface_top``, its
         near edge ``surface_edge`` ahead of the base centre); None where it cannot turn it over there. The slide's wrist rolls a half turn anywhere the
         slide reaches: ``floor``."""
-        g = self.geometry
-        return floor if g.lift_min <= floor <= g.lift_max and g.reach_min <= reach <= g.reach_max else None
+        return floor if self.reachable(floor, reach, wrist_yaw, math.pi, wrist_pitch) else None
 
     def resting(self) -> bool:
         """Whether the arm stands in a rest posture outside the planar arm's workspace: the slide's
         joints are the planar arm, so never."""
+        return False
+
+    def home_empty(self, command: Callable[[dict], None], tick: Callable[[], dict]) -> bool:
+        """Return empty arms to their initial posture using physical ``command`` and cancellable
+        sensor ``tick``. Return True after encoder confirmation; False when unsupported or loaded.
+        The slide has no separate home posture and does not move. Failures propagate to the skill."""
         return False
 
     def reachable(self, lift: float, reach: float, wrist_yaw: float = 0.0, wrist_roll: float = 0.0,
@@ -98,10 +105,12 @@ class Arm:
         that does (the body's margin); None where no tilt does. A tool that always points down: 0."""
         return 0.0 if self.reachable(lift, reach, wrist_yaw, wrist_roll) else None
 
-    def reachable_path(self, targets: Sequence[dict]) -> bool:
+    def reachable_path(self, targets: Sequence[dict], *, start_joints: dict | None = None) -> bool:
         """Whether the arm can move its grasp point through ``targets`` (virtual joints; turn, tip
-        and tilt default to 0) in order without a jump between two of them: the slide's joints
-        move straight through each."""
+        and tilt default to 0) in order without a jump between two of them. ``start_joints`` pins
+        the initial IK branch to these physical encoders, including the move to the first target;
+        omitted, the first target may start on any branch. The slide's joints move straight
+        through each."""
         return all(self.reachable(t["lift"], t["reach"], t.get("wrist_yaw", 0.0), t.get("wrist_roll", 0.0),
                                   t.get("wrist_pitch", 0.0)) for t in targets)
 

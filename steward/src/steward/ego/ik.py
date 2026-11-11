@@ -1,17 +1,15 @@
 """Cobot Magic inverse kinematics on the robot's own kinematic model.
 
-The twin's model is the vendored Piper URDF (see :mod:`steward.assets.cobot`), compiled to
-MJCF and solved with mink: 6 revolute joints per arm, no analytic IK, and 6-DoF is exactly the
-case PyRoki refuses, so the solver is mink exactly as on the YAM arm.
+The twin's manufacturer USD kinematics (see :mod:`steward.assets.cobot`) are compiled to MJCF
+and solved with mink, with six revolute joints per arm.
 
 The solver freezes every DOF outside the arm being solved — the other arm's joints and both
 fingers — so a left-arm goal never drags the right arm along. Joint limits come from the model
-(:class:`mink.ConfigurationLimit`), so a solution is always inside the URDF ranges.
+(:class:`mink.ConfigurationLimit`), so a solution is always inside the model's ranges.
 
 Frames: the end-effector frame of an arm is its last revolute link (``L_link6`` / ``R_link6``).
-Its +z axis points out through the pinch point, 0.135 m away (``assets.cobot.TCP_OFFSET``), and
-the fingers separate along its y axis; the result is measured, not assumed — see
-``tests/test_cobot.py::test_tcp_is_where_the_fingers_pinch``. The solver's model carries a site
+Its +z axis points out through the operational pinch point (``assets.cobot.TCP_OFFSET``), and
+the fingers separate along its x axis (``tests/test_cobot_gripper.py``). The solver's model carries a site
 there (``L_pinch`` / ``R_pinch``) for :meth:`CobotIK.solve_body`.
 
 :meth:`CobotIK.solve_body` solves the whole body above the chassis at once -- the torso lift and
@@ -50,7 +48,7 @@ class IkError(RuntimeError):
 
 
 class CobotIK:
-    """FK/IK for one Cobot Magic twin, on the robot's own (URDF-derived) model."""
+    """FK/IK for one Cobot Magic twin, on the robot's own kinematic model."""
 
     def __init__(self, robot: dict | None = None, timestep: float = 0.002, self_clearance: float = 0.01) -> None:
         """``self_clearance``: the least distance :meth:`solve_body` keeps between an arm's links
@@ -62,10 +60,8 @@ class CobotIK:
         build = build_mjcf(SceneState(mode="world", entities=[_as_entity(ent)]), timestep=timestep)
         self.model = mujoco.MjModel.from_xml_string(_with_pinch_sites(build.xml), build.assets or None)
         self.data = mink.Configuration(self.model)
-        # MuJoCo's qpos0 is the zero posture, not the robot's posture: the lift's legal range does
-        # not even contain zero, so a solver seeded from qpos0 stands outside its own limits and
-        # every QP is infeasible. Seed from what the model was built with instead -- chassis pose
-        # from the entity, arms at their home posture, torso at its home height.
+        # Asset initial coordinates include the chassis pose, torso and finger opening;
+        # MuJoCo's qpos0 alone does not carry those values.
         q = np.array(self.model.qpos0, dtype=float)
         for jname, values in build.initial_qpos.items():
             adr = int(self.model.jnt_qposadr[_joint_id(self.model, jname)])
@@ -157,7 +153,7 @@ class CobotIK:
         return list(self._arms[self._check(arm)]["limits"])
 
     def neutral(self, arm: str) -> list[float]:
-        """A mid-range starting posture: the middle of each joint's URDF range."""
+        """A mid-range starting posture: the middle of each joint's allowed range."""
         return [0.5 * (lo + hi) for lo, hi in self.joint_limits(arm)]
 
     def current(self, arm: str) -> list[float]:

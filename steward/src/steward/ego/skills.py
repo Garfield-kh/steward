@@ -147,9 +147,12 @@ class SkillExecutor:
                  on_error: Callable[[str], None] | None = None, on_finish: Callable[[Job], None] | None = None,
                  on_begin: Callable[[str, dict], None] | None = None,
                  on_release: Callable[[str, list[float]], None] | None = None,
-                 clock: RobotLink | None = None):
+                 clock: RobotLink | None = None,
+                 home_empty: Callable[[Callable[[], dict]], bool] | None = None):
         """``clock`` is the robot link whose world clock times the control ticks (one hold per job,
-        ``skill/<job id>``); without it a tick sleeps ``tick_s`` of wall time."""
+        ``skill/<job id>``); without it a tick sleeps ``tick_s`` of wall time. ``home_empty``, when
+        provided, returns empty arms home after successful work using the job's cancellable tick.
+        Homing failure fails the job without attempting Cartesian recovery; None leaves arms as-is."""
         self._on_error = on_error
         self._clock = clock
         self._now = 0.0
@@ -157,6 +160,7 @@ class SkillExecutor:
         self._on_finish = on_finish
         self._on_begin = on_begin
         self._on_release = on_release
+        self._home_empty = home_empty
         self._command = command
         self._state = state
         self._mark_held = mark_held
@@ -167,6 +171,7 @@ class SkillExecutor:
         self._setpoints: dict[str, float] = {}  # the last target each joint was moved to
         self._look = False  # the running skill is a look-around
         self._keyframed = False  # that look-around turns at look_angular_speed only while perception keeps keyframes
+        self._arm_engaged = False  # Cartesian recovery is allowed only after this job docks successfully
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self.jobs: dict[str, Job] = {}
@@ -227,6 +232,8 @@ class SkillExecutor:
             raise
 
     def _run(self, job: Job, skill: str, receipt: dict) -> None:
+        homing = False
+        self._arm_engaged = False
         try:
             if self._clock is not None:
                 self._hold = f"skill/{job.id}"
@@ -256,17 +263,27 @@ class SkillExecutor:
                 self._pour(job, plan)
             else:
                 raise SkillFailed(f"unknown skill {skill}")
+            if self._home_empty is not None:
+                homing = True
+                if self._home_empty(self._tick):
+                    self._setpoints.clear()
+                    job.log.append("both empty arms returned to zero")
             job.state, job.message = "succeeded", job.message or f"{skill} completed"
         except SkillStopped:
             job.state, job.message = "stopped", "stopped on request"
         except SkillFailed as exc:
-            job.state, job.message = "failed", str(exc)
-            self._safe_retract()
+            job.state, job.message = "failed", (f"{job.message or skill + ' completed'}; homing failed: {exc}"
+                                                if homing else str(exc))
+            if not homing and self._arm_engaged:
+                self._safe_retract()
         except Exception as exc:  # noqa: BLE001 - surfaced to the caller through the job record
-            job.state, job.message = "failed", f"{type(exc).__name__}: {exc}"
+            detail = f"{type(exc).__name__}: {exc}"
+            job.state, job.message = "failed", (f"{job.message or skill + ' completed'}; homing failed: {detail}"
+                                                if homing else detail)
             if self._on_error is not None:
                 self._on_error(f"技能 {skill}（{job.id}）出现未预料的异常：{type(exc).__name__}: {exc}")
-            self._safe_retract()
+            if not homing and self._arm_engaged:
+                self._safe_retract()
         finally:
             job.finished = self._state()["stamp"]
             if self._clock is not None:
@@ -486,9 +503,10 @@ class SkillExecutor:
             pass
 
     def _dock(self, job: Job, plan: dict, retract: bool = True) -> None:
-        if retract:
-            # Only what the arm holds is held at the plan's tilt; an empty gripper points down.
-            self._retract(plan if self._state()["gripper"].get("holding") else {})
+        """Drive and verify docking with the arm unchanged, then prepare its retracted reach.
+        ``retract=False`` leaves the carrying reach unchanged for floor placement. Failure before
+        docking does not enable Cartesian arm recovery."""
+        self._arm_engaged = False
         self._drive(job, plan["path"], plan["yaw"])
         self._translate_to(plan["dock"][0], plan["dock"][1], plan["yaw"], tol=self.config.dock_position_tol)
         o = self._state()["odometry"]
@@ -497,7 +515,13 @@ class SkillExecutor:
         if dist > self.config.dock_tol or dyaw > self.config.dock_yaw_tol:
             self._backoff(plan)
             raise SkillFailed(f"docking missed the planned pose by {dist:.2f} m / {math.degrees(dyaw):.0f} deg")
+        if self._stop.is_set():
+            raise SkillStopped()
         job.log.append("docked")
+        self._arm_engaged = True
+        if retract:
+            # Only what the arm holds is held at the plan's tilt; an empty gripper points down.
+            self._retract(plan if self._state()["gripper"].get("holding") else {})
 
     def _gripper_xy(self) -> np.ndarray:
         """Gripper position from the robot's own odometry and reach encoder, on the arm's line

@@ -104,6 +104,7 @@ class EsimConfig:
     # (measured with the puzzle box: at 1.5 rad nothing came out, at 1.75 everything did).
     pour_roll_min: float = 1.7
     pour_check_step: float = 0.1  # roll step at which the whole tip is checked for a continuous motion
+    wrist_check_step: float = 0.1  # angular step for a held object's approach, including yaw and roll
     lift_check_step: float = 0.05  # height step at which a grasp's way down and up is checked likewise
     dock_reach_margin: float = 0.04  # a dock lands this far off its pose, and the reach with it
     retract_floor: float = 0.10  # the nearest a tilted tool is checked to come back to (a slide retracts to 0.10)
@@ -263,7 +264,9 @@ class Esim:
                   target_xy: tuple[float, float] | Callable[[float], tuple[float, float]], height: float,
                   exclude: set[str], load: Entity | None = None,
                   heading_issue: Callable[[float], str | None] | None = None,
-                  pitches: Sequence[float | None] = (0.0,), lifts: Sequence[float] | None = None) -> dict:
+                  pitches: Sequence[float | None] = (0.0,), lifts: Sequence[float] | None = None,
+                  wrist: Callable[[float], tuple[float, float]] | None = None,
+                  approach_path: Callable[[float, float, float], bool] | None = None) -> dict:
         """Choose the support side to dock at; return path, dock pose and reach, or raise.
 
         ``target_xy`` is where the gripper goes, or a function of the docked base heading giving it
@@ -274,7 +277,9 @@ class Esim:
         heading docked there (a wrist turn beyond its travel), with the reason it returns. The arm
         must hold its gripper there at one of ``pitches`` (tried in order; None: the least tilt the
         arm needs there), moving it through the heights ``lifts`` in turn (default: ``height``
-        alone) without turning over; a pitch other than 0 is returned as ``wristPitch``."""
+        alone) without turning over; a pitch other than 0 is returned as ``wristPitch``.
+        ``wrist`` supplies tool yaw and roll for each dock heading. ``approach_path`` checks the
+        motion to that heading and reach via a candidate retracted reach, from the held posture."""
         sbox, _, _ = entity_box(support)
         rx, ry, _ = self._robot_xy_yaw(es)
         c, s = math.cos(sbox.yaw), math.sin(sbox.yaw)
@@ -329,14 +334,18 @@ class Esim:
             if blocked:
                 reasons.append(f"side {normal}: dock pose collides with {blocked}")
                 continue
-            pitch = self._grasp_pitch(reach, height, lifts or [height], pitches)
+            wrist_yaw, wrist_roll = wrist(yaw) if wrist is not None else (0.0, 0.0)
+            pitch = self._grasp_pitch(reach, height, lifts or [height], pitches, wrist_yaw, wrist_roll)
             if pitch is None:
-                reasons.append(f"side {normal}: the arm cannot hold its gripper {reach:.2f} m out at {height:.2f} m")
+                reasons.append(f"side {normal}: the arm cannot hold its gripper {reach:.2f} m out at {height:.2f} m "
+                               f"(yaw {wrist_yaw:.2f}, roll {wrist_roll:.2f})")
                 continue
-            retract = self._retract_reach(reach, (lifts or [height])[-1], pitch) if pitch else None
-            if pitch and retract is None:
-                reasons.append(f"side {normal}: tilted {pitch:.2f} rad, the arm cannot bring its gripper back from "
-                               f"{reach:.2f} m without turning the wrist over")
+            accept = (lambda near: approach_path(yaw, reach, near)) if approach_path is not None else None
+            retract = (self._retract_reach(reach, (lifts or [height])[-1], pitch, wrist_yaw, wrist_roll, accept)
+                       if pitch or approach_path is not None else None)
+            if (pitch or approach_path is not None) and retract is None:
+                reasons.append(f"side {normal}: no continuous arm approach and retraction at yaw {wrist_yaw:.2f}, "
+                               f"roll {wrist_roll:.2f}, pitch {pitch:.2f}; try another placement or heading")
                 continue
             blocked = self._turn_blocked(obstacles_all, predock, self._sweep(carry))
             if blocked:
@@ -368,7 +377,9 @@ class Esim:
                 best = {"path": [list(p) for p in path], "predock": list(predock), "dock": list(dock), "yaw": yaw,
                         "reach": reach, "pathLength": length}
                 if pitch:
-                    best["wristPitch"], best["retractReach"] = pitch, retract
+                    best["wristPitch"] = pitch
+                if retract is not None:
+                    best["retractReach"] = retract
                 if len(path) > 1:
                     # Standing at the pre-dock pose already, there is no path to keep clear.
                     best["clearance"] = path_clearance(path, obstacles_all)
@@ -379,38 +390,42 @@ class Esim:
             raise PredictionError("no feasible approach: " + "; ".join(reasons) + (f"; {hint}" if hint else ""))
         return best
 
-    def _retract_reach(self, reach: float, lift: float, pitch: float) -> float | None:
-        """The nearest the arm brings its gripper back from ``reach`` at ``lift``, the tool tilted
-        ``pitch``, in one motion without turning the wrist over (``retract_floor`` at most); None
-        when it cannot come back ``retract_step`` at all."""
+    def _retract_reach(self, reach: float, lift: float, pitch: float, yaw: float = 0.0, roll: float = 0.0,
+                       accept: Callable[[float], bool] | None = None) -> float | None:
+        """The nearest checked retracted reach at ``lift`` and tool yaw, roll and pitch. The search
+        stops at ``retract_floor`` or the arm's minimum reach, and may keep ``reach`` unchanged;
+        None when no continuous retraction and optional approach ``accept`` are feasible."""
         cfg = self.config
-        if reach <= cfg.retract_floor:
-            return reach
-        near = cfg.retract_floor
-        while near < reach:
+        near = min(reach, max(cfg.retract_floor, self.reach_min))
+        while near <= reach:
             steps = max(1, math.ceil((reach - near) / cfg.lift_check_step))
-            if self.arm.reachable_path([{"lift": lift, "reach": reach - (reach - near) * k / steps, "wrist_pitch": pitch}
-                                        for k in range(steps + 1)]):
+            if self.arm.reachable_path([{"lift": lift, "reach": reach - (reach - near) * k / steps,
+                                         "wrist_yaw": yaw, "wrist_roll": roll, "wrist_pitch": pitch}
+                                        for k in range(steps + 1)]) and (accept is None or accept(near)):
                 return near
-            near += cfg.retract_step
+            if near == reach:
+                break
+            near = min(reach, near + cfg.retract_step)
         return None
 
     def _grasp_pitch(self, reach: float, height: float, lifts: Sequence[float],
-                     candidates: Sequence[float | None]) -> float | None:
+                     candidates: Sequence[float | None], yaw: float = 0.0, roll: float = 0.0) -> float | None:
         """The first tool tilt of ``candidates`` (None: the least the arm needs there) at which
         :meth:`_holds_there`; best one that also holds the gripper as far off as a dock lands."""
         for margin in (self.config.dock_reach_margin, 0.0):
             for wanted in candidates:
-                pitch = wanted if wanted is not None else self.arm.pitch_for(height, reach + margin)
-                if pitch is not None and self._holds_there(reach, height, lifts, pitch, margin):
+                pitch = wanted if wanted is not None else self.arm.pitch_for(height, reach + margin, yaw, roll)
+                if pitch is not None and self._holds_there(reach, height, lifts, pitch, margin, yaw, roll):
                     return pitch
         return None
 
-    def _holds_there(self, reach: float, height: float, lifts: Sequence[float], pitch: float, margin: float) -> bool:
+    def _holds_there(self, reach: float, height: float, lifts: Sequence[float], pitch: float, margin: float,
+                     yaw: float = 0.0, roll: float = 0.0) -> bool:
         """Whether the arm, its tool tilted ``pitch``, moves its gripper through ``lifts`` at ``reach``
         without turning over, and holds it at ``height`` ``margin`` nearer and farther too."""
-        return (all(self.arm.reachable(height, r, 0.0, 0.0, pitch) for r in {reach - margin, reach + margin})
-                and self.arm.reachable_path([{"lift": h, "reach": reach, "wrist_pitch": pitch} for h in self._lift_steps(lifts)]))
+        return (all(self.arm.reachable(height, r, yaw, roll, pitch) for r in {reach - margin, reach + margin})
+                and self.arm.reachable_path([{"lift": h, "reach": reach, "wrist_pitch": pitch,
+                                             "wrist_yaw": yaw, "wrist_roll": roll} for h in self._lift_steps(lifts)]))
 
     def _lift_steps(self, lifts: Sequence[float]) -> list[float]:
         """The heights ``lifts`` in turn, with steps of at most ``lift_check_step`` between them."""
@@ -921,7 +936,7 @@ class Esim:
         if params.get("flip"):
             plan["wristRoll"] = math.pi  # turned over about the arm axis before it is set down
             if self.config.flip_in_air:
-                plan.update(self._turn_over_plan(es, held, approach, height, surface, area))
+                plan.update(self._turn_over_plan(es, held, plan, height, surface, area))
         plan["gentle"] = self._affords(held, "pourable")
         return self._receipt(es, "place", params, risk, issues, plan)
 
@@ -941,7 +956,8 @@ class Esim:
                                   f"taken tilted at least {cfg.flip_pitch_min:.2f} rad: put it down and pick it again "
                                   "with flip")
         turn = min(self.lift_max, height + cfg.flip_turn_above)
-        low = self.arm.turn_over(turn, reach, pitch, height, surface, edge)
+        yaw = approach.get("wristYaw", self._arm_joints(es).get("wrist_yaw", 0.0))
+        low = self.arm.turn_over(turn, reach, pitch, height, surface, edge, wrist_yaw=yaw)
         if low is None:
             raise PredictionError(f"the arm cannot turn {held.id} over {reach:.2f} m out")
         if low - height > cfg.flip_drop_max:
@@ -979,8 +995,33 @@ class Esim:
                 turn = 0.0  # a side the wrist cannot turn at is refused by heading_issue
             return self._grip_spot(es, spot, heading, turn, flip)
 
+        current = self._arm_joints(es)
+        start_joints = {j.id: j.q.value[0] for j in self._self(es).rigid.joints if j.q.value}
+
+        def wrist_at(heading: float) -> tuple[float, float]:
+            return (current.get("wrist_yaw", 0.0) + wrist_turn(heading),
+                    math.pi if flip and not self.config.flip_in_air else current.get("wrist_roll", 0.0))
+
+        def path(heading: float, reach: float, near: float) -> bool:
+            # Driving preserves the arm's base-relative posture; these stages begin after docking.
+            yaw, roll = wrist_at(heading)
+            at = {"wrist_yaw": 0.0, "wrist_roll": 0.0, "wrist_pitch": 0.0, **current}
+            targets = [at]
+            stages = [{"reach": near}, {"wrist_yaw": yaw}, {"wrist_roll": roll},
+                      {"lift": (lifts or [height])[0]}, {"reach": reach}]
+            stages += [{"lift": h} for h in (lifts or [height])[1:]]
+            for change in stages:
+                end = {**at, **change}
+                steps = max(1, *(math.ceil(abs(end[k] - at[k]) /
+                                          (self.config.lift_check_step if k in ("lift", "reach")
+                                           else self.config.wrist_check_step)) for k in change))
+                targets.extend({k: at[k] + (end[k] - at[k]) * i / steps for k in at} for i in range(1, steps + 1))
+                at = end
+            return self.arm.reachable_path(targets, start_joints=start_joints)
+
         approach = self._approach(es, anchor, grip_at, height, {held.id}, heading_issue=heading_issue,
-                                  pitches=self._held_pitch(es), lifts=lifts)
+                                  pitches=self._held_pitch(es), lifts=lifts, wrist=wrist_at,
+                                  approach_path=None if flip and self.config.flip_in_air else path)
         return approach, grip_at(approach["yaw"])
 
     def _wrist_for(self, es: SceneState, held: Entity, yaw: float, dock_yaw: float, flip: bool = False) -> float:
@@ -1034,6 +1075,7 @@ class Esim:
         # chose a side the other one is tried too: from some postures one way turns the wrist
         # against its stop (joint6 on the Piper).
         pitch = self._held_pitch(es)[0]
+        yaw = self._arm_joints(es).get("wrist_yaw", 0.0)
 
         def tips(r: float) -> bool:
             steps = max(1, math.ceil(abs(r) / self.config.pour_check_step))
@@ -1041,7 +1083,7 @@ class Esim:
 
             def at(k: int, up: float) -> dict:
                 return {"lift": height + pivot * abs(math.sin(r * k / steps)) + up, "reach": approach["reach"],
-                        "wrist_roll": r * k / steps, "wrist_pitch": pitch}
+                        "wrist_yaw": yaw, "wrist_roll": r * k / steps, "wrist_pitch": pitch}
 
             return self.arm.reachable_path([at(k, 0.0) for k in range(steps + 1)]
                                            + [at(steps, rise * j / rises) for j in range(1, rises + 1)]

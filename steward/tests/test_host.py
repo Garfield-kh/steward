@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import threading
 
-from steward.net import call
+import pytest
+
+from steward.net import HttpError, call
 from steward.world.server import StewardHost
 
 
@@ -40,6 +42,28 @@ def test_episode_load_and_reset_over_wca_run_on_main_thread(kitchen_root, tmp_pa
         reset = _pump_while(host, lambda: call("POST", f"{wca}/wca/episode", {"action": "reset"}))
         assert reset["value"] == {"reset": True}
         assert call("GET", f"{wca}/wca/status")["t"] < 5.0
+    finally:
+        host.stop()
+
+
+def test_rejected_misnamed_phase_preserves_the_sensors_and_the_next_episode(kitchen_root, tmp_path):
+    host = StewardHost(kitchen_root, scenario="phase0-chores", phase="phase1", run_dir=tmp_path).start()
+    try:
+        wca = host.wca.url
+        robot = host.robot_servers["w:robot-1"].url
+        with pytest.raises(HttpError, match="no misnames configured") as rejected:
+            call("POST", f"{wca}/wca/phase", {"level": "phase0-misnamed"})
+        assert rejected.value.status == 400
+        assert call("GET", f"{wca}/wca/phase")["level"] == "phase1"
+        sensors = call("GET", f"{robot}/sensors")
+        assert sensors["imaging"] == "rgbd" and sensors["masks"]
+
+        loaded = _pump_while(host, lambda: call("POST", f"{wca}/wca/episode",
+                                                {"action": "load", "scenario": "phase0-shuttle"}))
+        assert loaded["value"]["scenario"] == "phase0-shuttle"
+        assert call("GET", f"{wca}/wca/phase")["level"] == "phase1"
+        sensors = call("GET", f"{robot}/sensors")
+        assert sensors["imaging"] == "rgbd" and sensors["masks"]
     finally:
         host.stop()
 

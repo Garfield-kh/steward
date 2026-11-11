@@ -32,6 +32,8 @@ The `cobot-magic` arm/lift geometry follows manufacturer `robot.usd`; the [embod
 
 AgileX preserves its arm posture until docking succeeds. Placement checks the required wrist orientation and IK continuity from measured joints; these checks do not replace full collision or dynamics planning. After successful work, both empty arms return their six joints to zero before the job completes, leaving lift and fingers unchanged. A held object or handle prevents homing; failures and cancellation do not initiate it. Homing failures are reported separately from the completed action.
 
+Passing `--misnames-config ''` disables name mappings. A switch to `phase0-misnamed` without a mapping is rejected, and the running world and later episodes retain the previous phase.
+
 ## Run with DeepSeek Harness
 
 ```sh

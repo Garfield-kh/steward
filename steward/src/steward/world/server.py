@@ -205,13 +205,18 @@ class StewardHost:
 
     def set_phase(self, level: str) -> dict:
         """Switch the running system to a phase level (module implementations), effective with the
-        next sensor frame; later episodes start at the same level."""
+        next sensor frame. Later episodes start at the selected level.
+
+        If the level or its required name mapping is invalid, the active and pinned levels
+        and the running simulation's perception settings are preserved.
+        """
         modules = phase_modules(level)
+        misnames = self._misnames_at(level)
         self.phase = self._pinned_phase = level
         if self.sim is not None:
             self.sim.perception.mode = modules["perception"]
             self.sim.perception.masks = modules.get("masks", True)
-            self.sim.perception.misnames = self._misnames_at(level)
+            self.sim.perception.misnames = misnames
             self.sim.events.append({"t": self.sim.time, "type": "phase/switch", "level": level})
         return self.phase_state()
 

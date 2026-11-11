@@ -260,7 +260,7 @@ def _footprint(sighting: Sighting) -> float:
 
 
 def _arm_for(y: float) -> tuple[str, str]:
-    """The arm that works the side of the table ``y`` is on: the twin's arms are 0.62 m apart."""
+    """The arm that works the side of the table ``y`` is on."""
     return ("L", "L_link6") if y >= 0.0 else ("R", "R_link6")
 
 

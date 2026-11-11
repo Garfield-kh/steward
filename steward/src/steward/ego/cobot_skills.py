@@ -298,7 +298,7 @@ class CobotSkills:
         job.log.append(f"base at {_fmt(self.tcp_base())}")
 
     def set_lift(self, job: Job, plan: dict) -> None:
-        """Set the torso height; ``plan['height']`` is the carriage height above the chassis top."""
+        """Set ``plan['height']`` metres of carriage travel above its lowest position."""
         height = float(plan["height"])
         lo, hi = LIFT_RANGE
         if not lo <= height <= hi:

@@ -244,3 +244,153 @@ def test_motion_state_reads_the_live_body_not_the_perception_clock(kitchen_scene
     assert state["joints"] == {"lift": 0.4, "reach": 0.2} and state["gripper"]["holding"]
     runtime.link = Dead()
     assert runtime._motion_state()["stamp"] == 5.0, "an unreachable body leaves the belief as the answer"
+
+
+def test_motion_state_does_not_wait_for_a_perception_update_in_progress(kitchen_scene):
+    """An RGB-D update holds the belief's lock for seconds. A turn that waited for it would let
+    the world clock pass its deadline with the base still at its first set point ("turn did not
+    converge"); the motion loop reads the live body and the objects of the last finished update."""
+    import threading
+    import time
+
+    from steward.ego.runtime import EgoRuntime, RobotLink
+
+    runtime = EgoRuntime(RobotLink("http://127.0.0.1:1"), steward_bot().to_dict())
+
+    class Live:
+        @staticmethod
+        def sensors() -> dict:
+            return {"stamp": 9.0, "odometry": {"x": 1.0, "y": 2.0, "yaw": 0.5}, "joints": {"lift": 0.4},
+                    "gripper": {"state": "open", "holding": False}}
+
+    runtime.link = Live()
+    runtime._motion_state()  # a read while nothing holds the lock
+    held, done = threading.Event(), threading.Event()
+
+    def long_update():
+        with runtime._lock:
+            held.set()
+            done.wait(5.0)
+
+    worker = threading.Thread(target=long_update)
+    worker.start()
+    try:
+        assert held.wait(2.0)
+        t0 = time.monotonic()
+        state = runtime._motion_state()
+        assert time.monotonic() - t0 < 0.5, "the motion loop waited for the perception update"
+        assert state["stamp"] == 9.0 and state["odometry"]["yaw"] == 0.5
+    finally:
+        done.set()
+        worker.join()
+
+
+def test_a_grasp_is_measured_against_the_body_now_not_the_last_look():
+    """With a slow segmenter the last perception update is from before the base docked and the arm
+    reached down. A grasp offset measured against that pose left the load believed 0.7 m from the
+    hand, and every place then planned its height from there ("height 0.20 m is outside the lift
+    range"). Measured against the body the skill reads when it closes, the load is in the hand."""
+    from steward.ego.estimator import Track
+
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    est.stamp = 1.0
+    est.odometry = {"x": 0.0, "y": 0.0, "yaw": 0.0, "sigma": {"pos": 0.01, "yaw": 0.01}}
+    est.joints = {"lift": 1.1, "reach": 0.0}
+    now = {"stamp": 9.0, "odometry": {"x": 0.6, "y": -0.3, "yaw": 0.4, "sigma": {"pos": 0.01, "yaw": 0.01}},
+           "joints": {"lift": 0.8, "reach": 0.25}, "gripper": {"state": "closed", "holding": True}}
+    load = est.gripper_position(None, now["joints"], now["odometry"]) + np.array([0.0, 0.0, -0.02])
+    assert np.linalg.norm(load - est.gripper_position()) > 0.3, "the stale pose is far from the hand"
+    track = Track(id="e:7", category_counts={"bowl": 1.0}, pos=load.copy(), var=np.full(3, 1e-4), yaw=0.0,
+                  yaw_var=1e-4, size=np.array([0.15, 0.15, 0.06]), observations=3, first_seen=0.0, last_seen=1.0)
+    est.tracks[track.id] = track
+    est.mark_held(track.id, since=9.0, body=now)
+    est.update_body(now)
+    assert np.linalg.norm(est.tracks["e:7"].pos - load) < 1e-6
+    assert np.linalg.norm(est.held_position() - load) < 1e-6
+
+
+def test_the_ego_state_puts_the_robot_and_its_load_where_they_are_now(kitchen_scene):
+    """The self pose in the Ego State was the one of the last perception update: with a slow
+    segmenter, a navigate reported success while the state still showed the robot where it set
+    out from, and plans (docks, place heights) were made from there. Objects stay as old as the
+    last look; the body, and the load in its hand, are read live."""
+    from steward.ego.estimator import SELF_ID, Track
+    from steward.ego.runtime import EgoRuntime, RobotLink
+    from steward.math3d import yaw_from_quat
+
+    runtime = EgoRuntime(RobotLink("http://127.0.0.1:1"), steward_bot().to_dict())
+    est = runtime.estimator
+    est.stamp = 5.0
+    est.odometry = {"x": 0.0, "y": 0.0, "yaw": 0.0, "sigma": {"pos": 0.01, "yaw": 0.01}}
+    est.joints = {"lift": 1.1, "reach": 0.0}
+    now = {"stamp": 9.0, "odometry": {"x": 1.0, "y": 2.0, "yaw": 0.5}, "joints": {"lift": 0.8, "reach": 0.2},
+           "gripper": {"state": "closed", "holding": True}}
+
+    class Live:
+        @staticmethod
+        def sensors() -> dict:
+            return now
+
+    class Dead:
+        @staticmethod
+        def sensors() -> dict:
+            raise OSError("robot port unavailable")
+
+    load = est.gripper_position(None, now["joints"], now["odometry"])
+    est.tracks["e:7"] = Track(id="e:7", category_counts={"cup": 1.0}, pos=load.copy(), var=np.full(3, 1e-4), yaw=0.0,
+                              yaw_var=1e-4, size=np.array([0.08, 0.08, 0.1]), observations=3, first_seen=0.0, last_seen=5.0)
+    est.mark_held("e:7", since=9.0, body=now)
+    runtime.link = Live()
+    es = runtime.ego_state()
+    me = next(e for e in es.entities if e.id == SELF_ID)
+    assert me.pose.value["p"][:2] == [1.0, 2.0] and abs(yaw_from_quat(me.pose.value["q"]) - 0.5) < 1e-9
+    cup = next(e for e in es.entities if e.id == "e:7")
+    assert np.linalg.norm(np.asarray(cup.pose.value["p"]) - load) < 1e-6, "the load is in the hand, where the hand is now"
+    runtime.link = Dead()
+    me = next(e for e in runtime.ego_state().entities if e.id == SELF_ID)
+    assert me.pose.value["p"][:2] == [0.0, 0.0], "an unreachable body leaves the belief's own pose"
+
+
+def test_a_load_is_put_down_on_a_support_smaller_than_the_edge_margin(kitchen_scene):
+    """The free-spot search kept the held object ``place_edge_margin`` plus its own half extent
+    from every edge; a bowl onto a plate (or a cup onto one) left no spot at all, and place
+    answered "no free spot on <plate>" however the robot stood. A support that narrow takes the
+    load at its centre, wholly on it."""
+    from steward.ego.estimator import Track
+
+    sim = WorldSim(kitchen_scene, seed=6)
+    model = steward_bot().to_dict()
+    est = EgoEstimator(robot_model=model)
+    _observe(sim, est, 3)
+    plate = next(t for t in est.tracks.values() if t.category == "plate")
+    est.tracks["e:load"] = Track(id="e:load", category_counts={"bowl": 1.0}, pos=est.gripper_position().copy(),
+                                 var=np.full(3, 1e-4), yaw=0.0, yaw_var=1e-4, size=np.array([0.15, 0.15, 0.06]),
+                                 observations=5, first_seen=0.0, last_seen=est.stamp)
+    est.mark_held("e:load", since=est.stamp)
+    assert max(plate.size[:2]) / 2 < Esim(model).config.place_edge_margin + 0.075
+    receipt = Esim(model).predict(est.to_scene(), "place", {"on": plate.id})
+    assert receipt["feasible"], receipt["issues"]
+    spot = np.asarray(receipt["plan"]["spot"])
+    assert np.linalg.norm(spot - plate.pos[:2]) < 0.03
+
+
+def test_a_load_let_go_is_believed_at_the_height_the_hand_lowered_it_to():
+    """The last frame before a place saw the load at the carry height; the release told the
+    belief its new x and y but kept that height, so a cup put on the table was believed 0.3 m
+    above it, and the next view of it there started a second cup."""
+    from steward.ego.estimator import Track
+
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    est.stamp = 1.0
+    est.odometry = {"x": 0.0, "y": 0.0, "yaw": 0.0, "sigma": {"pos": 0.01, "yaw": 0.01}}
+    est.joints = {"lift": 1.1, "reach": 0.1}
+    carried = est.gripper_position()
+    est.tracks["e:7"] = Track(id="e:7", category_counts={"cup": 1.0}, pos=carried.copy(), var=np.full(3, 1e-4),
+                              yaw=0.0, yaw_var=1e-4, size=np.array([0.08, 0.08, 0.1]), observations=3,
+                              first_seen=0.0, last_seen=1.0)
+    est.mark_held("e:7", since=1.0)
+    now = {"stamp": 6.0, "odometry": {"x": 0.3, "y": 0.0, "yaw": 0.0}, "joints": {"lift": 0.8, "reach": 0.3}}
+    lowered = est.gripper_position(None, now["joints"], now["odometry"])
+    assert est.release_at("e:7", [float(lowered[0]), float(lowered[1])], body=now)
+    assert abs(est.tracks["e:7"].pos[2] - lowered[2]) < 1e-6 and lowered[2] < carried[2] - 0.25
+    assert est.held_id is None and not est.tracks["e:7"].held

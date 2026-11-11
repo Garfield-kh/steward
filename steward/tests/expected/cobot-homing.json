@@ -1,0 +1,19 @@
+{
+  "state": "succeeded",
+  "message": "placed cup on table",
+  "log": ["released cup on table", "both empty arms returned to zero"],
+  "armJoints": {
+    "L_joint1": 0.0,
+    "L_joint2": 0.0,
+    "L_joint3": 0.0,
+    "L_joint4": 0.0,
+    "L_joint5": 0.0,
+    "L_joint6": 0.0,
+    "R_joint1": 0.0,
+    "R_joint2": 0.0,
+    "R_joint3": 0.0,
+    "R_joint4": 0.0,
+    "R_joint5": 0.0,
+    "R_joint6": 0.0
+  }
+}

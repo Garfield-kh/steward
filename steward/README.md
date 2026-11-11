@@ -22,7 +22,15 @@ open http://127.0.0.1:7400/console   # 浏览器控制台：斜视主视图、�
 .venv/bin/steward build-kitchen # 机器人模型改动后（如头部加装的广角相机）重建默认场景
 ```
 
+Focus either preview with a click or Tab: WASD moves the shared view horizontally, Shift accelerates, dragging turns in place, and scrolling zooms. Release the keys, leave the preview or press Escape to stop. Presets recenter the view. These controls do not move the robot or its sensor cameras.
+
 The robot has two head RGB-D cameras: `head_camera` looks ahead; the short-focal-length `wide_camera` sees the nearby worktop and gripper. Both contribute to perception; see [steward.md 13.8](../steward.md#138-机器人本体的双相机).
+
+The `cobot-magic` arms start with joint1–joint6 at zero radians and their fingers open. The `cobot-magic` grippers use simplified palm, guide, slider and finger geometry. Their fingers extend along the tool axis and open symmetrically to a 100 mm inner aperture; the grasp point lies between the pads, 5 mm behind the tips. These visual primitives are not manufacturer CAD or contact-based gripping.
+
+The `cobot-magic` arm/lift geometry follows manufacturer `robot.usd`; the [embodiment profile](embodiments/cobot-magic.yaml) records coordinate mappings, unit assumptions and retained simulation approximations. Runtime assets come from `src/steward/assets/cobot.py`, not the descriptive YAML. See the [migration guide](../docs/upgrade-guide/v0.2.2-alpha.2/cobot-lift-coordinates/guide.md) for saved scenes and raw lift commands.
+
+AgileX preserves its arm posture until docking succeeds. Placement checks the required wrist orientation and IK continuity from measured joints; these checks do not replace full collision or dynamics planning. After successful work, both empty arms return their six joints to zero before the job completes, leaving lift and fingers unchanged. A held object or handle prevents homing; failures and cancellation do not initiate it. Homing failures are reported separately from the completed action.
 
 Passing `--misnames-config ''` disables name mappings. A switch to `phase0-misnamed` without a mapping is rejected, and the running world and later episodes retain the previous phase.
 

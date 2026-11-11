@@ -1,0 +1,14 @@
+{
+  "yaw": {
+    "feasible": false,
+    "issues": [
+      "no feasible approach: side (1.0, 0.0): the arm cannot hold its gripper 0.33 m out at 0.77 m (yaw 1.10, roll 0.00); side (-1.0, 0.0): the arm cannot hold its gripper 0.33 m out at 0.77 m (yaw 1.10, roll 0.00); side (0.0, 1.0): the arm cannot hold its gripper 0.23 m out at 0.77 m (yaw 1.10, roll 0.00); side (0.0, -1.0): the arm cannot hold its gripper 0.43 m out at 0.77 m (yaw 1.10, roll 0.00)"
+    ]
+  },
+  "roll": {
+    "feasible": false,
+    "issues": [
+      "no feasible approach: side (1.0, 0.0): the arm cannot hold its gripper 0.33 m out at 0.77 m (yaw 0.00, roll 0.40); side (-1.0, 0.0): the arm cannot hold its gripper 0.33 m out at 0.77 m (yaw 0.00, roll 0.40); side (0.0, 1.0): the arm cannot hold its gripper 0.23 m out at 0.77 m (yaw 0.00, roll 0.40); side (0.0, -1.0): the arm cannot hold its gripper 0.43 m out at 0.77 m (yaw 0.00, roll 0.40)"
+    ]
+  }
+}

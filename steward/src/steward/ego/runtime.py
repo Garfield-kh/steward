@@ -309,6 +309,8 @@ class EgoRuntime:
         self.alerts: list[dict] = []
         self.plan: dict | None = None
         self._episode: int | None = None  # the world's episode number of the last sensor frame
+        self._generation = 0  # counts restarts: state read in one episode is not applied in the next
+        self._receipt_generation: dict[str, int] = {}  # receipt id -> the generation it was predicted in
         self._looked_at: dict[str, float] = {}  # target id -> body stamp of its last fresh look
         self._roles: dict[str, str] = {}  # the latest role assignment, kept unless clearly outweighed
         self.activity: collections.deque[dict] = collections.deque(maxlen=ACTIVITY_MAX)
@@ -321,8 +323,12 @@ class EgoRuntime:
                                       self._mark_held, self.config.motion,
                                       shift=self._shift_track, on_error=lambda msg: self.alert(msg, "skill"),
                                       on_finish=self._skill_finished, on_release=self._released,
-                                      on_begin=self._skill_begin, clock=self.link)
+                                      on_begin=self._skill_begin, clock=self.link,
+                                      home_empty=lambda tick: self.arm.home_empty(self.link.command, tick))
         self._view_scene: tuple[dict, int, float] | None = None  # (ES dict, version, stamp) for the view
+        # The belief part of the motion state, recorded under ``_lock`` at each read and around each
+        # perception update; :meth:`_motion_state` falls back on it while another thread holds the lock.
+        self._motion_belief: dict | None = None
         self.face_error: str | None = None  # why the latest camera image for faces could not be fetched
         self._face_thread: threading.Thread | None = None
         renderer = EgoViewRenderer()
@@ -379,20 +385,24 @@ class EgoRuntime:
             with self._lock:
                 if self._new_episode(frame):
                     self._restart()
+                self._keep_motion_belief()  # what a motion loop reads while this update runs
                 if not frames:
                     self.estimator.update_body(frame)
                 for rgbd in frames:
                     self.estimator.update_rgbd(rgbd, defer=self._handoff(rgbd, frames))
                     self._look_at_faces(rgbd)
                 self._publish_view_scene()
+                self._keep_motion_belief()
             return
         frame = {**frame, "cameras": [c for c in frame.get("cameras", []) if c["id"] in cameras],
                  "detections": [d for d in frame.get("detections", []) if d.get("camera") in cameras]}
         with self._lock:
             if self._new_episode(frame):
                 self._restart()
+            self._keep_motion_belief()  # what a motion loop reads while this update runs
             self.estimator.update(frame)
             self._publish_view_scene()
+            self._keep_motion_belief()
 
     def _cameras(self, frame: dict) -> list[str]:
         """The cameras to perceive with: those of the robot model (or ``RuntimeConfig.cameras``) that
@@ -610,13 +620,16 @@ class EgoRuntime:
         Ego-State and everything derived from it (receipts, roles, looks, keyframes) and
         cancel any running skill. Track ids start again at ``e:1``."""
         self.executor.cancel()
+        self._generation += 1
         self.estimator = EgoEstimator(robot_model=self.estimator.robot_model, config=self.estimator.config)
         self.receipts.clear()
+        self._receipt_generation.clear()  # skills predicted before now are of another episode
         self._roles.clear()
         self._looked_at.clear()
         self._keyframe = {}
         self._pose_sample = None
         self._still_since = None
+        self._motion_belief = None
 
     def _loop(self) -> None:
         """Perceive every ``1 / perception_hz`` seconds of world time, from the time the runtime started;
@@ -669,8 +682,31 @@ class EgoRuntime:
 
     # --------------------------------------------------------------- state
     def ego_state(self) -> SceneState:
+        """The belief, with the robot itself as it is now: objects are as old as the last
+        perception update, but the body's own pose and joints are read live. With a slow segmenter
+        the last update can be tens of seconds and a whole drive old, and a plan made from that
+        self pose (a dock, a place height from the load in the hand) belongs to where the robot
+        no longer is."""
+        # The body is read after waiting out an RGB-D update in progress (seconds under load) --
+        # read before it, the self pose and the load in the hand were already that old when
+        # composed -- but not while holding the lock, so a slow sensor service does not stall
+        # perception. A belief that moved on meanwhile (another update, or a reset) has a body at
+        # least as new as the one read: that one is the answer then.
         with self._lock:
-            return self.estimator.to_scene()
+            generation = self._generation
+        try:
+            live = self.link.sensors()
+        except Exception:  # noqa: BLE001 - the belief's own self pose is a usable answer when the body cannot be reached
+            live = None
+        with self._lock:
+            est = self.estimator
+            if live is not None and (generation != self._generation
+                                     or live.get("odometry") is None or live.get("stamp") is None
+                                     or live["stamp"] < est.stamp - 1e-6
+                                     or (live.get("episode") is not None and self._episode is not None
+                                         and live["episode"] != self._episode)):
+                live = None  # older than the belief, or another episode's body: the belief's own
+            return est.to_scene(live)
 
     def _motion_state(self) -> dict:
         """What the body is doing now, for the motion loop.
@@ -679,36 +715,97 @@ class EgoRuntime:
         belief: with a real segmenter the next RGB-D frame can be seconds or tens of seconds
         away, and a motion loop that grades its progress on the perception clock either stalls
         or reads a frame rendered before it started and calls the turn failed. Objects stay the
-        estimate they are — the body only needs to know where it is."""
-        with self._lock:
-            est = self.estimator
-            entities = {t.id: {"p": t.pos.tolist()} for t in est.tracks.values()}
-            state = {"stamp": est.stamp, "odometry": dict(est.odometry), "joints": dict(est.joints),
-                     "gripper": dict(est.gripper), "grippers": dict(est.grippers), "entities": entities}
+        estimate they are — the body only needs to know where it is.
+
+        Nor may the loop wait for the belief's lock: an RGB-D update holds it for its whole
+        duration (seconds on a loaded host), the world clock goes on once the loop's hold lapses,
+        and a turn or drive that set its ramp before the wait finds its deadline passed with the
+        base still at the first set point. While another thread holds the lock, the objects are
+        those recorded when the perception update in progress began (everything changed before
+        it is in there) or at the last read, whichever came later."""
+        if self._lock.acquire(blocking=False):
+            try:
+                belief = self._keep_motion_belief()
+            finally:
+                self._lock.release()
+        else:
+            belief = self._motion_belief
+            if belief is None:  # nothing recorded yet: nothing to fall back on but waiting
+                with self._lock:
+                    belief = self._keep_motion_belief()
+        state = {key: dict(value) if isinstance(value, dict) else value for key, value in belief.items()}
+        state.pop("generation", None)
         try:
             live = self.link.sensors()
         except Exception:  # noqa: BLE001 - the belief is still a usable answer when the body cannot be reached
             return self.arm.virtualize(state)
+        # A body from another episode than the objects (a reset race: a clock behind the belief's,
+        # or another episode number) is not mixed in: the body and the objects of one answer
+        # belong to one episode, so the belief is returned whole.
+        if (live.get("stamp") is not None and belief.get("stamp") is not None and live["stamp"] < belief["stamp"] - 1e-6) \
+                or (live.get("episode") is not None and belief.get("episode") is not None
+                    and live["episode"] != belief["episode"]) or belief.get("generation") != self._generation:
+            return self.arm.virtualize(state)
         for key in ("stamp", "odometry", "joints", "gripper", "grippers"):
             if live.get(key) is not None:
                 state[key] = live[key]
-        if live.get("stamp") is not None and live["stamp"] < state["stamp"] - 1e-6:
-            state["stamp"] = est.stamp  # an episode reset race: prefer the belief's own clock
         return self.arm.virtualize(state)
 
+    def _keep_motion_belief(self) -> dict:
+        """Record (and return) the belief part of the motion state; the caller holds ``_lock``."""
+        est = self.estimator
+        self._motion_belief = {
+            "generation": self._generation, "episode": self._episode, "stamp": est.stamp, "odometry": dict(est.odometry), "joints": dict(est.joints),
+            "gripper": dict(est.gripper), "grippers": dict(est.grippers),
+            "entities": {t.id: {"p": t.pos.tolist()} for t in est.tracks.values()}}
+        return self._motion_belief
+
     def _mark_held(self, track_id: str) -> str:
-        at = self.estimator.stamp
+        """Record the grasp the skill just felt, measured against the body as it is now: the last
+        perception update can be a slow segmentation old, from before the base docked and the arm
+        reached down, and an offset taken against it leaves the load believed half a metre from
+        the hand (every place then plans its height from there)."""
+        generation, at, body = self._skill_generation(), self.estimator.stamp, None
         try:
-            at = float(self.link.sensors().get("stamp", at))  # the body's clock, now
-        except Exception:  # noqa: BLE001 - the belief's own clock is a usable second best
-            pass
+            body = self.link.sensors()
+            at = float(body.get("stamp", at))  # the body's clock, now
+        except Exception:  # noqa: BLE001 - the belief's own clock and pose are a usable second best
+            body = None
         with self._lock:
-            return self.estimator.mark_held(track_id, at, gripper=self.arm.geometry.gripper)
+            if not self._same_episode(generation, body):  # the skill or the body is another episode's
+                return track_id
+            return self.estimator.mark_held(track_id, at, gripper=self.arm.geometry.gripper, body=body)
 
     def _released(self, track_id: str, spot: list[float]) -> None:
-        """A place knows where it let go; the belief is told, not left to infer it later."""
+        """A place knows where it let go; the belief is told, not left to infer it later -- at the
+        height the hand is at now, not the carry height the last perception update saw."""
+        generation = self._skill_generation()
+        try:
+            body = self.link.sensors()
+        except Exception:  # noqa: BLE001 - the last estimated height is a usable second best
+            body = None
         with self._lock:
-            self.estimator.release_at(track_id, spot)
+            if not self._same_episode(generation, body):  # the skill or the body is another episode's
+                return
+            self.estimator.release_at(track_id, spot, body=body)
+
+    def _skill_generation(self) -> int:
+        """The generation the running skill was predicted in: a callback reached after a reset (the
+        old skill thread paused past it) belongs to that skill's episode, not to the current one.
+        Outside a skill thread, the current generation."""
+        name = threading.current_thread().name
+        job = self.executor.jobs.get(name[len("skill-"):]) if name.startswith("skill-") else None
+        if job is None:
+            return self._generation
+        return self._receipt_generation.get(job.receipt, -1)
+
+    def _same_episode(self, generation: int, body: dict | None) -> bool:
+        """Whether a skill event of ``generation``, with ``body`` read for it, belongs to the
+        current episode; the caller holds ``_lock``."""
+        if generation != self._generation:
+            return False
+        return not (body is not None and body.get("episode") is not None and self._episode is not None
+                    and body["episode"] != self._episode)
 
     def _shift_track(self, track_id: str, delta: list[float]) -> None:
         with self._lock:
@@ -1132,6 +1229,7 @@ class EgoRuntime:
         receipt["maxRisk"] = limit
         with self._lock:
             self.receipts[receipt["id"]] = receipt
+            self._receipt_generation[receipt["id"]] = self._generation
         return receipt
 
     def annotate(self, request: dict) -> dict:

@@ -1,15 +1,25 @@
-# Cobot Magic embodiment profile (agilex branch)
-#
-# steward's robot embodiment = AgileX Cobot Magic. The real machine is a Mobile-ALOHA-style
-# platform: a TRACER 2.0 differential-drive chassis carrying a height-adjustable torso with four
-# Piper arms (two leader arms for teleoperation, two follower arms that autonomy uses). The twin
-# models the autonomous half: planar base, lift, the two follower arms, and a two-camera head. The same profile drives WSim and the real machine (HAL swaps the
-# backend, never the verbs). Fields marked MEASURE are placeholders pending the physical survey
-# of the agilex workstation; they are safe defaults until then. Arm kinematics are the vendored
-# URDF, not this file: third_party/piper_description/urdf/ (see PROVENANCE.md).
+# Descriptive embodiment profile; runtime geometry is built by assets/cobot.py.
+# USD supplies arm/lift kinematics. The planar chassis, cameras, contact geometry,
+# masses and actuators remain simulation approximations; no wheel dynamics are imported.
 
 id: cobot-magic
 display: AgileX Cobot Magic (TRACER 2.0 base + dual Piper + two-camera head)
+
+reference:
+  file: robot.usd
+  sha256: 7d9ed2f0ce4a40dc3d3a28c80c763661dbd0d33f3684e509d9ee0db7df9b2e49
+  prim: /Root/split_aloha_mid_360_with_piper/split_aloha_mid_360_with_piper
+  linear_unit_m: 1.0   # Assumption: URDF-sized coordinates; USD omits metersPerUnit (fallback 0.01).
+  angular_unit: degree # Converted to radians in the runtime model.
+  base_in_steward:
+    p: [0.0, 0.0, 0.32052979804575443]
+    q: [1, 0, 0, 0]
+    calibration: geometric estimate from the lowest wheel mesh point; not measured on hardware
+  joint_mapping:
+    L_joint1_to_8: fl_joint1_to_8  # Same sign and zero; radians for 1..6, metres for 7..8.
+    R_joint1_to_8: fr_joint1_to_8
+    lift: lifting_joint          # Steward lift = USD lifting_joint + 0.60 m.
+  fixed_mount_rounding: sub-micrometre translations and sub-microradian rotations are treated as zero
 
 mechanical:
   base: planar           # TRACER 2.0 differential drive: position control on x, y, yaw
@@ -19,22 +29,23 @@ mechanical:
     height_m: 0.155
     mass_kg: 30
     drive: differential
-  torso:                 # MEASURE: height-adjustable carriage carrying the arms
+  torso:
     joint: lift          # prismatic, z
-    travel_m: [0.35, 1.05]   # carriage height above the chassis top
-    home_m: 0.70             # arms at 0.855 m: a hand's width above a 0.75 m table
+    travel_m: [0.0, 0.60] # displacement above the lowest carriage position
+    home_m: 0.0
+    origin_in_usd_base_m: [0.22448, 0.0, 1.1147] # USD joint zero is fully raised.
   arms:
     - id: left
       model: piper
       dof: 6             # revolute joint1..joint6, limits in URDF (effort 100)
-      mount:             # MEASURE: transform base -> arm root on the Cobot Magic frame
-        p: [0.0, 0.31, 0.0]   # placeholder: half the arm separation
+      mount:             # lifting_link -> arm_base
+        p: [0.144, 0.306, 0.138]
         q: [1, 0, 0, 0]
     - id: right
       model: piper
       dof: 6
-      mount:             # MEASURE
-        p: [0.0, -0.31, 0.0]
+      mount:
+        p: [0.144, -0.306, 0.138]
         q: [1, 0, 0, 0]
   grippers:
     - arm: left
@@ -48,6 +59,7 @@ mechanical:
   grasp:
     sim: ideal-attach    # Phase-0 style capture; swap for physical closure before sim2real acceptance
     real: physical-closure
+    tcp_in_link6_m: [0.0, 0.0, 0.13503] # Operational finger-plane TCP; not factory-calibrated.
   leader_arms: 2         # teleoperation only; autonomy uses the two follower arms
 
 sensors:
@@ -72,9 +84,9 @@ sensors:
     invisible_materials: transparent glass (Astra structured light + SAM3 both fail; task subset avoids)
 
 self_model:
-  kinematics: {source: third_party/piper_description/urdf, format: urdf, sim: mjcf-converted}
+  kinematics: {source: robot.usd, implementation: src/steward/assets/cobot.py, sim: mjcf-converted}
   ik: {solver: mink, note: "6-DoF; PyRoki rejects 6-DoF (YAM precedent)"}   # ASPIRE yam_real is the porting reference
-  collision: primitive approximation per link (upgrade to meshes when vendored)
+  collision: primitive approximation per link; fingers visual-only
   camera_fk: any-link FK chain (head fixed on the chassis)
   actuator: position control, joint velocity limits MEASURE from Piper spec
 
@@ -90,7 +102,7 @@ execution_stack:         # all services run locally on the agilex workstation RT
 
 sim2real:
   real_backend: piper_sdk   # pip package, SocketCAN can0 @1Mbps; no ROS dependency
-  safety: [hardware e-stop REQUIRED before any motion, "--allow-motion" software interlock, joint velocity caps]
+  safety: [hardware e-stop REQUIRED before any motion, '"--allow-motion" software interlock', joint velocity caps]
   calibration: [head camera intrinsics, head-to-arm extrinsics, arm mount transforms]  # MEASURE, replaces placeholders above
   observer_gt: apriltag + head camera
   wh_role: operator console; human perturbations

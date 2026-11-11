@@ -22,7 +22,15 @@ open http://127.0.0.1:7400/console   # 浏览器控制台：斜视主视图、�
 .venv/bin/steward build-kitchen # 机器人模型改动后（如头部加装的广角相机）重建默认场景
 ```
 
+点击任一预览面板或用 Tab 聚焦：WASD 水平移动共用视角，Shift 加速，拖动原地转头，滚轮缩放。松开按键、焦点离开预览或按 Escape 停止移动，预设视角可回到场景中心。这些操作不移动机器人或其传感器相机。
+
 机器人头部有两台 RGB-D 相机：`head_camera` 看前方，`wide_camera` 是短焦广角相机，看身前台面与夹爪；两台都进入感知，见 [steward.md 13.8](../steward.md#138-机器人本体的双相机)。
+
+`cobot-magic` 左右臂 joint1～joint6 初始角度均为 0 弧度，夹爪初始张开。`cobot-magic` 夹爪使用简化的掌体、导轨、滑块与手指几何。手指沿工具轴延伸，对称张开时内侧开口最大为 100 mm；抓取点位于两侧指垫之间、指尖后方 5 mm。这些显示几何不代表厂家 CAD，也不提供接触式抓取。
+
+`cobot-magic` 双臂和升降机构的几何采用厂家 `robot.usd` 数据；[本体配置说明](embodiments/cobot-magic.yaml)记录坐标映射、单位假设和保留的仿真近似。运行时资产由 `src/steward/assets/cobot.py` 生成，说明性 YAML 不直接驱动资产。已有场景及原始升降指令的调整见[迁移说明](../docs/upgrade-guide/v0.2.2-alpha.2/cobot-lift-coordinates/guide.zh.md)。
+
+AgileX 在停靠成功前保持机械臂姿态。放置规划检查目标腕姿及从实测关节状态出发的 IK 连续性，但不代替完整碰撞或动力学规划。操作成功且双手空闲时，双臂各六个关节归零后任务才完成，升降轴和夹爪开度保持不变。任一手持物或抓着把手时不归位；失败和停止也不启动归位。归位失败与已完成的动作分别报告。
 
 传入 `--misnames-config ''` 会禁用名称映射。缺少映射时切换到 `phase0-misnamed` 会被拒绝，当前世界和后续 Episode 保留原感知级别。
 

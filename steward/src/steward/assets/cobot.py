@@ -1,22 +1,14 @@
-"""Cobot Magic embodiment: the AgileX dual Piper mobile manipulation platform.
+"""AgileX twin with manufacturer USD arm/lift kinematics and primitive geometry.
 
-The real machine is a Mobile-ALOHA-style platform: a TRACER 2.0 differential-drive chassis
-carrying a height-adjustable torso with two Piper arms (the kit has four — two leader arms for
-teleoperation, which autonomy does not use). The twin models the autonomous half of that: a
-planar base, a lifting carriage, and the two follower arms. Its cameras are the mobile kitchen
-robot's head (a survey camera and a short-focal-length work camera on a mast), so the two bodies
-perceive alike and either can take any scenario.
+``embodiments/cobot-magic.yaml`` records the source digest, joint mapping and unit
+assumption. The USD base frame is raised to put the lowest wheel mesh point on the
+floor; this is a geometric estimate, not a measured real-robot calibration. USD
+joint-frame rotations are converted to child-link frames, with sub-micrometre
+mount residuals rounded away. The lift reads metres above its lowest position.
 
-Arm kinematics are transcribed verbatim from the vendored URDF
-``third_party/piper_description/urdf/piper_description_v100_camera.urdf``
-(pinned upstream commit in ``third_party/piper_description/PROVENANCE.md``).
-Every joint origin, axis and limit matches the URDF; link collision geometry is
-approximated by capsules between consecutive joint origins at the zero pose.
-
-Chassis and lift dimensions are MEASURE placeholders pending the physical survey
-of the agilex workstation; see ``steward/embodiments/cobot-magic.yaml``. The
-chassis is a planar root (absolute x, y, yaw); the carriage rides a prismatic
-lift joint above it and carries both arm mounts; the head stays on the chassis.
+The planar chassis, fixed two-camera head, masses, servo gains and simplified
+collision geometry are simulation approximations. Fingers remain visual-only;
+grasping uses ideal attachment and an operational, uncalibrated TCP.
 """
 
 from __future__ import annotations
@@ -26,48 +18,51 @@ import math
 import numpy as np
 
 from steward.assets.generators import HEAD_HEIGHT_M, ROBOT_ARM, ROBOT_BODY, STEEL, TEMPLATE_ID, _fixed, head_link
-from steward.math3d import quat_from_axis_angle
+from steward.math3d import quat_from_axis_angle, quat_normalize
 from steward.scene.schema import Entity, Joint, Link, RigidTree, exact, pose, primitive
 
 GRIPPER_RGBA = [0.10, 0.10, 0.10, 1.0]
 
-# (id, parent, child, xyz, rpy, lo, hi) — URDF joint1..joint6, all revolute about z.
+# USD fl/fr joint1..joint6; quaternions are wxyz, angles and limits are radians.
 _PIPER_CHAIN: list[dict] = [
-    dict(jid="joint1", parent="arm_base", child="link1", xyz=[0.0, 0.0, 0.123], rpy=[0.0, 0.0, -1.5708],
+    dict(jid="joint1", parent="arm_base", child="link1", xyz=[0.0, 0.0, 0.123], quat=[0.7071055174, 0.0, 0.0, -0.7071080804],
          lo=-2.618, hi=2.618),
-    dict(jid="joint2", parent="link1", child="link2", xyz=[0.0, 0.0, 0.0], rpy=[1.5708, -0.0349, -1.5708],
+    dict(jid="joint2", parent="link1", child="link2", xyz=[0.0, 0.0, 0.0], quat=[0.5086483955, 0.4911975563, -0.5086519718, -0.4911975563],
          lo=0.0, hi=3.14),
-    dict(jid="joint3", parent="link2", child="link3", xyz=[0.2836, 0.0287, 0.0], rpy=[0.0, 0.0, 0.066],
+    dict(jid="joint3", parent="link2", child="link3", xyz=[0.28358, 0.028726, 0.0], quat=[0.9994548559, 0.0, 0.0, 0.0330157019],
          lo=-2.697, hi=0.0),
-    dict(jid="joint4", parent="link3", child="link4", xyz=[-0.2422, 0.0685, 0.0], rpy=[-1.5708, 0.0, 1.3826],
+    dict(jid="joint4", parent="link3", child="link4", xyz=[-0.24221, 0.068514, 0.0], quat=[0.5447667241, -0.5447686911, -0.4508091807, 0.4508075416],
          lo=-1.832, hi=1.832),
-    dict(jid="joint5", parent="link4", child="link5", xyz=[0.0, 0.0, 0.0], rpy=[1.5708, 0.0, 0.0],
+    dict(jid="joint5", parent="link4", child="link5", xyz=[0.0, 0.0, 0.0], quat=[0.7071055174, 0.7071080804, 0.0, 0.0],
          lo=-1.22, hi=1.22),
-    dict(jid="joint6", parent="link5", child="link6", xyz=[0.0, 0.091, 0.0014], rpy=[-1.5708, -1.5708, 0.0],
+    dict(jid="joint6", parent="link5", child="link6", xyz=[0.0, 0.091, 0.0014165], quat=[0.4999982119, -0.5, -0.5, -0.5000018477],
          lo=-3.14, hi=3.14),
 ]
 
 # Fingers: prismatic joint7/joint8 out of link6 (position control, intermediate aperture).
 _PIPER_FINGERS: list[dict] = [
-    dict(jid="joint7", child="link7", xyz=[0.0, 0.0, 0.135], rpy=[1.5708, 0.0, 1.5708], axis=[0.0, 0.0, -1.0],
+    dict(jid="joint7", child="link7", xyz=[0.0, 0.0, 0.13503], quat=[0.4999982119, 0.5, 0.5000018477, 0.5], axis=[0.0, 0.0, -1.0],
          lo=0.0, hi=0.05),
-    dict(jid="joint8", child="link8", xyz=[0.0, 0.0, 0.135], rpy=[-1.5708, 0.0, 1.5708], axis=[0.0, 0.0, 1.0],
+    dict(jid="joint8", child="link8", xyz=[0.0, 0.0, 0.13503], quat=[0.4999982119, -0.5, -0.5000018477, 0.5], axis=[0.0, 0.0, 1.0],
          lo=-0.05, hi=0.0),
 ]
 
 # Where the head (the two head cameras the mobile kitchen robot carries) sits on the chassis: a
 # mast at the front centre line, between the arm mounts, at the same height as on that robot.
 HEAD_AT = [0.16, 0.0]
-# The lift column, and with it both arm mounts, stands at the chassis front as on the real
-# machine: 0.10 m behind the front edge, so a docked robot reaches as deep into a table as the
-# mobile kitchen robot's slide does. MEASURE.
-ARM_MOUNT_X = 0.24
+# USD base_link -> Steward base: identity rotation, z from the wheel mesh lower bound.
+USD_BASE_HEIGHT = 0.32052979804575443
+USD_LIFT_ORIGIN = [0.22448, 0.0, 1.1147]
+ARM_MOUNT_OFFSET = [0.144, 0.306, 0.138]  # left arm relative to the lift carriage
+ARM_MOUNT_X = USD_LIFT_ORIGIN[0] + ARM_MOUNT_OFFSET[0]
+ARM_SEPARATION = 2 * ARM_MOUNT_OFFSET[1]
 
 # Grasp geometry, measured in the simulation at the open-aperture posture (see tests/test_cobot.py):
-# the pinch point sits 0.135 m along link6's +z, and the fingers separate along link6's y axis,
+# the operational pinch point lies in the finger-joint plane along link6's +z;
+# the fingers separate along link6's x axis,
 # 0.05 m per finger. Closed means both finger joints at 0 (the URDF ranges are 0..0.05 and
 # -0.05..0), so the aperture is the distance travelled from 0.
-TCP_OFFSET = [0.0, 0.0, 0.135]   # in the link6 frame, for either arm
+TCP_OFFSET = list(_PIPER_FINGERS[0]["xyz"])  # operational TCP, not a manufacturer calibration
 FINGER_OPEN = 0.05               # per finger, metres from closed
 FINGER_CLOSED = 0.0
 
@@ -91,14 +86,10 @@ def park(arm: str) -> list[float]:
 # only the envelope is taken from the datasheet; mass and the sim's actuator gains are tuned to
 # behave like the mobile kitchen robot's base, not measured on the real unit.
 CHASSIS = dict(length=0.685, width=0.570, height=0.155, mass=30.0)
-# Height-adjustable torso: the carriage's height above the chassis top, and its travel. MEASURE.
-# The home height is a *working* height, not a stowed one: with the arms only just above a 0.75 m
-# tabletop a forearm sweeping over the table edge goes through it (measured: the arm could not
-# even fold back to HOME while parked at the table). Arms a quarter metre above the work surface
-# is what the lift is for, and it is the posture the real machine works in.
-LIFT_RANGE = (0.35, 1.05)
-LIFT_HOME = 0.70           # arms at 0.855 m: a hand's width above a 0.75 m table, and the reach
-                           # is measurably better than with the torso fully up (probed, not guessed)
+# lift = q_USD + 0.60; zero is the lowest carriage position, in metres.
+LIFT_RANGE = (0.0, 0.60)
+LIFT_HOME = 0.0
+ARM_MOUNT_HEIGHT = USD_BASE_HEIGHT + USD_LIFT_ORIGIN[2] - LIFT_RANGE[1] + ARM_MOUNT_OFFSET[2]
 # The base drives like the mobile kitchen robot: position control on absolute x, y, yaw.
 ROOT_ACTUATOR = {
     "kind": "position",
@@ -114,26 +105,14 @@ ROOT_ACTUATOR = {
 _PIPER_LINKS: dict[str, tuple] = {
     "arm_base": ([0.0, 0.0, 0.123], 0.050, 1.2),
     "link1": (None, 0.050, 0.9),
-    "link2": ([0.2836, 0.0287, 0.0], 0.045, 0.9),
-    "link3": ([-0.2422, 0.0685, 0.0], 0.040, 0.7),
+    "link2": (_PIPER_CHAIN[2]["xyz"], 0.045, 0.9),
+    "link3": (_PIPER_CHAIN[3]["xyz"], 0.040, 0.7),
     "link4": (None, 0.035, 0.5),
-    "link5": ([0.0, 0.091, 0.0014], 0.030, 0.4),
-    "link6": ([0.0, 0.0, 0.135], 0.035, 0.35),
+    "link5": (_PIPER_CHAIN[5]["xyz"], 0.030, 0.4),
+    "link6": (TCP_OFFSET, 0.035, 0.35),
     "link7": (None, 0.012, 0.06),
     "link8": (None, 0.012, 0.06),
 }
-
-
-def _rpy_quat(rpy: list[float]) -> list[float]:
-    """URDF fixed-axis roll-pitch-yaw (radians) to a wxyz quaternion."""
-    r, p, y = rpy
-    cr, sr = math.cos(r / 2), math.sin(r / 2)
-    cp, sp = math.cos(p / 2), math.sin(p / 2)
-    cy, sy = math.cos(y / 2), math.sin(y / 2)
-    return [cy * cp * cr + sy * sp * sr,
-            cy * cp * sr - sy * sp * cr,
-            cy * sp * cr + sy * cp * sr,
-            sy * cp * cr - cy * sp * sr]
 
 
 def _quat_z_to(direction: np.ndarray) -> list[float]:
@@ -162,6 +141,33 @@ def _link_geometry(spec: tuple, rgba: list[float], collision: bool = True) -> di
     return {key: [primitive("capsule", [radius, length], at, rgba)]}
 
 
+def _palm_geometry() -> dict[str, list[dict]]:
+    """Wrist flange, palm housing and transverse guide in the link6 frame (metres)."""
+    return {"visual": [
+        primitive("cylinder", [0.027, 0.025], pose([0.0, 0.0, 0.0125]), ROBOT_ARM),
+        primitive("box", [0.138, 0.048, 0.044], pose([0.0, 0.0, 0.041]), GRIPPER_RGBA),
+        primitive("box", [0.138, 0.024, 0.008], pose([0.0, 0.0, 0.067]), STEEL),
+    ]}
+
+
+def _finger_geometry(name: str) -> dict[str, list[dict]]:
+    """Slider, axial finger and inward pad in the mirrored URDF link7/link8 frames.
+
+    Local +/-y points back toward the palm; local -z points away from the pinch
+    axis on both fingers. Pad inner faces meet at zero travel, with the TCP
+    between the pads, 5 mm behind their tips. Dimensions are in metres.
+    """
+    toward_palm = -1.0 if name == "link7" else 1.0
+    return {"visual": [
+        primitive("box", [0.028, 0.014, 0.022],
+                  pose([0.0, toward_palm * 0.064, -0.011]), GRIPPER_RGBA),
+        primitive("box", [0.024, 0.064, 0.010],
+                  pose([0.0, toward_palm * 0.027, -0.008]), STEEL),
+        primitive("box", [0.020, 0.026, 0.003],
+                  pose([0.0, toward_palm * 0.008, -0.0015]), GRIPPER_RGBA),
+    ]}
+
+
 def _piper_arm(prefix: str, mount_p: list[float]) -> tuple[list[Link], list[Joint]]:
     """One Piper arm (arm_base..link6 + two fingers), link/joint ids prefixed ``L_``/``R_``."""
     links: list[Link] = []
@@ -172,35 +178,32 @@ def _piper_arm(prefix: str, mount_p: list[float]) -> tuple[list[Link], list[Join
         lid = f"{prefix}_{name}"
         affordances = [exact("grasp-point"), exact({"tcp-offset": {"p": TCP_OFFSET, "q": [1.0, 0.0, 0.0, 0.0]}})] \
             if name == "link6" else None
-        # The wrist (link6) is visual only: its capsule spans the gap to the pinch point, so a
-        # colliding wrist would shove aside the very object the fingers are closing on. The same
-        # reasoning the mobile robot uses for its whole arm.
-        link = Link(id=lid, name=f"{prefix} {name}", geometry=_link_geometry(spec, ROBOT_ARM, collision=name != "link6"),
+        # The gripper is visual-only; grasping uses the link6 TCP and ideal attachment.
+        geometry = _palm_geometry() if name == "link6" else _link_geometry(spec, ROBOT_ARM)
+        link = Link(id=lid, name=f"{prefix} {name}", geometry=geometry,
                     inertial=exact({"mass": spec[2]}), affordances=affordances or [])
         links.append(link)
         if name == "arm_base":
             joints.append(Joint(id=f"{prefix}_mount", parent="frame", child=lid, type=exact("fixed"),
                                 origin=exact(pose(mount_p)), q=exact([]), qd=exact([])))
     for j in _PIPER_CHAIN:
-        index = int(j["jid"][-1]) - 1
         joints.append(Joint(
             id=f"{prefix}_{j['jid']}", parent=f"{prefix}_{j['parent']}", child=f"{prefix}_{j['child']}",
-            type=exact("revolute"), origin=exact(pose(j["xyz"], _rpy_quat(j["rpy"]))),
+            type=exact("revolute"), origin=exact(pose(j["xyz"], quat_normalize(j["quat"]))),
             axis=exact([0.0, 0.0, 1.0]), limits=exact({"lo": j["lo"], "hi": j["hi"]}),
-            q=exact([park(prefix)[index]]), qd=exact([0.0]), dynamics=exact({"damping": 60.0}),
+            q=exact([0.0]), qd=exact([0.0]), dynamics=exact({"damping": 60.0}),
             actuator={"kind": "position", "limits": {"effort": 100.0, "velocity": 3.0}, "gains": {"kp": 1500.0}}))
     for name, spec in _PIPER_LINKS.items():
         if name not in ("link7", "link8"):
             continue
         lid = f"{prefix}_{name}"
         links.append(Link(id=lid, name=f"{prefix} finger {name[-1]}",
-                          geometry={"visual": [primitive("box", [0.024, 0.016, 0.06],
-                                                         pose([0.0, 0.0, -0.03]), GRIPPER_RGBA)]},
+                          geometry=_finger_geometry(name),
                           inertial=exact({"mass": spec[2]})))
     for j in _PIPER_FINGERS:
         joints.append(Joint(
             id=f"{prefix}_{j['jid']}", parent=f"{prefix}_link6", child=f"{prefix}_{j['child']}",
-            type=exact("prismatic"), origin=exact(pose(j["xyz"], _rpy_quat(j["rpy"]))),
+            type=exact("prismatic"), origin=exact(pose(j["xyz"], quat_normalize(j["quat"]))),
             axis=exact(j["axis"]), limits=exact({"lo": j["lo"], "hi": j["hi"]}),
             q=exact([FINGER_OPEN if int(j["jid"][-1]) == 7 else -FINGER_OPEN]), qd=exact([0.0]),
             dynamics=exact({"damping": 5.0}),
@@ -208,15 +211,15 @@ def _piper_arm(prefix: str, mount_p: list[float]) -> tuple[list[Link], list[Join
     return links, joints
 
 
-def cobot_magic(separation: float = 0.62, mount_height: float = 0.855) -> Entity:
+def cobot_magic(separation: float = ARM_SEPARATION, mount_height: float = ARM_MOUNT_HEIGHT) -> Entity:
     """Cobot Magic twin: mobile chassis, lifting torso, two Piper arms, and the mobile kitchen
     robot's head (:func:`~steward.assets.generators.head_link`: a survey camera and a
     short-focal-length work camera) on a mast fixed to the chassis.
+    Both arms start with joint1–joint6 at zero radians and their fingers open.
 
-    ``separation``/``mount_height``/``CHASSIS``/``LIFT_*`` are MEASURE placeholders (see module
-    docstring); URDF-derived joint data is exact. ``mount_height`` is the arm mounting height above
-    the floor with the lift at its home height. The head does not ride the lift: the robot sees the
-    room the same way at every working height, as the other body does.
+    ``separation`` is the arm-root spacing; ``mount_height`` is their height above the floor
+    at ``LIFT_HOME``. Both are metres and override the USD-derived defaults. The lift reads
+    displacement above its lowest position, not arm height. The head stays fixed to the chassis.
     """
     mast = HEAD_HEIGHT_M - CHASSIS["height"]
     chassis = Link(
@@ -242,20 +245,21 @@ def cobot_magic(separation: float = 0.62, mount_height: float = 0.855) -> Entity
         # Between the mounts and inside the chassis width: the planner keeps the chassis footprint
         # clear, and a plate wider than it struck walls the base was cleared to pass.
         geometry={"collision": [primitive("box", [0.12, min(separation - 0.12, CHASSIS["width"]), 0.45],
-                                          pose([-0.13, 0.0, 0.20]), ROBOT_BODY)]},
+                                          pose([ARM_MOUNT_OFFSET[0] - 0.13, 0.0, ARM_MOUNT_OFFSET[2] + 0.20]), ROBOT_BODY)]},
         inertial=exact({"mass": 40.0}),
     )
     links = [chassis, frame, head_link()]
-    # The lift carries the arms; home keeps the arms where they were before the machine had a torso.
+    # The USD base offset and lift zero shift are folded into the carriage origin.
     joints: list[Joint] = [_fixed("head_mount", "base", "head", pose([HEAD_AT[0], HEAD_AT[1], HEAD_HEIGHT_M])), Joint(
         id="lift", parent="base", child="frame", type=exact("prismatic"),
-        origin=exact(pose([ARM_MOUNT_X, 0.0, CHASSIS["height"]])), axis=exact([0.0, 0.0, 1.0]),
+        origin=exact(pose([USD_LIFT_ORIGIN[0], 0.0, mount_height - LIFT_HOME - ARM_MOUNT_OFFSET[2]])),
+        axis=exact([0.0, 0.0, 1.0]),
         limits=exact({"lo": LIFT_RANGE[0], "hi": LIFT_RANGE[1]}), q=exact([LIFT_HOME]), qd=exact([0.0]),
         dynamics=exact({"damping": 3000.0}),
         # A lead screw holds its height; a soft position spring sags 7 cm under the torso's weight.
         actuator={"kind": "position", "limits": {"effort": 4000.0, "velocity": 0.3}, "gains": {"kp": 120000.0}})]
     for prefix, side in (("L", 1.0), ("R", -1.0)):
-        arm_links, arm_joints = _piper_arm(prefix, [0.0, side * separation / 2.0, 0.0])
+        arm_links, arm_joints = _piper_arm(prefix, [ARM_MOUNT_OFFSET[0], side * separation / 2.0, ARM_MOUNT_OFFSET[2]])
         links.extend(arm_links)
         joints.extend(arm_joints)
     return Entity(

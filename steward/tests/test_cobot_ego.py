@@ -31,7 +31,7 @@ def test_the_planar_arm_reports_what_it_was_commanded_once_the_arm_is_there():
     measured = arm._fk(solved["lift"], [solved[n] for n in arm.names])
     assert measured["lift"] == pytest.approx(0.85, abs=0.006) and measured["reach"] == pytest.approx(0.30, abs=0.006)
     assert measured["wrist_yaw"] == pytest.approx(0.4, abs=0.03)
-    assert arm.geometry.lateral == pytest.approx(0.31), "the left arm works on its own line"
+    assert arm.geometry.lateral == pytest.approx(0.306), "the left arm works on its own line"
 
 
 @pytest.fixture(scope="module")

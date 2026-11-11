@@ -1,4 +1,4 @@
-"""Cobot Magic embodiment twin: URDF fidelity, MJCF compilability, and WSim command/sensor flow."""
+"""Cobot Magic embodiment twin: joint parameters, MJCF compilation and WSim command/sensor flow."""
 
 import io
 
@@ -23,19 +23,19 @@ def test_valid_world_entity(robot: dict) -> None:
     assert validate_world({"mode": "world", "entities": [robot]}) == []
 
 
-def test_urdf_joint_fidelity(robot: dict) -> None:
-    """Joint1..joint6 of both arms carry the Piper URDF origins, axes and limits."""
+def test_manufacturer_joint_parameters(robot: dict) -> None:
+    """Arm joint origins use the manufacturer USD's precision, with limits in radians."""
     joints = {j["id"]: j for j in robot["body"]["joints"]}
     spec = {
         "L_joint1": ([0.0, 0.0, 0.123], -2.618, 2.618),
-        "L_joint3": ([0.2836, 0.0287, 0.0], -2.697, 0.0),
-        "L_joint6": ([0.0, 0.091, 0.0014], -3.14, 3.14),
-        "R_joint4": ([-0.2422, 0.0685, 0.0], -1.832, 1.832),
+        "L_joint3": ([0.28358, 0.028726, 0.0], -2.697, 0.0),
+        "L_joint6": ([0.0, 0.091, 0.0014165], -3.14, 3.14),
+        "R_joint4": ([-0.24221, 0.068514, 0.0], -1.832, 1.832),
     }
     for jid, (xyz, lo, hi) in spec.items():
         j = joints[jid]
         assert j["type"]["value"] == "revolute"
-        assert np.allclose(j["origin"]["value"]["p"], xyz, atol=1e-4)
+        np.testing.assert_allclose(j["origin"]["value"]["p"], xyz, atol=1e-8, rtol=0)
         assert j["limits"]["value"] == {"lo": lo, "hi": hi}
     fingers = [joints[f"{a}_joint{i}"] for a in ("L", "R") for i in (7, 8)]
     for j in fingers:

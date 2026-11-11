@@ -3,15 +3,11 @@
 The virtual joints place the pinch point in the robot's own frame -- ``tool_offset + reach``
 ahead of the base centre on the arm's own line (``lateral`` = the arm mount's y), ``lift`` above
 the floor -- with the tool pointing down, tilted ``wrist_pitch`` forward, turned ``wrist_yaw``
-about the vertical and tipped ``wrist_roll`` about the forward axis. The Piper's wrist bends only
-+-70 deg (joint5), so with the tool straight down the arm reaches 0.50 m ahead of its mount and
-tips a container less than 1 rad out there; tilted 60 deg forward it reaches 0.70 m and turns
-the tool about its own axis instead (joint6, a full turn). A command on them is solved by inverse kinematics in the
-base frame (so odometry noise never enters the arm), with the torso drawn to the height the target
-``lift`` sets, so the torso moves as smoothly as the skill moves the pinch point. A pose the
-solver misses from the arm's own posture is approached in steps from one near the working posture.
-Planning (``reachable``, ``pitch_for``) solves from the target alone, so what it finds reachable
-the command reaches wherever the arm stands by then.
+about the vertical and tipped ``wrist_roll`` about the forward axis. IK solves in the base frame
+with the torso lift, subject to the model's joint limits, including joint6's finite +-180 deg
+travel. If the current posture misses a target, the solver tries continuation and working seeds.
+Endpoint checks (``reachable``, ``pitch_for``) solve from the target alone; ``reachable_path``
+also checks branch continuity and can start from specified physical encoders.
 
 Encoder readings are turned back into virtual joints by forward kinematics, except that an arm
 standing within servo tolerance of the joints solved for the last command reports that command:
@@ -23,11 +19,12 @@ from __future__ import annotations
 
 import math
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
 
-from steward.assets.cobot import ARM_MOUNT_X, CHASSIS, HOME, LIFT_HOME, LIFT_RANGE, TCP_OFFSET
+from steward.assets.cobot import HOME, LIFT_HOME, TCP_OFFSET
 from steward.ego.arm import VIRTUAL_JOINTS, Arm, ArmGeometry
 from steward.ego.ik import CobotIK, IkError
 from steward.ego.skills import OutOfReach, SkillFailed
@@ -88,15 +85,22 @@ class PiperArmConfig:
     small_step: tuple[float, float] = (0.05, 0.2)  # metres, radians: a command this close to the last is a step
     arrived_rad: float = 0.04  # encoders this close to the last solution report its command
     arrived_lift_m: float = 0.01
+    home_speed_rad_s: float = 0.6  # maximum setpoint speed while both empty arms return to zero
+    home_settle_s: float = 8.0  # time after the ramp for encoder confirmation
 
 
 class PiperArm(Arm):
     def __init__(self, robot_model: dict, config: PiperArmConfig | None = None):
         self.config = cfg = config or PiperArmConfig()
+        if cfg.home_speed_rad_s <= 0 or cfg.home_settle_s <= 0:
+            raise ValueError("arm home speed and settling time must be positive")
         self.ik = CobotIK(robot_model, self_clearance=cfg.self_clearance)
         mount = next(j for j in robot_model["body"]["joints"] if j["id"] == f"{cfg.arm}_mount")
-        lateral = float(mount["origin"]["value"]["p"][1])
-        super().__init__(ArmGeometry(tool_offset=ARM_MOUNT_X, lateral=lateral, reach_min=cfg.reach[0],
+        lift = next(j for j in robot_model["body"]["joints"] if j["id"] == "lift")
+        mount_at_zero = pose_compose(lift["origin"]["value"], mount["origin"]["value"])["p"]
+        self._mount_height_at_zero = float(mount_at_zero[2])
+        self._lift_range = (lift["limits"]["value"]["lo"], lift["limits"]["value"]["hi"])
+        super().__init__(ArmGeometry(tool_offset=float(mount_at_zero[0]), lateral=float(mount_at_zero[1]), reach_min=cfg.reach[0],
                                      reach_max=cfg.reach[1], lift_min=cfg.lift[0], lift_max=cfg.lift[1],
                                      wrist_yaw_max=cfg.wrist_yaw_max, wrist_roll_max=cfg.wrist_roll_max,
                                      gripper=f"{cfg.arm}_link6", wrist_pitch_max=cfg.wrist_pitch_max))
@@ -114,9 +118,51 @@ class PiperArm(Arm):
         return out
 
     def resting(self) -> bool:
-        """Until its first command the arm stands parked, folded upright and turned aside."""
+        """The planar target is unset before the first command and after joint-space homing."""
         with self._lock:
             return self._target is None
+
+    def home_empty(self, command: Callable[[dict], None], tick: Callable[[], dict]) -> bool:
+        """Ramp both empty arms' six joints to zero, keeping lift and fingers unchanged.
+
+        Both grippers must report neither an object nor a handle throughout the move. Missing
+        feedback, new attachment or failure to settle stops homing. The planar IK cache is cleared
+        before moving so the next command seeds from encoders, including after interruption.
+        ``tick`` owns cancellation and the robot clock; commands bypass virtual-joint IK.
+        """
+        state = tick()
+        grips = ("L_link6", "R_link6")
+
+        def loaded(st: dict) -> bool:
+            reports = st.get("grippers") or {}
+            if any(g not in reports or "holding" not in reports[g] or "holdingHandle" not in reports[g] for g in grips):
+                raise SkillFailed("cannot return arms home without both grippers' feedback")
+            return any(reports[g].get("holding") or reports[g].get("holdingHandle") for g in grips)
+
+        if loaded(state):
+            return False
+        names = self.ik.joint_names("L") + self.ik.joint_names("R")
+        start = {name: float(state["joints"][name]) for name in names}
+        with self._lock:
+            self._target = self._solved = None
+        cfg = self.config
+        duration = 1.5 * max(abs(q) for q in start.values()) / cfg.home_speed_rad_s
+        began = state["stamp"]
+        while True:
+            if loaded(state):
+                command({"joints": {name: state["joints"][name] for name in names}})
+                raise SkillFailed("arm homing stopped because a gripper became occupied")
+            elapsed = state["stamp"] - began
+            fraction = min(1.0, elapsed / duration) if duration > 0 else 1.0
+            share = fraction * fraction * (3.0 - 2.0 * fraction)
+            if fraction == 1.0 and all(abs(state["joints"][name]) < cfg.arrived_rad for name in names):
+                command({"joints": dict.fromkeys(names, 0.0)})
+                return True
+            if elapsed > duration + cfg.home_settle_s:
+                command({"joints": {name: state["joints"][name] for name in names}})
+                raise SkillFailed("both arms did not reach their zero-joint home posture; stopped homing")
+            command({"joints": {name: q * (1.0 - share) for name, q in start.items()}})
+            state = tick()
 
     def joints_of(self, joints: dict, odometry: dict | None = None) -> dict:
         if not all(n in joints for n in self.names) or "lift" not in joints:
@@ -179,12 +225,14 @@ class PiperArm(Arm):
                           "wrist_pitch": 0.0}
             previous, prior = dict(target), self._solved
             target.update(wanted)
-            solved, last = self._ik(target, {}) if turn_over else self._ik(target, joints, prior)
             holding = ((self._last.get("grippers") or {}).get(self.geometry.gripper) or {}).get("holding")
-            if (solved is not None and holding and prior is not None and not turn_over and self._step(previous, target)
-                    and self._jumps(prior, solved)):
+            continuous = bool(holding and prior is not None and not turn_over and self._step(previous, target))
+            solved, last = (self._ik(target, {}) if turn_over else
+                            self._ik(target, joints, prior, continuous=continuous))
+            if solved is not None and continuous and self._jumps(prior, solved):
                 raise SkillFailed(f"the {self.config.arm} arm would have to turn its wrist over to follow its gripper "
-                                  f"{target['reach']:.2f} m ahead at {target['lift']:.2f} m (roll {target['wrist_roll']:.2f}, "
+                                  f"{target['reach']:.2f} m ahead at {target['lift']:.2f} m (yaw {target['wrist_yaw']:.2f}, "
+                                  f"roll {target['wrist_roll']:.2f}, "
                                   f"pitch {target['wrist_pitch']:.2f}); stopped before it swings what it holds")
             if solved is not None:
                 self._target, self._solved = target, solved
@@ -218,25 +266,38 @@ class PiperArm(Arm):
         self.ik.set_base(0.0, 0.0, 0.0, solution[0])
         return self.ik.lowest(self.config.arm, solution[1], beyond)
 
-    def _ik(self, target: dict, joints: dict, prior: tuple[float, list[float]] | None = None
+    def _ik(self, target: dict, joints: dict, prior: tuple[float, list[float]] | None = None, *, continuous: bool = False
             ) -> tuple[tuple[float, list[float]] | None, IkError | None]:
         """Torso height and arm joints for virtual joints ``target`` in one whole-body solve, seeded
         from ``prior`` (the last solution, so a motion keeps one posture), then ``joints``, then
         approached from the working posture (:meth:`_approached`); then the working posture itself.
-        Without ``prior`` and ``joints`` the answer depends on ``target`` alone. The caller holds the lock."""
+        Without ``prior`` and ``joints`` the answer depends on ``target`` alone. With ``continuous``,
+        a branch jump does not stop the search: remaining seeds may reach a nearby solution. If
+        every solution jumps, return the first for the caller's discontinuity rejection.
+        The caller holds the lock."""
         encoders = ([(float(joints["lift"]), [float(joints[n]) for n in self.names])]
                     if "lift" in joints and all(n in joints for n in self.names) else [])
         last: IkError | None = None
         self.ik.set_base(0.0, 0.0, 0.0, None)
-        for seed in ([prior] if prior is not None else []) + encoders:
-            solved, last = self._solve_from(target, [seed])
-            if solved is not None:
-                return solved, None
-        solved = self._approached(target)
-        if solved is not None:
+        def candidates():
+            for seed in ([prior] if prior is not None else []) + encoders:
+                yield self._solve_from(target, [seed])
+            yield self._approached(target), None
+            for seed in self._working_seeds(target):
+                yield self._solve_from(target, [seed])
+
+        rejected = None
+        for solved, error in candidates():
+            if error is not None:
+                last = error
+            if solved is None:
+                continue
+            if continuous and prior is not None and self._jumps(prior, solved):
+                if rejected is None:
+                    rejected = solved
+                continue
             return solved, None
-        solved, last = self._solve_from(target, self._working_seeds(target))
-        return solved, (None if solved is not None else last)
+        return rejected, last
 
     def _approached(self, target: dict) -> tuple[float, list[float]] | None:
         """``target`` solved by stepping reach and tilt to it from ``continuation_reach`` ahead with
@@ -256,14 +317,15 @@ class PiperArm(Arm):
     def _working_seeds(self, target: dict) -> list[tuple[float, list[float]]]:
         """The working posture at the torso height ``target`` prefers and near either end of the
         torso's travel: one solve moves the torso only so far from where it starts."""
-        lo, hi = LIFT_RANGE
+        lo, hi = self._lift_range
         inset = self.config.torso_seed_inset
         return [(min(max(h, lo), hi), list(HOME)) for h in (self._prefer(target), lo + inset, hi - inset)]
 
     def _prefer(self, target: dict) -> float:
         """The torso height ``target`` draws the torso to."""
         cfg = self.config
-        return target["lift"] + cfg.shoulder_above - cfg.shoulder_drop_per_pitch * target["wrist_pitch"] - CHASSIS["height"]
+        return (target["lift"] + cfg.shoulder_above - cfg.shoulder_drop_per_pitch * target["wrist_pitch"]
+                - self._mount_height_at_zero)
 
     def _solve_from(self, target: dict, seeds: list[tuple[float, list[float]]]
                     ) -> tuple[tuple[float, list[float]] | None, IkError | None]:
@@ -282,8 +344,7 @@ class PiperArm(Arm):
 
     def reachable(self, lift: float, reach: float, wrist_yaw: float = 0.0, wrist_roll: float = 0.0,
                   wrist_pitch: float = 0.0) -> bool:
-        # Solved from the target alone: a plan holds wherever the arm stands when it runs, and the
-        # command it plans is solved from these seeds too if the arm's own ones miss.
+        # Endpoint existence does not imply a continuous path from the current posture.
         if not super().reachable(lift, reach, wrist_yaw, wrist_roll, wrist_pitch):
             return False
         with self._lock:
@@ -317,13 +378,13 @@ class PiperArm(Arm):
             return wide if self._ik({**at, "wrist_pitch": wide}, {})[0] is not None else hi
 
     def turn_over(self, lift: float, reach: float, wrist_pitch: float, floor: float, surface_top: float,
-                  surface_edge: float) -> float | None:
+                  surface_edge: float, wrist_yaw: float = 0.0) -> float | None:
         # Planned as the command runs it: both postures solved from the target alone, the move
         # between them straight in joint space, then down step by step from the turned-over one.
         g = self.geometry
-        if not (super().reachable(lift, reach, 0.0, 0.0, wrist_pitch) and g.lift_min <= floor <= lift):
+        if not (super().reachable(lift, reach, wrist_yaw, 0.0, wrist_pitch) and g.lift_min <= floor <= lift):
             return None
-        at = {"lift": lift, "reach": reach, "wrist_yaw": 0.0, "wrist_pitch": wrist_pitch}
+        at = {"lift": lift, "reach": reach, "wrist_yaw": wrist_yaw, "wrist_pitch": wrist_pitch}
         with self._lock:
             upright, _ = self._ik({**at, "wrist_roll": 0.0}, {})
             over, _ = self._ik({**at, "wrist_roll": math.pi}, {})
@@ -341,21 +402,24 @@ class PiperArm(Arm):
             low, prior = lift, over
             while low - self.config.turn_lower_step >= floor - 1e-9:
                 nxt = low - self.config.turn_lower_step
-                solved, _ = self._ik({**at, "lift": nxt, "wrist_roll": math.pi}, {}, prior)
+                solved, _ = self._ik({**at, "lift": nxt, "wrist_roll": math.pi}, {}, prior, continuous=True)
                 if solved is None or self._jumps(prior, solved) or self._lowest(solved, surface_edge) < above:
                     break
                 low, prior = nxt, solved
             return low
 
-    def reachable_path(self, targets) -> bool:
-        if not super().reachable_path(targets):
+    def reachable_path(self, targets, *, start_joints: dict | None = None) -> bool:
+        # Each waypoint is solved from its predecessor; a fresh endpoint solve can miss that branch.
+        if not all(Arm.reachable(self, t["lift"], t["reach"], t.get("wrist_yaw", 0.0), t.get("wrist_roll", 0.0),
+                                 t.get("wrist_pitch", 0.0)) for t in targets):
             return False
         with self._lock:
-            joints = self._last.get("joints") or {}
-            prior = None
+            joints = start_joints if start_joints is not None else self._last.get("joints") or {}
+            prior = ((float(joints["lift"]), [float(joints[n]) for n in self.names])
+                     if start_joints is not None else None)
             for t in targets:
                 full = {"wrist_yaw": 0.0, "wrist_roll": 0.0, "wrist_pitch": 0.0, **t}
-                solved, _ = self._ik(full, joints, prior)
+                solved, _ = self._ik(full, joints, prior, continuous=True)
                 if solved is None or (prior is not None and self._jumps(prior, solved)):
                     return False
                 prior = solved

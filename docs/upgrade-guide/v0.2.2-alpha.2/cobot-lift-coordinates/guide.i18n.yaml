@@ -1,0 +1,16 @@
+# Bilingual-pair consistency record for guide.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/upgrade-guide/v0.2.2-alpha.2/cobot-lift-coordinates/guide.md
+/:
+  en: 71e5fc00bf79ff46
+  zh: 00bc3230f54a5abb
+/cobot-lift-coordinates-and-arm-mounts:
+  en: 1d2c2611fbe372ee
+  zh: cf6900042cdd56a7
+/cobot-lift-coordinates-and-arm-mounts/change:
+  en: 8a51a89f31a9d88f
+  zh: c13846a7de812c77
+/cobot-lift-coordinates-and-arm-mounts/migration:
+  en: fc74a5bc0ff5aa52
+  zh: 084e78a2d892a681

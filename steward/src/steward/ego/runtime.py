@@ -321,7 +321,8 @@ class EgoRuntime:
                                       self._mark_held, self.config.motion,
                                       shift=self._shift_track, on_error=lambda msg: self.alert(msg, "skill"),
                                       on_finish=self._skill_finished, on_release=self._released,
-                                      on_begin=self._skill_begin, clock=self.link)
+                                      on_begin=self._skill_begin, clock=self.link,
+                                      home_empty=lambda tick: self.arm.home_empty(self.link.command, tick))
         self._view_scene: tuple[dict, int, float] | None = None  # (ES dict, version, stamp) for the view
         self.face_error: str | None = None  # why the latest camera image for faces could not be fetched
         self._face_thread: threading.Thread | None = None

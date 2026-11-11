@@ -1,0 +1,20 @@
+[
+  {
+    "camera": { "lookat": [0, 1, 0.5], "distance": 8, "azimuth": 90, "elevation": -50 },
+    "fps": 10,
+    "width": 1024,
+    "height": 768
+  },
+  {
+    "camera": { "lookat": [1, 1, 0.5], "distance": 8, "azimuth": 90, "elevation": -50 },
+    "fps": 10,
+    "width": 1024,
+    "height": 768
+  },
+  {
+    "camera": { "lookat": [4.615875, 1.021704, 1.703064], "distance": 8, "azimuth": 55, "elevation": -38 },
+    "fps": 10,
+    "width": 1024,
+    "height": 768
+  }
+]

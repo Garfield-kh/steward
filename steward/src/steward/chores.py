@@ -30,10 +30,11 @@ from steward.mission import (
     _run,
     _safe_receipt,
     _wait_for_control,
+    call,
     infeasible,
     simtime_sleep,
 )
-from steward.net import HttpError, call
+from steward.net import HttpError
 
 TABLEWARE = ("bowl", "wine_glass", "mug", "cup")
 ROW_GAP = 0.06
@@ -143,9 +144,29 @@ def _local(support: dict, xy: list[float]) -> tuple[float, float]:
     return c * dx - s * dy, s * dx + c * dy
 
 
+def _landed(api: str, obj: dict, spot: list[float]) -> dict:
+    """``obj`` as the ego state knows it after it was put down at ``spot`` (world x, y).
+
+    With a real segmenter the track of a carried object is often rebuilt under a new id when the
+    gripper lets go. Then the piece of its role nearest the spot, within 0.25 m of it and within a
+    quarter of the object's width, is taken for it: the bowl just nested stands on the same spot
+    as the wider bowl under it. When no such piece is seen there yet, ``obj`` is returned at
+    ``spot``, for a later :func:`steward.mission._refresh` to find it by."""
+    objects = _summary(api)["objects"]
+    found = next((o for o in objects if o["id"] == obj["id"]), None)
+    if found is not None:
+        return found
+    role, width = obj.get("role", obj.get("category")), _width(obj)
+    there = [o for o in objects if o["existence"] >= 0.5 and role in (o.get("role"), o["category"])
+             and math.dist(o["position"][:2], spot[:2]) <= 0.25 and abs(_width(o) - width) <= 0.25 * width]
+    if there:
+        return min(there, key=lambda o: math.dist(o["position"][:2], spot[:2]))
+    return {**obj, "position": [spot[0], spot[1], obj["position"][2]]}
+
+
 def _move(api: str, obj: dict, place: dict, observe: dict, log: list, timeout_s: float, attempts: int = 2) -> dict:
     """Pick ``obj`` (observing it again and retrying after a missed grasp) and place it with
-    ``place`` params; return the place job."""
+    ``place`` params; return the object as it stands after the place (:func:`_landed`)."""
     for attempt in range(attempts):
         # Look before moving: from here the class-prompted fresh look at pick time sees the
         # object whole (below ~0.4 m every prompt fails), and the receipt is predicted from the
@@ -171,10 +192,11 @@ def _move(api: str, obj: dict, place: dict, observe: dict, log: list, timeout_s:
             log.append({"step": "pick-retry", "object": obj["id"], "error": str(exc)})
             obj = _refresh(api, obj)
     receipt = _safe_receipt(api, "place", place, observe, log)
-    job = _run(api, receipt, timeout_s)
+    _run(api, receipt, timeout_s)
     log.append({"step": "place", "object": obj["id"], **place})
     simtime_sleep(api, 0.8)
-    return job
+    plan = receipt["plan"]
+    return _landed(api, obj, plan["spot"] if "spot" in plan else plan["floor"])
 
 
 def _safe_explore(api: str, timeout_s: float) -> str:
@@ -223,10 +245,14 @@ def _view(api: str, furniture: dict, timeout_s: float) -> None:
     simtime_sleep(api, 1.5)
 
 
-def _contents(summary: dict, holder: dict) -> list[str]:
-    """Ids of the objects resting on ``holder`` that are likely to exist (a fading fragment is not
-    something to carry)."""
-    return [o["id"] for o in summary["objects"] if o["on"] == holder["id"] and o["existence"] >= 0.5]
+def _contents(summary: dict, holder: dict) -> list[dict]:
+    """The objects resting on ``holder`` that are likely to exist (a fading fragment is not
+    something to carry), the largest footprint first: they are carried to another drawer in this
+    order, and a place takes the free spot nearest the middle of the open part. A large object
+    put there leaves room for the small ones on both sides; two bottles in the middle leave none
+    for the toy airplane."""
+    inside = [o for o in summary["objects"] if o["on"] == holder["id"] and o["existence"] >= 0.5]
+    return sorted(inside, key=_area, reverse=True)
 
 
 def _drawer_of(summary: dict, furniture: dict) -> dict | None:
@@ -433,16 +459,18 @@ class Chores:
                 if bowl["on"] != board["id"]:
                     spot = _world(board, _offset(board, offset, 0.0))
                     self._doing(f"把{describe(bowl)} 放到餐边柜上作叠放底座")
-                    self._clearing("sideboard", lambda b=bowl, xy=spot: _move(
+                    was = bowl
+                    bowl = self._clearing("sideboard", lambda b=bowl, xy=spot: _move(
                         self.api, b, _place_at(self.api, board, xy), board, self.log, self.timeout_s))
-                    self._step("sideboard", f"{describe(bowl)} → 餐边柜（叠放底座）", object=bowl["id"])
+                    self._step("sideboard", f"{describe(was)} → 餐边柜（叠放底座）", object=bowl["id"])
             else:
                 below = _refresh(self.api, below)
                 if bowl["on"] != below["id"]:
                     self._doing(f"把{describe(bowl)} 叠进{describe(below)}")
-                    self._clearing("sideboard", lambda b=bowl, u=below: _move(
+                    was = bowl
+                    bowl = self._clearing("sideboard", lambda b=bowl, u=below: _move(
                         self.api, b, {"on": u["id"]}, u, self.log, self.timeout_s))
-                    self._step("sideboard", f"{describe(bowl)} → 叠进{describe(below)}",
+                    self._step("sideboard", f"{describe(was)} → 叠进{describe(below)}",
                                object=bowl["id"])
             below = bowl
         for obj in others:
@@ -496,21 +524,23 @@ class Chores:
         a_items = _contents(_summary(self.api), a)
         b = self._open(cabinet)
         b_items = _contents(_summary(self.api), b)
-        for oid in a_items:
-            self._transfer(oid, board, f"暂放到{describe(board)} 台面上")
-        for oid in b_items:
-            self._transfer(oid, a, f"从柜子的抽屉移到餐边柜的抽屉 {a['id']}")
-        for oid in a_items:
-            self._transfer(oid, b, f"从台面移到柜子的抽屉 {b['id']}")
+        a_items = [self._transfer(item, board, f"暂放到{describe(board)} 台面上") for item in a_items]
+        for item in b_items:
+            self._transfer(item, a, f"从柜子的抽屉移到餐边柜的抽屉 {a['id']}")
+        for item in a_items:
+            self._transfer(item, b, f"从台面移到柜子的抽屉 {b['id']}")
         self._clearing("drawers", lambda: self._close(b))
         self._clearing("drawers", lambda: self._close(a))
 
-    def _transfer(self, oid: str, dst: dict, how: str) -> None:
-        obj = _refresh(self.api, {"id": oid, "category": "item"})
+    def _transfer(self, item: dict, dst: dict, how: str) -> dict:
+        """Carry ``item`` onto or into ``dst``; return it as it stands there (:func:`_landed`)."""
+        obj = _refresh(self.api, item)
         dst = _refresh(self.api, dst)
         self._doing(f"把{describe(obj)} {how}")
-        self._clearing("drawers", lambda o=obj, d=dst: _move(self.api, o, {"on": d["id"]}, d, self.log, self.timeout_s))
-        self._step("drawers", f"{describe(obj)}：{how}", object=oid, to=dst["id"])
+        landed = self._clearing("drawers", lambda o=obj, d=dst: _move(self.api, o, {"on": d["id"]}, d, self.log,
+                                                                      self.timeout_s))
+        self._step("drawers", f"{describe(obj)}：{how}", object=landed["id"], to=dst["id"])
+        return landed
 
     # ---------------------------------------------------------------- recovery
     def recover(self, message: str = "") -> None:

@@ -1,6 +1,7 @@
 """Steward command line.
 
     steward build-kitchen            generate, validate and publish the Phase 0 kitchen
+    steward build-toy-assembly       two tables of disassembled airplane and car toys with screws
     steward world                    run WSim + Observer + WCA + robot ports
     steward ego                      run the mobile robot's Ego Runtime + Ego API
     steward cobot-ego                run the Cobot Magic twin's Ego Runtime + Ego API (+ its scripted mission)
@@ -69,6 +70,14 @@ def cmd_build_kitchen(args) -> int:
     from steward.authoring.service import AuthoringService, build_default_kitchen
 
     out = build_default_kitchen(AuthoringService(args.root))
+    print(json.dumps(out, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_build_toy_assembly(args) -> int:
+    from steward.authoring.service import AuthoringService, build_toy_assembly
+
+    out = build_toy_assembly(AuthoringService(args.root))
     print(json.dumps(out, indent=2, ensure_ascii=False))
     return 0
 
@@ -849,6 +858,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", default=str(DEFAULT_ROOT), help="Steward data root (assets, scenes, runs)")
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("build-kitchen").set_defaults(fn=cmd_build_kitchen)
+    sub.add_parser("build-toy-assembly").set_defaults(fn=cmd_build_toy_assembly)
     sub.add_parser("build-cobot").set_defaults(fn=cmd_build_cobot)
     sub.add_parser("build-cobot-kitchen").set_defaults(fn=cmd_build_cobot_kitchen)
     sub.add_parser("build-cobot-errand").set_defaults(fn=cmd_build_cobot_errand)

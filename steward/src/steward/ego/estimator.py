@@ -31,7 +31,7 @@ from steward.ego.perception import (
     _largest_compact, box_at_yaw, box_of, oversized_bowl_core, raised_object_points, segments,
 )
 from steward.ego.planner import Box2D, front_box, protrusion, room_centre
-from steward.ego.priors import compatible, default_affordances, prior
+from steward.ego.priors import compatible, default_affordances, prior, screw_holes
 from steward.math3d import (matrix_from_quat, pose_compose, pose_inverse, quat_from_axis_angle, quat_from_yaw,
                             quat_mul, quat_rotate, wrap_angle, yaw_from_quat)
 from steward.scene.schema import Entity, Est, Link, Relation, RigidTree, SceneState, primitive
@@ -118,6 +118,8 @@ class Track:
     bottom_seen: bool = False  # some view showed its base (not cut by the image edge or hidden)
     label: str | None = None  # a category named by the robot's agent; it outranks the classifier
     annotated_affordances: list[str] | None = None  # affordances named with it, in place of the category prior
+    # Screw holes last seen on this object (body frame), from detections; None until perception reports any.
+    screw_holes: list[dict] | None = None
     held_yaw: float = 0.0  # while held: its heading relative to the gripper link's heading
     held_up: np.ndarray | None = None  # while held: the gripper-link axis that was vertical at the grasp
     carried_offset: np.ndarray | None = None  # while inside the held container: its offset from that container, in the gripper's frame
@@ -4130,8 +4132,17 @@ class EgoEstimator:
             last_seen=self.stamp,
             color_counts={det["color"]: 1.0} if det.get("color") else {},
         )
+        self._remember_screw_holes(track, det)
         self.tracks[track.id] = track
         return track
+
+    @staticmethod
+    def _remember_screw_holes(track: Track, det: dict) -> None:
+        """Keep the screw holes a detection reports on ``track`` (body-frame markers)."""
+        holes = det.get("screwHoles")
+        if not holes:
+            return
+        track.screw_holes = [{"id": str(h["id"]), "p": [float(v) for v in h["p"][:3]]} for h in holes]
 
     def _newcomer(self, pos: np.ndarray, size: np.ndarray, sigma: float, others: list[tuple[np.ndarray, np.ndarray, float]]) -> str:
         """How a detection no track explains enters the belief. ``"carried"``: it lies in the held
@@ -4195,6 +4206,7 @@ class EgoEstimator:
         track.category_counts[det["category"]] = track.category_counts.get(det["category"], 0.0) + 1.0
         if det.get("color"):
             track.color_counts[det["color"]] = track.color_counts.get(det["color"], 0.0) + 1.0
+        self._remember_screw_holes(track, det)
         track.observations += 1
         track.last_seen = self.stamp
         track.existence = min(1.0, track.existence + 0.2 * (1.0 - track.existence))
@@ -5290,12 +5302,19 @@ class EgoEstimator:
         src = "fused" if track.observations > 1 else "observed"
         inflate = 0.0 if track.held else 2.0 * track.sigma
         size = [float(track.size[0] + inflate), float(track.size[1] + inflate), float(track.size[2])]
+        affordances = [Est(value=a, src="prior" if track.annotated_affordances is None else "inferred")
+                       for a in track.affordances]
+        if track.screw_holes is not None:
+            hole_src, holes = "observed", track.screw_holes
+        else:
+            hole_src, holes = "prior", screw_holes(track.category)
+        affordances.extend(Est(value={"screw-hole": {"id": hole["id"], "p": list(hole["p"])}}, src=hole_src)
+                           for hole in holes)
         link = Link(
             id="body", name=track.category,
             geometry={"collision": [primitive("box", size)]},
             material=Est(value={"fragility": p["fragility"]}, src="prior"),
-            affordances=[Est(value=a, src="prior" if track.annotated_affordances is None else "inferred")
-                         for a in track.affordances],
+            affordances=affordances,
         )
         root_value = max(p["root"], key=p["root"].get)
         return Entity(

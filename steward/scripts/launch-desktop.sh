@@ -43,7 +43,7 @@ pick_scenario() {
   fi
   local choice
   choice="$(/usr/bin/osascript <<'APPLESCRIPT' 2>/dev/null || true
-set opts to {"拼图·狗 (puzzle-dog)", "拼图·猫 (puzzle-cat)", "拼图·长城 (puzzle-greatwall)", "家务整理 (phase0-chores)", "循环搬运 (phase0-shuttle)", "杯子放到桌上 (phase0-kitchen)"}
+set opts to {"拼图·狗 (puzzle-dog)", "拼图·猫 (puzzle-cat)", "拼图·长城 (puzzle-greatwall)", "家务整理 (phase0-chores)", "循环搬运 (phase0-shuttle)", "杯子放到桌上 (phase0-kitchen)", "玩具组装 (toy-assembly)"}
 set picked to choose from list opts with prompt "选择要启动的场景：" default items {"拼图·狗 (puzzle-dog)"} OK button name "启动" cancel button name "取消"
 if picked is false then
   return ""
@@ -59,6 +59,7 @@ APPLESCRIPT
     *phase0-chores*) echo phase0-chores ;;
     *phase0-shuttle*) echo phase0-shuttle ;;
     *phase0-kitchen*) echo phase0-kitchen ;;
+    *toy-assembly*) echo toy-assembly ;;
     *) echo "$choice" ;;
   esac
 }

@@ -982,6 +982,9 @@ class EgoRuntime:
                 continue
             cov = ent.pose.unc["cov"]
             size = ent.rigid.links[0].geometry["collision"][0]["size"]
+            aff = list(ent.rigid.links[0].affordances)
+            strings = [a.value for a in aff if isinstance(a.value, str)]
+            holes = self._screw_holes_view(aff)
             objects.append({
                 "id": ent.id,
                 "category": ent.category.value,
@@ -994,9 +997,10 @@ class EgoRuntime:
                 "on": supports.get(ent.id),
                 "existence": ent.existence,
                 "lastSeenAgoS": round(es.stamp - (ent.pose.t or es.stamp), 2),
-                "affordances": [a.value for a in ent.rigid.links[0].affordances],
+                "affordances": strings,
                 "color": ent.state_vars["color"].value if "color" in ent.state_vars else None,
                 "extentM": self._extent(ent.id),
+                **({"screwHoles": holes} if holes else {}),
                 **({"unsupported": True} if self._unsupported(ent.id) else {}),
                 **({"openingM": round(self._opening(ent.id), 3)} if ent.category.value == "drawer" else {}),
                 **self._front(ent),
@@ -1037,6 +1041,19 @@ class EgoRuntime:
         with self._lock:
             track = self.estimator.tracks.get(track_id)
             return [round(float(v), 3) for v in track.size] if track is not None else None
+
+    @staticmethod
+    def _screw_holes_view(affordances) -> list[dict]:
+        """Public screw-hole markers for ego_state: id, body-frame ``p``, and whether they were observed."""
+        out = []
+        for aff in affordances:
+            value = aff.value
+            if not (isinstance(value, dict) and "screw-hole" in value):
+                continue
+            hole = value["screw-hole"]
+            out.append({"id": str(hole["id"]), "p": [round(float(v), 4) for v in hole["p"][:3]],
+                        "source": aff.src or "prior"})
+        return out
 
     def _unsupported(self, track_id: str) -> bool:
         """Whether the object floats where it is believed to be (:meth:`EgoEstimator.unsupported`)."""
@@ -1368,8 +1385,14 @@ class EgoRuntime:
                     visible.append({"category": best, "confidence": round(probs[best], 2), "rangeM": round(seg.range, 2),
                                     "camera": camera})
         else:
-            visible = [{"category": d["category"], "rangeM": round(d["range"], 2), "camera": d.get("camera")}
-                       for d in frame["detections"] if d.get("camera") in cameras]
+            visible = []
+            for d in frame["detections"]:
+                if d.get("camera") not in cameras:
+                    continue
+                item = {"category": d["category"], "rangeM": round(d["range"], 2), "camera": d.get("camera")}
+                if d.get("screwHoles"):
+                    item["screwHoles"] = [{"id": h["id"], "p": list(h["p"])} for h in d["screwHoles"]]
+                visible.append(item)
         out = {"t": frame["stamp"], "visible": visible}
         if self.out_dir is not None:
             self.out_dir.mkdir(parents=True, exist_ok=True)

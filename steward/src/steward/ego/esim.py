@@ -1005,8 +1005,13 @@ class Esim:
 
         def path(heading: float, reach: float, near: float) -> bool:
             # Driving preserves the arm's base-relative posture; these stages begin after docking.
+            # The carrying posture may lie outside the planning range: the path starts at the nearest
+            # posture in range, and its first waypoint is still solved continuously from the encoders.
             yaw, roll = wrist_at(heading)
+            g = self.arm.geometry
             at = {"wrist_yaw": 0.0, "wrist_roll": 0.0, "wrist_pitch": 0.0, **current}
+            at["reach"] = min(max(at["reach"], g.reach_min), g.reach_max)
+            at["lift"] = min(max(at["lift"], g.lift_min), g.lift_max)
             targets = [at]
             stages = [{"reach": near}, {"wrist_yaw": yaw}, {"wrist_roll": roll},
                       {"lift": (lifts or [height])[0]}, {"reach": reach}]

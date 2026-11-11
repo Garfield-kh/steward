@@ -1,5 +1,6 @@
 """Held-object planning preserves orientation and checks the route from physical encoders."""
 
+import dataclasses
 import json
 import math
 from pathlib import Path
@@ -94,6 +95,19 @@ def test_endpoint_reachability_does_not_override_a_blocked_rotation_path():
     receipt = esim.predict(scene, "place", {"on": "e:4", "offset": [0.0, 0.1], "yaw": 0.2})
     assert not receipt["feasible"]
     assert "no continuous arm approach" in "; ".join(receipt["issues"])
+
+
+def test_placement_starts_from_a_carrying_reach_short_of_the_planning_range():
+    model, scene = _scene()
+    esim = Esim(model)
+    # Raise the planning minimum above the carrying reach so the approach must clamp first.
+    geometry = dataclasses.replace(esim.arm.geometry, reach_min=0.2)
+    arm = esim.arm = OrientationArm(geometry)
+    assert esim._arm_joints(scene)["reach"] < geometry.reach_min
+    receipt = esim.predict(scene, "place", {"on": "e:4", "offset": [0.0, 0.1]})
+    assert receipt["feasible"], receipt["issues"]
+    transitions = [path for path, start in arm.paths if start is not None]
+    assert transitions and all(path[0]["reach"] == geometry.reach_min for path in transitions)
 
 
 def test_pouring_preserves_held_yaw_while_sampling_roll():

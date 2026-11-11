@@ -76,3 +76,32 @@ def test_custom_mount_height_drives_arm_geometry_and_lift_preference():
     target = {"lift": 1.0, "wrist_pitch": 0.0}
     assert arm._prefer(target) == pytest.approx(1.0 + arm.config.shoulder_above - 1.10)
     assert all(0 <= height <= 0.60 for height, _ in arm._working_seeds(target))
+
+
+@pytest.mark.parametrize("mount_height", [None, 1.10])
+def test_the_planned_lift_range_is_the_one_the_arm_reaches(mount_height):
+    arm = PiperArm((cobot_magic() if mount_height is None else cobot_magic(mount_height=mount_height)).to_dict())
+    g = arm.geometry
+    reaches = np.arange(g.reach_min, g.reach_max + 1e-9, 0.05)
+
+    def reached(lift):
+        return any(arm._ik({"lift": lift, "reach": float(reach), "wrist_yaw": 0.0, "wrist_roll": 0.0, "wrist_pitch": pitch},
+                           {})[0] is not None for reach in reaches for pitch in (0.0, 1.0))
+
+    assert reached(g.lift_min + 0.01) and reached(g.lift_max - 0.01)
+    assert not reached(g.lift_min - 0.03) and not reached(g.lift_max + 0.05)
+
+
+def test_the_planned_reach_starts_where_the_tool_clears_the_frame():
+    arm = PiperArm(cobot_magic().to_dict())
+    assert arm.reachable(1.0, arm.geometry.reach_min, 0.0, 0.0, 0.0)
+
+
+def test_a_load_bending_the_tool_a_little_backward_reads_as_pointing_down():
+    # Encoders of a Cobot Magic holding a lid off a box; their exact pitch is -0.002 rad.
+    arm = PiperArm(cobot_magic().to_dict())
+    encoders = {"lift": 0.0544, "L_joint1": -0.0095, "L_joint2": 2.1141, "L_joint3": -0.2530, "L_joint4": 0.0,
+                "L_joint5": -0.2008, "L_joint6": 1.5614}
+    joints = arm.joints_of(encoders)
+    assert joints["wrist_pitch"] == 0.0
+    assert arm.reachable(joints["lift"], 0.3, joints["wrist_yaw"], joints["wrist_roll"], joints["wrist_pitch"])

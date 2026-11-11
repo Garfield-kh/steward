@@ -53,16 +53,24 @@ class PiperArmConfig:
     # the poses the arm reaches, and which ones depends on where the arm stands).
     continuation_reach: float = 0.35
     continuation_steps: int = 6
-    # Pinch point ahead of the arm mount: tool down 0.50, tilted 60 deg 0.70; planned short of that,
-    # where a small step does not make the solver turn the wrist over.
-    reach: tuple[float, float] = (0.22, 0.66)
-    lift: tuple[float, float] = (0.30, 1.15)  # pinch point above the floor, tool down
+    # Pinch point ahead of the arm mount: from 0.10 (lifted clear of the frame); tool down 0.50,
+    # tilted 60 deg 0.70; planned short of that, where a small step does not make the solver turn
+    # the wrist over.
+    reach: tuple[float, float] = (0.10, 0.66)
+    # The pinch point's height range follows the arm mount (measured: no posture reaches more than
+    # 0.39 below it with the torso down, nor 0.42 above it with the torso up).
+    lift_below_mount: float = 0.39
+    lift_above_mount: float = 0.42
     wrist_yaw_max: float = 3.1
     # Bounds only; what a posture allows is solved (``reachable``): the tool straight down tips
     # less than 1 rad, tilted forward a full turn; a half turn turns what it holds over (``turn_over``).
     wrist_roll_max: float = math.pi
     wrist_pitch_max: float = 1.05
     pitch_unseen_cos: float = 0.1  # |cos roll| below which the tool pitch cannot be read from the posture
+    # A pitch read this little below zero (a held load bending the arm off its solved posture) is
+    # the tool pointing down: planning accepts no backward tilt, so a reading of -0.002 rad would
+    # make every motion from the current posture unreachable.
+    pitch_read_slack: float = 0.02
     # Holding something, a small step of the grasp point (a ramp, a tip) that the solver can only
     # follow by turning the wrist over to another posture -- a joint moving this far, or the pinch
     # point leaving the step by this much halfway between the two postures -- is refused: the arm
@@ -100,8 +108,10 @@ class PiperArm(Arm):
         mount_at_zero = pose_compose(lift["origin"]["value"], mount["origin"]["value"])["p"]
         self._mount_height_at_zero = float(mount_at_zero[2])
         self._lift_range = (lift["limits"]["value"]["lo"], lift["limits"]["value"]["hi"])
+        lift_min = self._mount_height_at_zero + self._lift_range[0] - cfg.lift_below_mount
+        lift_max = self._mount_height_at_zero + self._lift_range[1] + cfg.lift_above_mount
         super().__init__(ArmGeometry(tool_offset=float(mount_at_zero[0]), lateral=float(mount_at_zero[1]), reach_min=cfg.reach[0],
-                                     reach_max=cfg.reach[1], lift_min=cfg.lift[0], lift_max=cfg.lift[1],
+                                     reach_max=cfg.reach[1], lift_min=lift_min, lift_max=lift_max,
                                      wrist_yaw_max=cfg.wrist_yaw_max, wrist_roll_max=cfg.wrist_roll_max,
                                      gripper=f"{cfg.arm}_link6", wrist_pitch_max=cfg.wrist_pitch_max))
         self.names = self.ik.joint_names(cfg.arm)
@@ -188,6 +198,8 @@ class PiperArm(Arm):
             pitch = math.atan2(m[2, 0], m[2, 2])
             if abs(pitch) > math.pi / 2:
                 pitch = math.atan2(-m[2, 0], -m[2, 2])
+            if -self.config.pitch_read_slack <= pitch < 0.0:
+                pitch = 0.0
         m = m @ matrix_from_quat(quat_from_axis_angle([0.0, 1.0, 0.0], pitch))
         return {"lift": float(tcp["p"][2]), "reach": float(tcp["p"][0]) - self.geometry.tool_offset,
                 "wrist_yaw": math.atan2(m[1, 0], m[0, 0]), "wrist_roll": math.atan2(m[2, 1], m[2, 2]),

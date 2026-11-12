@@ -126,6 +126,21 @@
   .plan-trouble { margin-top: 8px; padding: 6px 10px; border-radius: 8px; background: #33270f; color: #ffd27a; font-size: 13px;
                   white-space: pre-wrap; word-break: break-word; }
   .plan-trouble.stuck { background: #3a1f24; color: #ffb3b3; }
+  .thinking-list { display: grid; gap: 10px; }
+  .thinking-entry { min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); }
+  .thinking-entry.active { border-color: var(--ego); }
+  .thinking-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; padding-bottom: 8px;
+                   margin-bottom: 8px; border-bottom: 1px solid var(--line); }
+  .thinking-step { color: var(--text); font-size: 13px; font-weight: 500; font-variant-numeric: tabular-nums; }
+  .thinking-status { color: var(--muted); font-size: 12px; }
+  .thinking-entry.active .thinking-status { color: var(--ego); }
+  .thinking-preview { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px;
+                      color: var(--muted); font-size: 12px; }
+  .thinking-preview button { font-size: 12px; padding: 3px 8px; }
+  .thinking-error { color: #ffb3b3; }
+  .thinking-text { color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .thinking-conclusion { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--line);
+                         color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
   .pill.running { color: #8fe0b8; } .pill.recovering, .pill.escaping { color: #ffd27a; } .pill.waiting-operator { color: #ff8a8a; }
 </style>
 </head>
@@ -234,7 +249,7 @@
     <h2>机器人计划 <span class="pill" id="planState"></span><span class="sub" id="planMeta"></span></h2>
     <div id="planBody" class="task">机器人尚未发布计划</div>
     <h2 style="margin-top:14px">当前思考 <span class="sub" id="thinkMeta"></span></h2>
-    <div id="thinkBody" class="task" style="white-space:pre-wrap"></div>
+    <div id="thinkBody" class="task thinking-list"></div>
   </section>
 </div>
 <script>
@@ -633,17 +648,54 @@ document.querySelectorAll('[data-view]').forEach(btn => btn.onclick = () => {
 });
 
 // ------------------------------------------------------------------ refresh
+const thinkingExpanded = new Map();
 function renderThinking() {
   const t = state.thinking && state.thinking[robotId];
-  if (!t) { setText($('thinkMeta'), ''); setText($('thinkBody'), '尚无思考记录'); return; }
+  if (!t) { thinkingExpanded.clear(); setText($('thinkMeta'), ''); setText($('thinkBody'), '尚无思考记录'); return; }
   if (t.error) { setText($('thinkMeta'), '读取失败'); setText($('thinkBody'), t.error); return; }
   const entries = t.entries || [];
-  setText($('thinkMeta'), entries.length
-    ? `　Ego Harness · 第 ${entries[entries.length - 1].step} 步${entries.some(e => e.active) ? ' · 思考中' : ''}` : '　Ego Harness');
-  setHtml($('thinkBody'), entries.map(e => `<div class="${e.active ? 'plan-trouble' : ''}" style="margin:4px 0">${esc(e.text)}`
-    + (e.conclusion && e.conclusion.length ? `<div style="color:var(--muted);font-size:12px">结论：调用 ${e.conclusion.map(esc).join('、')}</div>` : '')
-    + `</div>`).join('') || '尚无思考记录');
+  const visible = new Set(entries.map(e => e.id));
+  for (const id of thinkingExpanded.keys()) if (!visible.has(id)) thinkingExpanded.delete(id);
+  setText($('thinkMeta'), entries.length ? `　Ego Harness · 最近 ${entries.length} 段` : '　Ego Harness');
+  setHtml($('thinkBody'), entries.map(e => {
+    const detail = thinkingExpanded.get(e.id);
+    const full = detail && detail.text !== null;
+    return `<section class="thinking-entry${e.active ? ' active' : ''}" aria-label="第 ${esc(e.step)} 步思考">`
+    + `<div class="thinking-head"><span class="thinking-step">第 ${esc(e.step)} 步</span>`
+    + `<span class="thinking-status">${e.active ? '最近一步' : '历史记录'}</span></div>`
+    + `<div class="thinking-text" id="thinking-${esc(e.id)}">${esc(full ? detail.text : e.text)}</div>`
+    + (e.truncated ? `<div class="thinking-preview"><span>${full ? '全文' : '已截断'} · 共 ${esc(e.totalChars)} 字符${full ? '' : '，预览为末尾内容'}</span>`
+      + `<button type="button" data-thinking-toggle="${esc(e.id)}" aria-expanded="${!!detail}" aria-controls="thinking-${esc(e.id)}">${detail ? '收起' : '展开全文'}</button>`
+      + (detail?.loading ? '<span>正在读取全文…</span>' : '')
+      + (detail?.error ? `<span class="thinking-error" role="alert">读取全文失败，请重试</span><button type="button" data-thinking-retry="${esc(e.id)}">重试</button>` : '')
+      + '</div>' : '')
+    + (e.conclusion && e.conclusion.length ? `<div class="thinking-conclusion">后续调用：${e.conclusion.map(esc).join('、')}</div>` : '')
+    + `</section>`;
+  }).join('') || '尚无思考记录');
 }
+
+$('thinkBody').addEventListener('click', async (event) => {
+  const button = event.target.closest('button[data-thinking-toggle], button[data-thinking-retry]');
+  if (!button) return;
+  const id = button.dataset.thinkingToggle || button.dataset.thinkingRetry;
+  if (button.dataset.thinkingToggle && thinkingExpanded.has(id)) {
+    thinkingExpanded.delete(id); renderThinking(); return;
+  }
+  const detail = { text: null, loading: true, error: false };
+  thinkingExpanded.set(id, detail); renderThinking();
+  try {
+    const response = await api('GET', `/console/thinking?robot=${encodeURIComponent(robotId)}&entry=${encodeURIComponent(id)}`);
+    if (response.id !== id || typeof response.text !== 'string') throw new Error('思考全文响应无效');
+    if (thinkingExpanded.get(id) !== detail) return;
+    detail.text = response.text;
+  } catch (error) {
+    // Preserve the preview and allow an explicit retry; a stale response cannot reopen a collapsed entry.
+    if (thinkingExpanded.get(id) !== detail) return;
+    detail.error = true;
+  } finally {
+    if (thinkingExpanded.get(id) === detail) { detail.loading = false; renderThinking(); }
+  }
+});
 
 async function refresh() {
   try {

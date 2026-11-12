@@ -8,6 +8,7 @@ file cannot hold up the console's state refresh.
 from __future__ import annotations
 
 import glob
+import hashlib
 import json
 import os
 import threading
@@ -60,23 +61,35 @@ def _rows(path: str, deadline: float) -> list[dict]:
     return rows
 
 
-def _thinking_of(rows: list[dict], limit: int) -> list[dict]:
+def _entry_id(path: str, index: int) -> str:
+    """Identify an append-only session row without exposing its filesystem path."""
+    return f"{hashlib.sha256(path.encode()).hexdigest()[:16]}:{index}"
+
+
+def _reasoning(row: dict) -> str:
+    """Reasoning text of an assistant event, or empty text for other events."""
+    if row.get("type") != "assistant/message":
+        return ""
+    return "".join(p["text"] for p in row["data"]["message"]["content"] if p["type"] == "reasoning").strip()
+
+
+def _thinking_of(rows: list[dict], limit: int, path: str) -> list[dict]:
     """One entry per step that has reasoning: its step number, whether it is the step still being
-    thought out (after the latest ``step/start``), its text and its conclusion (the names of the
-    tools it called), oldest first."""
+    thought out (after the latest ``step/start``), its preview and its conclusion (the names of the
+    tools it called), oldest first. Each preview includes an opaque full-text id, original character
+    count and explicit truncation flag."""
     starts = [r for r in rows if r.get("type") == "step/start"]
     last_start = starts[-1]["time"] if starts else 0
     out = []
-    for row in rows:
-        if row.get("type") != "assistant/message":
-            continue
-        message = row["data"]["message"]
-        reasoning = "".join(p["text"] for p in message["content"] if p["type"] == "reasoning").strip()
+    for index, row in enumerate(rows):
+        reasoning = _reasoning(row)
         if not reasoning:
             continue
+        message = row["data"]["message"]
         tools = [p["name"] for p in message["content"] if p["type"] == "tool-call"]
-        out.append({"step": row["data"]["step"], "active": row["time"] >= last_start,
-                    "text": reasoning[-_TEXT_LIMIT:], "conclusion": tools})
+        out.append({"id": _entry_id(path, index), "step": row["data"]["step"], "active": row["time"] >= last_start,
+                    "text": reasoning[-_TEXT_LIMIT:], "truncated": len(reasoning) > _TEXT_LIMIT,
+                    "totalChars": len(reasoning), "conclusion": tools})
     return out[-limit:]
 
 
@@ -94,7 +107,37 @@ def thinking_state(robot_homes: dict[str, str], limit: int = 3, exclude: frozens
         if path is None:
             continue
         try:
-            out[rid] = {"entries": _thinking_of(_rows(path, deadline), limit), "error": None}
+            out[rid] = {"entries": _thinking_of(_rows(path, deadline), limit, path), "error": None}
         except (OSError, RuntimeError, TimeoutError, json.JSONDecodeError) as exc:
             out[rid] = {"entries": [], "error": f"{type(exc).__name__}: {exc}"}
     return out
+
+
+def thinking_text(robot_homes: dict[str, str], robot: str, entry: str,
+                  exclude: frozenset[str] = frozenset()) -> dict:
+    """Read one reasoning block in full from the robot's current non-excluded session.
+
+    :param robot_homes: configured robot ids and Harness homes; callers cannot supply paths.
+    :param robot: configured robot id.
+    :param entry: opaque id returned by ``thinking_state``.
+    :param exclude: sessions hidden after an episode reset.
+    :returns: ``{id, text}`` with the untruncated reasoning text.
+    :raises KeyError: unknown robot, expired session, or missing reasoning entry.
+    :raises OSError: the session cannot be read.
+    :raises RuntimeError: compressed session data is invalid.
+    :raises TimeoutError: the read deadline expired.
+    :raises json.JSONDecodeError: session events are malformed.
+    """
+    deadline = time.monotonic() + _TIME_BUDGET_S
+    home = robot_homes.get(robot)
+    path = _session_file(home, exclude) if home is not None else None
+    if path is None:
+        raise KeyError(entry)
+    rows = _rows(path, deadline)
+    for index, row in enumerate(rows):
+        if _entry_id(path, index) == entry:
+            text = _reasoning(row)
+            if text:
+                return {"id": entry, "text": text}
+            break
+    raise KeyError(entry)

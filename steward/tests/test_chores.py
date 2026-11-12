@@ -512,7 +512,11 @@ def _patch_sideboard_runner(monkeypatch, chores_mod, state, board, *, move=None,
                         lambda api, support, xy: {"on": support["id"], "offset": [0.0, 0.0]})
     if move is None:
         def move(api, obj, place, observe, log, timeout_s, attempts=2):
-            return {"state": "succeeded"}
+            # Upstream stack path assigns the return value as the moved object (``_landed``).
+            landed = dict(obj)
+            if place.get("on") is not None:
+                landed["on"] = place["on"]
+            return landed
     monkeypatch.setattr(chores_mod, "_move", move)
     runner = chores_mod.Chores("http://unused")
 
@@ -621,6 +625,15 @@ def _stack_rescan_harness(monkeypatch, chores_mod, *, ghost_states: list[dict], 
         if obj["id"] == "e:ghost" and state["i"] + 1 < len(ghost_states):
             state["i"] += 1
 
+    def fake_move(api, obj, place, observe, log, timeout_s, attempts=2):
+        landed = dict(obj)
+        if place.get("on") is not None:
+            landed["on"] = place["on"]
+            for o in objects_now():
+                if o["id"] == obj["id"]:
+                    o["on"] = place["on"]
+        return landed
+
     monkeypatch.setattr(chores_mod, "_summary", fake_summary)
     monkeypatch.setattr(chores_mod, "_settle", fake_settle)
     monkeypatch.setattr(chores_mod, "_refresh_or_recover",
@@ -628,7 +641,7 @@ def _stack_rescan_harness(monkeypatch, chores_mod, *, ghost_states: list[dict], 
                         else next(o for o in objects_now() if o["id"] == obj["id"]))
     monkeypatch.setattr(chores_mod, "_approach_to_observe", fake_approach)
     monkeypatch.setattr(chores_mod, "simtime_sleep", lambda *a, **k: None)
-    monkeypatch.setattr(chores_mod, "_move", lambda *a, **k: {"state": "succeeded"})
+    monkeypatch.setattr(chores_mod, "_move", fake_move)
     monkeypatch.setattr(chores_mod, "_place_at",
                         lambda api, support, xy: {"on": support["id"], "offset": [0.0, 0.0]})
     runner = chores_mod.Chores("http://unused")
@@ -777,6 +790,7 @@ def test_move_rebinds_place_on_after_support_renumber(monkeypatch):
     monkeypatch.setattr(chores_mod, "_safe_receipt", fake_safe)
     monkeypatch.setattr(chores_mod, "_run", lambda api, receipt, timeout_s: {"state": "succeeded", "message": "ok"})
     monkeypatch.setattr(chores_mod, "simtime_sleep", lambda *a, **k: None)
+    monkeypatch.setattr(chores_mod, "_landed", lambda api, o, spot: {**o, "on": "e:484"})
     log: list = []
     chores_mod._move("http://unused", obj, {"on": "e:31"}, stale, log, timeout_s=30.0)
     assert places == [{"on": "e:484"}]

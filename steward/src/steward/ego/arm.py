@@ -122,13 +122,23 @@ class Arm:
 
 def slide_arm(robot_model: dict, reach: tuple[float, float], lift: tuple[float, float],
               wrist_yaw_max: float, wrist_roll_max: float) -> Arm:
-    """The kitchen robot's arm, its tool offset read from the model (lift column plus gripper mount)."""
+    """The slide arm, with configured wrist caps intersected with its model's symmetric limits.
+
+    The tool offset comes from the lift column and gripper mount. An asymmetric joint interval
+    contributes only its symmetric range around zero, as required by ``ArmGeometry``.
+    """
     tree = robot_model["body"]
     lift_joint = next(j for j in tree["joints"] if j["id"] == "lift")
     mount = next(j for j in tree["joints"] if j["id"] == "gripper_mount")
     gripper = next(link["id"] for link in tree["links"]
                    if any((a if isinstance(a, str) else a.get("value")) == "grasp-point"
                           for a in link.get("affordances", [])))
+
+    def wrist_limit(name: str, configured: float) -> float:
+        limits = next(j for j in tree["joints"] if j["id"] == name)["limits"]["value"]
+        return min(configured, -limits["lo"], limits["hi"])
+
     return Arm(ArmGeometry(tool_offset=lift_joint["origin"]["value"]["p"][0] + mount["origin"]["value"]["p"][0],
                            lateral=0.0, reach_min=reach[0], reach_max=reach[1], lift_min=lift[0], lift_max=lift[1],
-                           wrist_yaw_max=wrist_yaw_max, wrist_roll_max=wrist_roll_max, gripper=gripper))
+                           wrist_yaw_max=wrist_limit("wrist_yaw", wrist_yaw_max),
+                           wrist_roll_max=wrist_limit("wrist_roll", wrist_roll_max), gripper=gripper))

@@ -6,12 +6,17 @@ take exclusive control (``/ego/control``); skill and explore requests then carry
 ``/ego/view/frame`` returns its newest frame (``204`` when none is newer than ``after``).
 Requests that can change the robot's state are applied at a world instant and recorded with its
 time (``/ego/inputs``); :func:`replay` applies such a recording again, exactly, at any speed.
+Face matching records and releases its observation snapshot before pure correlation; its input
+record therefore does not signal calculation completion. Peer disconnect cancels correlation
+between pieces/rotations; snapshot acquisition still completes at its scheduled world instant.
 """
 
 from __future__ import annotations
 
+from concurrent.futures import CancelledError
+
 from steward.ego.runtime import EgoRuntime
-from steward.net import NO_CONTENT, HttpError, JsonServer
+from steward.net import NO_CONTENT, CancellableHandler, HttpError, JsonServer
 from steward.viewloop import ViewSettings, frame_response
 
 
@@ -32,6 +37,8 @@ def ego_api(runtime: EgoRuntime, port: int = 0, bind_wait_s: float = 0.0) -> Jso
                 return fn(q, b or {})
             except HttpError:
                 raise
+            except CancelledError:
+                raise
             except KeyError as exc:
                 raise HttpError(404, str(exc).strip("'")) from None
             except (PermissionError, RuntimeError, ValueError) as exc:
@@ -48,7 +55,18 @@ def ego_api(runtime: EgoRuntime, port: int = 0, bind_wait_s: float = 0.0) -> Jso
         return lambda q, b: runtime.apply({"method": method, "path": path, "query": q, "body": b}, lambda: fn(q, b))
 
     routes = _routes(runtime)
-    return JsonServer({k: guarded(k, recorded(k, v)) for k, v in routes.items()}, port=port, name="ego-api",
+    handlers = {k: guarded(k, recorded(k, v)) for k, v in routes.items()}
+    match_route = ("POST", "/ego/match-face")
+
+    def match(q, b, cancelled):
+        def run(q, b):
+            snapshot = runtime.apply({"method": "POST", "path": "/ego/match-face", "query": q, "body": b},
+                                     lambda: runtime.prepare_face_match(b.get("entities"), b["reference"], int(b.get("px", 24))))
+            return runtime.compute_face_match(snapshot, cancelled)
+        return guarded(match_route, run)(q, b)
+
+    handlers[match_route] = CancellableHandler(match)
+    return JsonServer(handlers, port=port, name="ego-api",
                       bind_wait_s=bind_wait_s)
 
 

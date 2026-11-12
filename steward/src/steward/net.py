@@ -10,6 +10,8 @@ from __future__ import annotations
 import errno
 import json
 import os
+import select
+import socket
 import sys
 import threading
 import time
@@ -17,10 +19,23 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
+from concurrent.futures import CancelledError
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 Handler = Callable[[dict, Any], Any]
+
+
+@dataclass(frozen=True)
+class CancellableHandler:
+    """HTTP handler receiving a cooperative peer-disconnect check as its third argument.
+
+    The callback owns stopping its work and raises ``CancelledError`` after it has stopped.
+    Checking does not consume socket bytes. No background watcher or cancellation thread is used.
+    """
+
+    callback: Callable[[dict, object, Callable[[], bool]], object]
 
 
 class HttpError(Exception):
@@ -63,7 +78,7 @@ class JsonServer:
     """Serves ``routes`` on one port. A fixed port that is still held (a service just restarted on
     it) is retried for up to ``bind_wait_s`` seconds before the bind error is raised."""
 
-    def __init__(self, routes: dict[tuple[str, str], Handler], host: str = "127.0.0.1", port: int = 0, name: str = "",
+    def __init__(self, routes: dict[tuple[str, str], Handler | CancellableHandler], host: str = "127.0.0.1", port: int = 0, name: str = "",
                  bind_wait_s: float = 0.0):
         self.routes = routes
         self.name = name
@@ -72,6 +87,14 @@ class JsonServer:
         class _Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):  # noqa: D401 - silence default stderr logging
                 return
+
+            def _cancelled(self) -> bool:
+                """Whether the peer has closed after its complete request body was read."""
+                try:
+                    readable = select.select([self.connection], [], [], 0)[0]
+                    return bool(readable) and self.connection.recv(1, socket.MSG_PEEK) == b""
+                except OSError:
+                    return True  # A reset or closed connection cannot receive the result either.
 
             def _dispatch(self, method: str) -> None:
                 parsed = urllib.parse.urlparse(self.path)
@@ -89,7 +112,9 @@ class JsonServer:
                         self._send(400, {"error": f"invalid JSON body: {exc}"})
                         return
                 try:
-                    result = handler(query, body)
+                    result = handler.callback(query, body, self._cancelled) if isinstance(handler, CancellableHandler) else handler(query, body)
+                except CancelledError:
+                    return  # The cooperative handler has settled; its disconnected peer needs no reply.
                 except HttpError as exc:
                     self._send(exc.status, {"error": str(exc)})
                     return

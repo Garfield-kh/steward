@@ -344,7 +344,10 @@ class EgoRuntime:
                                       pin=self._pin_track, furniture=self._furniture_id,
                                       contents=self._content_ids, content_positions=self._content_positions,
                                       resettle=self._resettle_contents,
-                                      home_empty=lambda tick: self.arm.home_empty(self.link.command, tick))
+                                      home_empty=lambda tick: self.arm.home_empty(self.link.command, tick),
+                                      deploy_working=(lambda tick: self.arm.deploy_working(self.link.command, tick)
+                                                      if callable(getattr(self.arm, "deploy_working", None))
+                                                      else None))
         self._view_scene: tuple[dict, int, float] | None = None  # (ES dict, version, stamp) for the view
         # The belief part of the motion state, recorded under ``_lock`` at each read and around each
         # perception update; :meth:`_motion_state` falls back on it while another thread holds the lock.

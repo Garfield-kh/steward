@@ -24,9 +24,12 @@
              gap: 8px; align-items: center; }
   .card h2 .spacer { flex: 1; }
   .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-  .pane-title { font-size: 13px; margin-bottom: 6px; display: flex; gap: 8px; align-items: center; }
-  .pane-title .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .pane-title { font-size: 13px; margin-bottom: 2px; display: flex; gap: 8px; align-items: center; min-height: 1.45em; }
+  .pane-title .dot { width: 10px; height: 10px; border-radius: 50%; flex: 0 0 auto; display: inline-block; }
   .pane-title .sub { color: var(--muted); font-size: 12px; }
+  /* Fixed-height stats under each pane title so fps / frame text never shifts the viewport. */
+  .pane-stats { height: 1.35em; line-height: 1.35em; margin: 0 0 6px; color: var(--muted); font-size: 12px;
+                font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .viewport { position: relative; border-radius: 8px; overflow: hidden; background: #11151a; aspect-ratio: 4 / 3;
               cursor: grab; user-select: none; touch-action: none; }
   .viewport.dragging { cursor: grabbing; }
@@ -180,8 +183,8 @@
     <div class="panes">
       <div>
         <div class="pane-title"><span class="dot" style="background:var(--gt)"></span>World State
-          <span class="sub" id="fpsWorld"></span>
           <span class="sub">世界真实状态（WSim 渲染）</span></div>
+        <div class="pane-stats" id="fpsWorld" aria-live="polite"></div>
         <div class="viewport" id="vpWorld" tabindex="0" role="region" aria-label="世界预览，WASD 移动视角" aria-describedby="worldViewHint">
           <img id="imgWorld" alt="World State">
           <canvas id="ovWorld" width="1024" height="768"></canvas>
@@ -190,7 +193,8 @@
       </div>
       <div>
         <div class="pane-title"><span class="dot" style="background:var(--ego)"></span>Ego State
-          <span class="sub" id="egoSub">机器人自我态（同一转换器渲染）</span><span class="sub" id="fpsEgo"></span></div>
+          <span class="sub" id="egoSub">机器人自我态（同一转换器渲染）</span></div>
+        <div class="pane-stats" id="fpsEgo" aria-live="polite"></div>
         <div class="viewport" id="vpEgo" tabindex="0" role="region" aria-label="自我态预览，WASD 移动视角" aria-describedby="egoViewHint">
           <img id="imgEgo" alt="Ego State">
           <canvas id="ovEgo" width="1024" height="768"></canvas>
@@ -204,8 +208,8 @@
       </div>
     </div>
     <div class="legend">
-      <label><input type="checkbox" id="showGtLabels" checked>World：物体标签</label>
-      <label><input type="checkbox" id="showEgoLabels" checked>Ego：物体标签</label>
+      <label><input type="checkbox" id="showGtLabels">World：物体标签</label>
+      <label><input type="checkbox" id="showEgoLabels">Ego：物体标签</label>
       <label><input type="checkbox" id="showSigma" checked>Ego：2σ 不确定度</label>
       <label><input type="checkbox" id="showError" checked>Ego：到真实位置的误差线</label>
     </div>

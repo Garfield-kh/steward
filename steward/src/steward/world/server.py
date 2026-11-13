@@ -178,6 +178,9 @@ class StewardHost:
         robot_label = next(iter(scenario["robots"]), "robot-1").removeprefix("w:")
         if "robot" in self.chat.agents:
             self.chat.agents["robot"].label = robot_label
+            # Tell the Ego Harness which body it is (single-hand Steward vs dual-arm Cobot).
+            body_id = next((e["id"] for e in self.embodiments.values() if e.get("registered")), None)
+            self.chat.set_robot_embodiment(body_id)
         # A robot that left with the previous episode takes its port with it: the port is how
         # clients reach a robot, and nothing is behind it once the robot is gone.
         for rid in list(self.robot_servers):

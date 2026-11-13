@@ -37,9 +37,26 @@ WORLD_BRIEF = (
     "完成后用一两句中文说明做了什么。\n\n操作员请求："
 )
 
-ROBOT_BRIEF = (
+# Per-body identity and hand-use rules, inserted after the shared opening. Keys are embodiment ids.
+EMBODIMENT_BRIEFS: dict[str, str] = {
+    "steward-bot": (
+        "本体：你是 Steward 单手移动厨房机器人——平面底盘、升降柱、直线伸出臂，只有一个平行爪。"
+        "规划动作和写 run_code 时必须充分利用这一只手：能用手完成的拿、放、拧、翻、对准、固定都要主动做，"
+        "不要只导航观察而不动手；同一只手串行处理的多个步骤写进同一个程序循环里做完。\n"
+    ),
+    "cobot-magic": (
+        "本体：你是 AgileX Cobot Magic 双手机器人——差速底盘、升降柱、左右两只 Piper 6-DoF 臂，各带一个平行爪（臂标识 L / R）。"
+        "规划动作、写 run_code 和调用技能时必须充分利用双手：能双手并行的就双手一起做（一手持物一手操作、"
+        "一手固定一手拧螺丝、双手同时搬运或整理），不要只用单臂而让另一只手闲着；需要指定手臂时用 arm: \"L\" 或 \"R\"。\n"
+    ),
+}
+
+ROBOT_BRIEF_HEAD = (
     "你是家用服务机器人 robot-1。操作员通过控制台给你下达新任务；在这一轮对话期间你独占控制机器人，"
     "原来的后台任务会暂停，等你这一轮结束后再继续。\n"
+)
+
+ROBOT_BRIEF_BODY = (
     "做法：先用 ego_state 看看你已经知道哪些物体；找不到或不确定时用 ego_explore 环顾，或导航靠近观察。"
     "按物体的 role 理解操作员说的「餐边柜」「柜子」「咖啡杯」等指称：role 是结合整个场景推断出的用途标签，"
     "category 只是单个视角下最像的类别，局部视角下家具和相似餐具容易混淆。"
@@ -110,8 +127,25 @@ ROBOT_BRIEF = (
     "和 ego_predict / skill_run 组合起来，并尽量复用已有的 skill。做成之后用 capability_save 保存："
     "把每个能用在别的物体上的操作存成 skill（例如把一堆物体摊开、把扁平物体翻成正面、按网格摆放），"
     "再存一个只负责组合这些 skill 的 recipe；物体 id、位置和尺寸都放进参数，做不到预期结果时让代码抛出错误。"
-    "任务结束前整理一次能力库：删掉被更通用的版本取代的、重复的和标为 deprecated 的能力。\n\n操作员任务："
+    "任务结束前整理一次能力库：删掉被更通用的版本取代的、重复的和标为 deprecated 的能力。\n\n"
 )
+
+ROBOT_FOLLOW_UP = "操作员任务："
+
+
+def robot_brief(embodiment_id: str | None = None) -> str:
+    """The Ego Harness system brief for a robot body: shared rules plus that body's hand-use rules.
+
+    :param embodiment_id: a registered id (``steward-bot``, ``cobot-magic``); unknown or None uses
+        the single-hand Steward body so a missing registry never omits hand-use guidance.
+    :returns: the full first-turn prefix ending in :data:`ROBOT_FOLLOW_UP`.
+    """
+    body = EMBODIMENT_BRIEFS.get(embodiment_id or "steward-bot", EMBODIMENT_BRIEFS["steward-bot"])
+    return ROBOT_BRIEF_HEAD + body + ROBOT_BRIEF_BODY + ROBOT_FOLLOW_UP
+
+
+# Default brief (single-hand Steward); the host replaces it when a scenario's body is known.
+ROBOT_BRIEF = robot_brief("steward-bot")
 
 ROBOT_OWNER = "operator"
 TURN_BUDGET_S = 24 * 24 * 3600.0
@@ -254,13 +288,22 @@ class HarnessChat:
         self.agents["robot"] = _Agent(
             key="robot", label="robot-1", profile="ego", home=robot_home,
             cwd=(robot_home / "workspace") if robot_home else config.cwd,
-            brief=ROBOT_BRIEF, follow_up="操作员任务：",
+            brief=ROBOT_BRIEF, follow_up=ROBOT_FOLLOW_UP,
             patch=lambda: (f"- id: steward-ego-runtime\n  config:\n    endpoint: '{config.ego_api}'\n"
                            f"    owner: {ROBOT_OWNER}\n"),
             before_turn=lambda: self._robot_control("acquire"),
             after_turn=lambda: self._robot_control("release"),
             on_failure=lambda message: self._robot_alert(message),
             extra_reason=lambda: None if config.ego_api else "the robot's Ego API is not known to this host")
+
+    def set_robot_embodiment(self, embodiment_id: str | None) -> None:
+        """Refresh the robot agent's first-turn brief for the body now in the scene.
+
+        :param embodiment_id: registered body id, or None to keep the Steward single-hand brief.
+        """
+        if "robot" not in self.agents:
+            return
+        self.agents["robot"].brief = robot_brief(embodiment_id)
 
     # ------------------------------------------------------------ public API
     def unavailable_reason(self, key: str) -> str | None:

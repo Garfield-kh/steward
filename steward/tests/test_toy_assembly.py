@@ -35,6 +35,10 @@ def test_build_toy_assembly_publishes_a_settled_scene_with_both_kits(tmp_path):
     assert scenario["task"].startswith("两张桌子上分别有一套拆开的玩具")
     assert "螺旋桨" not in scenario["task"]
     assert "一次只装一个零件" in scenario["task"]
+    assert "刀头朝下" in scenario["task"] and "不要横着" in scenario["task"]
+    assert "侧面立起" in scenario["task"] and "螺丝孔朝上" in scenario["task"]
+    assert "精确对准" in scenario["task"] and "插入" in scenario["task"]
+    assert scenario["task"].index("组装汽车玩具") < scenario["task"].index("组装玩具飞机")
     assert "组装说明书" in scenario["task"] and "参考图" in scenario["task"]
     assert scenario["goal"] == toy_assembly_goal()
     ids = {e["id"] for e in scenario["sceneState"]["entities"]}

@@ -64,6 +64,7 @@ def test_place_wing_on_fuselage_seats_the_wing_mount_holes():
     receipt = _esim(model).predict(scene, "place", {"on": "e:fuse"})
     assert receipt["feasible"], receipt["issues"]
     assert receipt["plan"]["alignTo"] == "e:fuse"
+    assert receipt["plan"]["mate"] is True
     assert any("aligned screw holes" in i for i in receipt["issues"])
     fuse = scene.entity("e:fuse")
     fx, fy = fuse.pose.value["p"][0], fuse.pose.value["p"][1]
@@ -74,6 +75,23 @@ def test_place_wing_on_fuselage_seats_the_wing_mount_holes():
     ly = math.sin(-fyaw) * (spot[0] - fx) + math.cos(-fyaw) * (spot[1] - fy)
     assert lx == pytest.approx(0.02, abs=1e-3)
     assert ly == pytest.approx(0.0, abs=1e-3)
+
+
+def test_over_support_allows_a_wide_mate_whose_footprint_hangs_past_the_part():
+    """A wing on a fuselage fails footprint containment; mate mode only needs the centre on it."""
+    from steward.ego.skills import SkillExecutor
+
+    class _Fake:
+        def _gripper_xy(self):
+            return np.array([0.02, 0.0])
+
+    plan = {
+        "spot": [0.02, 0.0], "gripSpot": [0.02, 0.0], "heldHalf": 0.10,
+        "supportBox": {"cx": 0.0, "cy": 0.0, "yaw": 0.0, "hx": 0.09, "hy": 0.0225},
+    }
+    assert not SkillExecutor._over_support(_Fake(), plan)
+    plan["mate"] = True
+    assert SkillExecutor._over_support(_Fake(), plan)
 
 
 def test_place_gear_on_table_aligns_to_fuselage_gear_holes():

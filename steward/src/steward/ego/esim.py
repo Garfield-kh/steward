@@ -1060,6 +1060,7 @@ class Esim:
             raise PredictionError(f"unknown support {params.get('on')!r}")
         mate, aligned_offset, aligned_yaw, align_issues = self._place_hole_align(es, held, support, params)
         place_params = dict(params)
+        mating_on = False
         if aligned_offset is not None:
             place_params["offset"] = list(aligned_offset)
             place_params["clearance"] = 0.0
@@ -1084,10 +1085,13 @@ class Esim:
                 issues.append(f"only {clearance * 100:.1f} cm of clearance with {sigma * 100:.1f} cm uncertainty")
         elif self._affords(support, "support-surface") or self._screw_holes(support):
             over = None
+            # Screw-hole parts that are not furniture: the held piece may hang past them (wing on
+            # fuselage). Mark the plan so release only checks the centre, not footprint containment.
+            mating_on = bool(self._screw_holes(support) and not self._affords(support, "support-surface"))
             sbox, _, top = entity_box(support)
             final_yaw = float(place_params["yaw"]) if place_params.get("yaw") is not None else held_box.yaw
             # Mating onto a part that is not furniture: keep the load on its footprint, not inset.
-            edge_keep = 0.0 if not self._affords(support, "support-surface") else None
+            edge_keep = 0.0 if mating_on else None
             # Flip-in-air releases from higher with a drop: keep ``place_clearance`` from neighbours
             # so the piece does not land on another piece already on the table.
             flip_place = bool(params.get("flip")) and self.config.flip_in_air
@@ -1144,6 +1148,8 @@ class Esim:
                 "heldHalf": held_half}
         if mate is not None:
             plan["alignTo"] = mate.id
+        if mating_on:
+            plan["mate"] = True
         if over is not None:
             plan["approachLift"] = over
         if yaw_goal is not None:

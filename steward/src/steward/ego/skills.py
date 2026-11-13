@@ -895,14 +895,22 @@ class SkillExecutor:
         return min(self.config.reach_max, float(rel @ heading) - st["toolOffset"])
 
     def _over_support(self, plan: dict) -> bool:
-        """True when the held object's footprint lies within the support top: the object's centre is
-        where the gripper is, offset as the plan's ``spot`` is from its ``gripSpot``."""
+        """True when the held object is released over the support top.
+
+        Furniture placements require the held footprint (shrunk by ``heldHalf``) to lie on the
+        surface. Mating a screw-hole part onto another (``plan["mate"]``) only needs the held
+        centre on the mate: a wing spans past a fuselage, so footprint containment can never hold.
+        """
         box = plan["supportBox"]
         grip = plan.get("gripSpot", plan["spot"])
         g = self._gripper_xy() + np.array([plan["spot"][0] - grip[0], plan["spot"][1] - grip[1]])
         dx, dy = g[0] - box["cx"], g[1] - box["cy"]
         c, s = math.cos(-box["yaw"]), math.sin(-box["yaw"])
         lx, ly = c * dx - s * dy, s * dx + c * dy
+        if plan.get("mate"):
+            # Centre on the mate, with a short capture slack for dock error.
+            slack = 0.02
+            return abs(lx) <= box["hx"] + slack and abs(ly) <= box["hy"] + slack
         margin = plan.get("heldHalf", 0.05) * 0.6
         return abs(lx) <= box["hx"] - margin and abs(ly) <= box["hy"] - margin
 

@@ -64,7 +64,8 @@ def test_tcp_sits_between_the_finger_bodies(rig) -> None:
         left = np.asarray(sim.data.xpos[sim.model.body("w:cobot/L_link7").id])
         right = np.asarray(sim.data.xpos[sim.model.body("w:cobot/L_link8").id])
     assert np.linalg.norm(tcp - (left + right) / 2) < 5e-3, "TCP must be the finger midpoint"
-    assert np.linalg.norm(np.asarray(TCP_OFFSET)) == pytest.approx(0.135, abs=1e-6)
+    # Matches embodiments/cobot-magic.yaml tcp_in_link6_m (USD finger-plane offset).
+    assert np.linalg.norm(np.asarray(TCP_OFFSET)) == pytest.approx(0.13503, abs=1e-6)
 
 
 def test_pick_and_place_moves_the_object(rig) -> None:
@@ -167,8 +168,10 @@ def test_the_base_drives_to_a_waypoint_and_turns() -> None:
 
 
 def test_the_torso_rises_to_a_requested_height(rig) -> None:
+    # Raw lift is displacement above the lowest carriage position ([0, 0.60]), not the old
+    # absolute carriage height above the chassis (see cobot-lift-coordinates upgrade guide).
     sim, skills = rig
-    job = skills.start("lift", {"id": "r6", "plan": {"height": 0.95}})
+    job = skills.start("lift", {"id": "r6", "plan": {"height": 0.45}})
     done = skills.wait(job.id, timeout=60)
     assert done.state == "succeeded", f"{done.message}\n" + "\n".join(done.log)
-    assert sim.sensors("w:cobot")["joints"]["lift"] == pytest.approx(0.95, abs=0.02)
+    assert sim.sensors("w:cobot")["joints"]["lift"] == pytest.approx(0.45, abs=0.02)

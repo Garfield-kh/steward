@@ -69,6 +69,14 @@ class EsimConfig:
     flip_pitch_min: float = 1.0
     flip_turn_above: float = 0.2
     flip_drop_max: float = 0.2
+    # Below this TCP height a deep dock has no tool-down IK under the USD mounts; grasps raise into
+    # it, and docks that must tilt stretch until ``pitch_for`` returns at least ``min_require_tilt``.
+    elevated_grasp_floor: float = 0.72
+    # Least wrist pitch ``require_tilt`` accepts: a shallower ridge (≈0.12 rad) often has a nearby
+    # mink posture the servo holds instead, so the virtual pitch never settles on the plan.
+    min_require_tilt: float = 0.35
+    # Carrying or placing a most-tilted grasp below this height sits in the short-reach USD hole.
+    tilted_carry_floor: float = 0.95
     receipt_ttl: float = 60.0
     dock_gap: float = 0.07
     predock_backoff: float = 0.35
@@ -78,7 +86,7 @@ class EsimConfig:
     lift_min: float = 0.0  # the gripper reaches down to the floor
     lift_max: float = 1.28
     place_edge_margin: float = 0.10
-    place_clearance: float = 0.14
+    place_clearance: float = 0.18
     spot_shift_max: float = 0.3  # an occupied requested spot moves to the nearest free one at most this far
     spot_shift_step: float = 0.01
     nav_margin: float = 0.03
@@ -301,7 +309,8 @@ class Esim:
                   heading_issue: Callable[[float], str | None] | None = None,
                   pitches: Sequence[float | None] = (0.0,), lifts: Sequence[float] | None = None,
                   wrist: Callable[[float], tuple[float, float]] | None = None,
-                  approach_path: Callable[[float, float, float], bool] | None = None) -> dict:
+                  approach_path: Callable[[float, float, float], bool] | None = None,
+                  require_tilt: bool = False) -> dict:
         """Choose the support side to dock at; return path, dock pose and reach, or raise.
 
         ``target_xy`` is where the gripper goes, or a function of the docked base heading giving it
@@ -370,7 +379,41 @@ class Esim:
                 reasons.append(f"side {normal}: dock pose collides with {blocked}")
                 continue
             wrist_yaw, wrist_roll = wrist(yaw) if wrist is not None else (0.0, 0.0)
+            # Deep-drawer docks must leave the tool-down envelope with enough tilt: stretch until
+            # pitch_for ≥ min_tilt and ``reachable`` accepts the posture (pitch_for alone can land
+            # on a limit-packed joint2 that the servo never holds).
+            if require_tilt and any(p is None or (p is not None and p > 0.0) for p in pitches):
+                min_tilt = cfg.min_require_tilt
+                # Cap near 0.50 m: deeper docks often cannot close at the object height.
+                tilt_reach_cap = min(self.reach_max, 0.50)
+                while reach < tilt_reach_cap:
+                    trial = self.arm.pitch_for(height, reach, wrist_yaw, wrist_roll)
+                    if (trial is not None and trial >= min_tilt
+                            and self.arm.reachable(height, reach, wrist_yaw, wrist_roll, trial)):
+                        break
+                    farther = standoff + cfg.dock_backoff_step
+                    new_reach = farther + depth - self.tool_offset
+                    if new_reach > tilt_reach_cap:
+                        break
+                    new_trial = self.arm.pitch_for(height, new_reach, wrist_yaw, wrist_roll)
+                    if (new_trial is None
+                            or not self.arm.reachable(height, new_reach, wrist_yaw, wrist_roll, new_trial)):
+                        break
+                    standoff, reach = farther, new_reach
+                    dock = (ex + nx * standoff, ey + ny * standoff)
+                    if self._footprint_blocked(obstacles_all, dock, yaw, carry):
+                        break
+                    predock = (dock[0] + nx * cfg.predock_backoff, dock[1] + ny * cfg.predock_backoff)
             pitch = self._grasp_pitch(reach, height, lifts or [height], pitches, wrist_yaw, wrist_roll)
+            # ``_grasp_pitch`` may still pick the shallow least tilt; bump to a decisive one the
+            # stretched dock was sized for, otherwise the servo parks on a neighbouring posture.
+            if require_tilt and pitch is not None and pitch < cfg.min_require_tilt:
+                lifts_here = lifts or [height]
+                for candidate in (cfg.min_require_tilt, 0.45, 0.55, self.arm.geometry.wrist_pitch_max):
+                    if candidate > pitch and self._holds_there(
+                            reach, height, lifts_here, candidate, cfg.dock_reach_margin, wrist_yaw, wrist_roll):
+                        pitch = candidate
+                        break
             if pitch is None:
                 reasons.append(f"side {normal}: the arm cannot hold its gripper {reach:.2f} m out at {height:.2f} m "
                                f"(yaw {wrist_yaw:.2f}, roll {wrist_roll:.2f})")
@@ -449,7 +492,15 @@ class Esim:
         :meth:`_holds_there`; best one that also holds the gripper as far off as a dock lands."""
         for margin in (self.config.dock_reach_margin, 0.0):
             for wanted in candidates:
-                pitch = wanted if wanted is not None else self.arm.pitch_for(height, reach + margin, yaw, roll)
+                if wanted is None:
+                    # Cover a dock that lands short or long: take the most tilt needed across the
+                    # margin band so a centimetre of base error does not outrun the planned pitch.
+                    needed = [self.arm.pitch_for(height, reach + d, yaw, roll)
+                              for d in (-margin, 0.0, margin, margin + 0.02) if reach + d > 0]
+                    usable = [p for p in needed if p is not None]
+                    pitch = max(usable) if usable else None
+                else:
+                    pitch = wanted
                 if pitch is not None and self._holds_there(reach, height, lifts, pitch, margin, yaw, roll):
                     return pitch
         return None
@@ -458,7 +509,9 @@ class Esim:
                      yaw: float = 0.0, roll: float = 0.0) -> bool:
         """Whether the arm, its tool tilted ``pitch``, moves its gripper through ``lifts`` at ``reach``
         without turning over, and holds it at ``height`` ``margin`` nearer and farther too."""
-        return (all(self.arm.reachable(height, r, yaw, roll, pitch) for r in {reach - margin, reach + margin})
+        # Include the exact reach: ±margin alone can accept a posture whose centre sits in an IK hole.
+        return (all(self.arm.reachable(height, r, yaw, roll, pitch)
+                    for r in {reach - margin, reach, reach + margin} if r > 0)
                 and self.arm.reachable_path([{"lift": h, "reach": reach, "wrist_pitch": pitch,
                                              "wrist_yaw": yaw, "wrist_roll": roll} for h in self._lift_steps(lifts)]))
 
@@ -819,6 +872,9 @@ class Esim:
                 over = min(self.lift_max, rim + self.config.rim_clearance)
                 carry_lift = max(carry_lift, rim + (target_top - target_bottom) / 2 + self.config.rim_clearance)
         carry_lift = min(self.lift_max, carry_lift)
+        if params.get("flip") and self.config.flip_in_air:
+            # Carrying a most-tilted grasp below the tilted-carry floor with a short reach has no USD IK.
+            carry_lift = min(self.lift_max, max(carry_lift, self.config.tilted_carry_floor))
         anchor = target if (on_floor or blind) else self._anchor(es, support)
         # Tilted most, the wrist tips a container farthest; anything else is taken with the least tilt,
         # or tilted most where the least does not also hold a dock that lands short or long.
@@ -829,26 +885,113 @@ class Esim:
         elif self._affords(target, "pourable"):
             pitches = [most, None]
         else:
+            # Drawer picks use ``require_tilt`` so the least pitch is still positive; most-tilt at the
+            # low close height is often outside the USD envelope (needs ~0.70 m+ at 0.50 m reach).
             pitches = [None, most] if most > 0 else [None]
         approach, grasp_offset, grasp_z = None, None, tp[2]
         first: PredictionError | None = None
         rim_z = max(tp[2], target_top - self.config.edge_grasp_depth) if self._affords(target, "container") else tp[2]
+        # Under the USD mounts a grasp near 0.60 m only reaches ~0.35 m tool-down. Drawer contents
+        # close near their true height (raising the close into the elevated floor grasps air) but
+        # come in over ``elevated_grasp_floor`` and dock past the tool-down envelope so they tilt.
+        floor = self.config.elevated_grasp_floor
+        in_drawer = support is not None and support.category.value == "drawer"
+        approach_over = None
         for xy, offset in self._grasp_points(es, target, tp):
-            z = rim_z if any(offset) else tp[2]
-            try:
-                approach = self._approach(es, anchor, xy, z, {target.id}, load=target if carried_low else None,
-                                          heading_issue=self._edge_facing(offset) if self.config.edge_grasp_first else None,
-                                          pitches=pitches,
-                                          lifts=[over or z, z, carry_lift])
-            except PredictionError as exc:
-                first = first or exc
-                continue
-            grasp_offset, grasp_z = offset, z
-            break
+            base_z = rim_z if any(offset) else tp[2]
+            if in_drawer and most > 0:
+                # Prefer the object's true height so a short bottle is not grasped in air; raise only
+                # when the chosen dock reach has no close IK (see post-approach bump below).
+                raise_steps = (0.0, 0.03, 0.06, 0.09, 0.12, 0.16)
+                close_floor = base_z
+            else:
+                low = base_z < floor + 0.04 and most > 0
+                raise_steps = ((0.12, 0.16, 0.20, 0.24) if low
+                               else ((0.0, 0.04, 0.08, 0.12) if most > 0 else (0.0,)))
+                close_floor = floor if low else 0.0
+            for raise_z in raise_steps:
+                z = min(self.lift_max, max(base_z + raise_z, close_floor))
+                if in_drawer and most > 0:
+                    # Stretch/tilt at an elevated approach height: a deep dock at the raw object
+                    # height (≈0.63 m) has no USD IK at 0.50 m. Lower to ``z`` after untilting.
+                    high = min(self.lift_max, max(z, floor, over or 0.0, 0.70))
+                    high = min(high, max(floor + 0.20, z + 0.25, 0.70))
+                    carry_for = min(carry_lift, max(floor + 0.20, z + 0.20, high))
+                    path_lifts = [high, max(carry_for, high)]
+                    dock_h = high
+                else:
+                    high = min(self.lift_max, max(over or z, z))
+                    carry_for = carry_lift
+                    path_lifts = [high, z, max(carry_for, high)]
+                    dock_h = z
+                try:
+                    approach = self._approach(es, anchor, xy, dock_h,
+                                              {target.id}, load=target if carried_low else None,
+                                              heading_issue=self._edge_facing(offset) if self.config.edge_grasp_first else None,
+                                              pitches=pitches,
+                                              lifts=path_lifts,
+                                              require_tilt=in_drawer and most > 0)
+                except PredictionError as exc:
+                    first = first or exc
+                    continue
+                if in_drawer and most > 0:
+                    reach_m = float(approach["reach"])
+                    # Prefer tool-down at the object's true height: raising the close into air
+                    # grasps nothing, and a mild tilt at the dock reach often packs joint2.
+                    # Execution creeps in after untilting when closePitch is ~0.
+                    close_z = base_z
+                    td_close = None
+                    for r in (0.40, 0.36, 0.34, 0.32, 0.30, 0.28):
+                        if r > reach_m + 1e-9:
+                            continue
+                        if self.arm.reachable(close_z, r, wrist_pitch=0.0):
+                            td_close = r
+                            break
+                    if td_close is not None:
+                        z = close_z
+                        approach["closePitch"] = 0.0
+                        # Tell execution how far tool-down can go at this close height.
+                        approach["closeReach"] = float(td_close)
+                        carry_lift = max(carry_for, high)
+                    else:
+                        close_pf = self.arm.pitch_for(z, reach_m)
+                        # Raise the close until this dock reach has a fresh IK solve (pitch_for alone
+                        # can land on a limit-packed posture ``reachable`` rejects).
+                        while z + 0.02 <= high + 1e-9:
+                            if (close_pf is not None
+                                    and self.arm.reachable(z, reach_m, wrist_pitch=float(close_pf))):
+                                break
+                            z = min(high, z + 0.02)
+                            close_pf = self.arm.pitch_for(z, reach_m)
+                        if (close_pf is None
+                                or not self.arm.reachable(z, reach_m, wrist_pitch=float(close_pf))):
+                            first = first or PredictionError(
+                                f"close cannot hold dock reach {reach_m:.2f} m up to approach {high:.2f} m")
+                            approach = None
+                            continue
+                        approach["closePitch"] = float(close_pf)
+                        approach["wristPitch"] = max(float(approach.get("wristPitch") or 0.0),
+                                                     float(close_pf))
+                        carry_lift = max(carry_for, high)
+                # Drawer closes always keep the elevated approachLift, even when close height rises
+                # near ``high``: execution needs the untilt/creep path for tool-down closes.
+                if in_drawer and most > 0:
+                    grasp_offset, grasp_z, approach_over = offset, z, high
+                else:
+                    grasp_offset, grasp_z, approach_over = offset, z, (high if high > z + 1e-9 else over)
+                break
+            if approach is not None:
+                break
         if approach is None:
             raise first
         sigma = math.hypot(self._sigma_xy(target), self._sigma_xy(self._self(es)))
+        # Default capture covers Cobot TCP settle noise. Inside a receptacle, a wide close lets
+        # the pinch sit on the container wall: ideal grasp then attaches the pourable box instead
+        # of the piece (flip picks spilled the whole dog puzzle onto the table).
         r = self.config.capture_radius
+        if (support is not None and self._affords(support, "receptacle")
+                and not self._affords(target, "pourable")):
+            r = min(r, 0.05)
         p_miss = math.exp(-(r * r) / (2 * sigma * sigma)) if sigma > 0 else 0.0
         issues = []
         if p_miss > 0.05:
@@ -882,15 +1025,17 @@ class Esim:
         plan = {**approach, "target": target.id, "lift": grasp_z, "targetP": [float(v) for v in tp],
                 "support": "floor" if on_floor else ("unknown" if blind else support.id),
                 "carryLift": carry_lift, "keepReach": carried_low,
-                "captureRadius": self.config.capture_radius,
+                "captureRadius": r,
                 "gentle": self._affords(target, "pourable")}
-        if over is not None:
-            plan["approachLift"] = over
+        if approach_over is not None:
+            plan["approachLift"] = approach_over
         if grasp_z > tp[2]:
             plan["graspDz"] = grasp_z - tp[2]  # an edge grasp closes on the rim, above the centre
         if grasp_offset is not None and any(grasp_offset):
             plan["graspOffset"] = list(grasp_offset)
             issues.append(f"{target.id} is taken by its edge, {math.hypot(*grasp_offset):.2f} m from its centre")
+        if params.get("flip") and self.config.flip_in_air:
+            plan["wristPitch"] = self.arm.geometry.wrist_pitch_max
         return self._receipt(es, "pick", params, risk, issues, plan)
 
     def _predict_place(self, es: SceneState, params: dict) -> dict:
@@ -943,9 +1088,13 @@ class Esim:
             final_yaw = float(place_params["yaw"]) if place_params.get("yaw") is not None else held_box.yaw
             # Mating onto a part that is not furniture: keep the load on its footprint, not inset.
             edge_keep = 0.0 if not self._affords(support, "support-surface") else None
+            # Flip-in-air releases from higher with a drop: keep ``place_clearance`` from neighbours
+            # so the piece does not land on another piece already on the table.
+            flip_place = bool(params.get("flip")) and self.config.flip_in_air
+            clear = float(place_params.get("clearance",
+                                         self.config.place_clearance if flip_place else 0.015))
             spot, issues = self._choose_spot(es, support, sbox, held, held_box, place_params.get("offset"),
-                                             final_yaw, float(place_params.get("clearance", 0.015)),
-                                             edge_keep=edge_keep)
+                                             final_yaw, clear, edge_keep=edge_keep)
             issues = align_issues + issues
             area = sbox
             surface = top
@@ -971,6 +1120,14 @@ class Esim:
                     return str(exc)
                 return None
         flip = bool(params.get("flip"))
+        if flip and self.config.flip_in_air:
+            # A piece taken with the tool tilted most needs a higher place: query short docks at the
+            # tilted-carry floor instead of a fixed ~0.90 m guess.
+            pitch = self.arm.geometry.wrist_pitch_max
+            height = max(height, self.config.tilted_carry_floor)
+            while height < self.lift_max - 1e-9 and not all(
+                    self.arm.reachable(height, r, wrist_pitch=pitch) for r in (0.40, 0.43, 0.45)):
+                height = min(self.lift_max, height + 0.02)
 
         def wrist_turn(dock_yaw: float) -> float:
             if yaw_goal is None:
@@ -1142,7 +1299,11 @@ class Esim:
         reach = approach["reach"]
         heading = np.array([math.cos(approach["yaw"]), math.sin(approach["yaw"])])
         edge = float(min((area.corners() - np.array(approach["dock"][:2])) @ heading))
-        pitch = self._held_pitch(es)[0]
+        # Prefer the plan's carry pitch, then the max: FK of a loaded USD posture can read 0 while
+        # the piece was taken tilted most (``flip_in_air``), which would refuse a valid place.
+        pitch = float(approach.get("wristPitch") or self._held_pitch(es)[0] or 0.0)
+        if self.config.flip_in_air:
+            pitch = max(pitch, self.arm.geometry.wrist_pitch_max)
         if pitch < cfg.flip_pitch_min:
             raise PredictionError(f"{held.id} was taken with the tool tilted {pitch:.2f} rad; turning it over needs it "
                                   f"taken tilted at least {cfg.flip_pitch_min:.2f} rad: put it down and pick it again "
@@ -1155,6 +1316,18 @@ class Esim:
         if low - height > cfg.flip_drop_max:
             raise PredictionError(f"turned over, {held.id} comes down only to {low - height:.2f} m above where it is "
                                   f"set down; it would drop more than {cfg.flip_drop_max:.2f} m")
+        # A dock that lands short (dock_tol is 6 cm) must still hold the lowered pose with the tool
+        # tilted; raise the release height into the USD envelope for that short reach.
+        short = max(0.10, reach - 0.06)
+        while low < turn - 1e-9 and not self.arm.reachable(low, short, wrist_yaw=yaw, wrist_pitch=pitch):
+            low = min(turn, low + 0.02)
+        # Prefer the lowest release the short-reach envelope allows (a hard 0.92 m floor left a
+        # long drop that bounced pieces onto neighbours).
+        floor = self.arm.min_lift_for(short, pitch, wrist_yaw=yaw)
+        if floor is not None:
+            low = max(low, floor + 0.02)
+        else:
+            low = max(low, self.config.tilted_carry_floor)
         return {"turnLift": turn, "lift": low}
 
     def _grip_spot(self, es: SceneState, spot: tuple[float, float], dock_yaw: float, wrist_turn: float,
@@ -1221,8 +1394,15 @@ class Esim:
                 at = end
             return self.arm.reachable_path(targets, start_joints=start_joints)
 
+        hold_pitch = self._held_pitch(es)
+        if flip and self.config.flip_in_air:
+            hold_pitch = [self.arm.geometry.wrist_pitch_max]
+        # After a tilted pick the skill untilts on exit: FK then reports ~0 while a deep place/pour
+        # dock still sits past the tool-down envelope. Try tool-down first, then ``pitch_for``.
+        elif abs(float(hold_pitch[0])) < 1e-3:
+            hold_pitch = [0.0, None]
         approach = self._approach(es, anchor, grip_at, height, {held.id}, heading_issue=heading_issue,
-                                  pitches=self._held_pitch(es), lifts=lifts, wrist=wrist_at,
+                                  pitches=hold_pitch, lifts=lifts, wrist=wrist_at,
                                   approach_path=None if flip and self.config.flip_in_air else path)
         return approach, grip_at(approach["yaw"])
 
@@ -1276,7 +1456,9 @@ class Esim:
         # skill) stays within the arm's reach. It tips over either edge alike, so unless the caller
         # chose a side the other one is tried too: from some postures one way turns the wrist
         # against its stop (joint6 on the Piper).
-        pitch = self._held_pitch(es)[0]
+        # Prefer the approach pitch (``pitch_for`` after an untilted carry) over live FK: pour docks
+        # past ~0.50 m must keep that tilt through the tip, not re-plan tool-down.
+        pitch = float(approach.get("wristPitch") or self._held_pitch(es)[0] or 0.0)
         yaw = self._arm_joints(es).get("wrist_yaw", 0.0)
 
         def tips(r: float) -> bool:
@@ -1314,6 +1496,9 @@ class Esim:
         plan = {**approach, "object": held.id, "support": support.id, "spot": list(spot), "gripSpot": list(grip),
                 "lift": height, "roll": roll, "pivot": pivot, "pourS": self.config.pour_hold_s, "rise": rise,
                 "gentle": True}
+        # Deep pour docks must keep the planned tilt through tip and exit (tool-down tops out ~0.50 m).
+        if abs(pitch) >= 1e-3:
+            plan["wristPitch"] = float(pitch)
         return self._receipt(es, "pour", params, 0.1, issues, plan)
 
     def _predict_floor_place(self, es: SceneState, held: Entity, params: dict) -> dict:
@@ -1643,8 +1828,17 @@ class Esim:
             return sbox.hx - abs(lx) >= keep_x - 1e-9 and sbox.hy - abs(ly) >= keep_y - 1e-9
 
         others = []
+        on_support = set()
         for rel in es.relations:
             if rel.type == "supported-by" and rel.b.get("entity") == support.id and rel.a["entity"] != held.id:
+                ent = es.find(rel.a["entity"])
+                if ent is not None:
+                    others.append(entity_box(ent)[0])
+                    on_support.add(ent.id)
+        # Contents of a receptacle already on ``support`` (puzzle pieces in a box on the table)
+        # also block a flip-in-air drop: the XY spot can sit clear of the box rim and still fall in.
+        for rel in es.relations:
+            if rel.type == "supported-by" and rel.b.get("entity") in on_support and rel.a["entity"] != held.id:
                 ent = es.find(rel.a["entity"])
                 if ent is not None:
                     others.append(entity_box(ent)[0])
@@ -1664,7 +1858,19 @@ class Esim:
             hx = max(held_box.hx - 2 * sigma, 0.01) + clearance / 2
             hy = max(held_box.hy - 2 * sigma, 0.01) + clearance / 2
             heading = held_box.yaw if yaw is None else yaw
-            grown = [Box2D(o.id, o.cx, o.cy, o.yaw, o.hx + clearance / 2, o.hy + clearance / 2) for o in others]
+            grown = []
+            for o in others:
+                pad = clearance / 2
+                ent = es.find(o.id)
+                # Flip-in-air drops from turnLift: XY that only grazes a neighbour still lands on it
+                # after the fall. Keep a full clearance from every blocker (pieces in a box on the
+                # table, the box rim, and anything already on the support), not only receptacles.
+                if clearance >= cfg.place_clearance - 1e-9:
+                    pad = max(pad, clearance)
+                    if (ent is not None
+                            and (self._affords(ent, "receptacle") or self._affords(ent, "container"))):
+                        pad = max(pad, clearance + 0.06)
+                grown.append(Box2D(o.id, o.cx, o.cy, o.yaw, o.hx + pad, o.hy + pad))
 
             def blocker(xy: tuple[float, float]) -> str | None:
                 placed = Box2D(held.id, xy[0], xy[1], heading, hx, hy)
@@ -1673,17 +1879,29 @@ class Esim:
             occupant = blocker(spot)
             if occupant is None:
                 return spot, []
-            step, reach = cfg.spot_shift_step, cfg.spot_shift_max
+            step, reach = cfg.spot_shift_step, max(cfg.spot_shift_max, clearance * 2)
             ticks = np.arange(-reach, reach + 1e-9, step)
             shifts = sorted(((float(dx), float(dy)) for dx in ticks for dy in ticks if math.hypot(dx, dy) <= reach),
                             key=lambda d: math.hypot(*d))
             for dx, dy in shifts:
                 moved = (spot[0] + dx, spot[1] + dy)
-                if inside(moved) and blocker(moved) is None:
-                    return moved, [f"requested spot is occupied by {occupant}; using the free spot nearest it, "
-                                   f"{math.hypot(dx, dy) * 100:.0f} cm away at ({moved[0]:.3f}, {moved[1]:.3f})"]
-            raise PredictionError(f"requested spot is occupied by {occupant} and no free spot lies within "
-                                  f"{reach:.2f} m of it")
+                if not (inside(moved) and blocker(moved) is None):
+                    continue
+                # Flip-in-air clearance shifts that hug the rim pass feasible but fail the risk
+                # gate ("0 cm from the edge"). Skip rim spots and keep searching, or fall through.
+                if (clearance >= cfg.place_clearance - 1e-9
+                        and self._edge_margin(sbox, moved, ex, ey) < cfg.place_edge_margin):
+                    continue
+                return moved, [f"requested spot is occupied by {occupant}; using the free spot nearest it, "
+                               f"{math.hypot(dx, dy) * 100:.0f} cm away at ({moved[0]:.3f}, {moved[1]:.3f})"]
+            # Crowded tables (puzzle pieces still in a box): fall through to the free-spot search
+            # instead of refusing the place — the requested offset becomes a soft preference only.
+            offset_fallback = (
+                f"requested spot is occupied by {occupant} and no free spot lies within {reach:.2f} m; "
+                f"using a free spot on {support.id}")
+            # continue into the automatic free-spot search below
+        else:
+            offset_fallback = None
         rx, ry, _ = self._robot_xy_yaw(es)
         # A support narrower than the margin on a side (a bowl onto a plate, a cup onto a saucer)
         # still takes the load wholly on it: there the spot only keeps the load's own projection.
@@ -1695,12 +1913,25 @@ class Esim:
         lx0, ly0, _, _, _ = self._held_relative(es) or (0.0, 0.0, 0.0, 0.0, 0.0)
         hang = math.hypot(lx0 - self.tool_offset - self._arm_joints(es).get("reach", 0.0), ly0 - self.lateral)
         deepest = self.reach_max + self.tool_offset - self.half_x - cfg.dock_gap + hang
+        # Match the flip-in-air grown pads when searching free spots so a fallback after a crowded
+        # offset does not land inside the box mouth or on a neighbour the offset path already refused.
+        free_pad = clearance if clearance >= cfg.place_clearance - 1e-9 else max(cfg.place_clearance, 0.02)
         best, best_cost = None, math.inf
         for lx in _spots(sbox.hx, margin_x):
             for ly in _spots(sbox.hy, margin_y):
                 spot = world(float(lx), float(ly))
-                if any(math.hypot(spot[0] - o.cx, spot[1] - o.cy)
-                       < max(cfg.place_clearance, max(held_box.hx, held_box.hy) + max(o.hx, o.hy) + 0.02) for o in others):
+                blocked = False
+                for o in others:
+                    pad = free_pad
+                    ent = es.find(o.id)
+                    if (clearance >= cfg.place_clearance - 1e-9 and ent is not None
+                            and (self._affords(ent, "receptacle") or self._affords(ent, "container"))):
+                        pad = max(pad, free_pad + 0.06)
+                    if math.hypot(spot[0] - o.cx, spot[1] - o.cy) < (
+                            max(held_box.hx, held_box.hy) + max(o.hx, o.hy) + pad):
+                        blocked = True
+                        break
+                if blocked:
                     continue
                 edge = min(sbox.hx - abs(lx), sbox.hy - abs(ly))
                 # Far from the edges is safer, but only as deep as the arm reaches.
@@ -1709,8 +1940,8 @@ class Esim:
                 if cost < best_cost:
                     best, best_cost = spot, cost
         if best is None:
-            raise PredictionError(f"no free spot on {support.id}")
-        return best, []
+            raise PredictionError(offset_fallback or f"no free spot on {support.id}")
+        return best, ([offset_fallback] if offset_fallback else [])
 
 
 def _spots(half: float, margin: float, step: float = 0.05) -> np.ndarray:

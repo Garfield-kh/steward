@@ -24,6 +24,7 @@ import numpy as np
 
 from steward.math3d import yaw_from_quat
 from steward.scene.validate import validate_ego
+from steward.world.chores_metrics import stack_drawer_metrics
 
 
 PHANTOM_FOOTPRINT_M = 1.0
@@ -125,6 +126,7 @@ class Observer:
             "wallsMatched": len(matches) - len(obj_matches),
             "matches": {e["id"]: g["id"] for e, g, _ in matches},
         })
+        record.update(stack_drawer_metrics(ego, sim.world_state(), record["matches"]))
         anomalies = _anomalies(es_objs, {e["id"] for e, _, _ in matches}, gt, robot_pose, ego.get("stamp"))
         if anomalies:
             record["anomalies"] = [{k: a[k] for k in ("key", "kind", "entity")} for a in anomalies]
@@ -244,7 +246,8 @@ def _brief(rec: dict | None) -> dict | None:
     if rec is None:
         return None
     keys = ("t", "recall", "falsePositives", "meanPositionErrorM", "meanSizeErrorM", "meanNees3", "categoryAccuracy",
-            "selfPositionErrorM")
+            "selfPositionErrorM", "nestedBowlSupports", "gtNestedBowlSupports", "nestedBowlSupportRecall",
+            "drawersTracked", "gtDrawers", "drawerContentsTracked", "gtDrawerContents", "drawerContentRecall")
     return {k: rec.get(k) for k in keys}
 
 

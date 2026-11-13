@@ -244,8 +244,10 @@ def cobot_magic(separation: float = ARM_SEPARATION, mount_height: float = ARM_MO
         # arm (measured: the shoulder could not return to HOME, held 0.04 rad short by a contact).
         # Between the mounts and inside the chassis width: the planner keeps the chassis footprint
         # clear, and a plate wider than it struck walls the base was cleared to pass.
-        geometry={"collision": [primitive("box", [0.12, min(separation - 0.12, CHASSIS["width"]), 0.45],
-                                          pose([ARM_MOUNT_OFFSET[0] - 0.13, 0.0, ARM_MOUNT_OFFSET[2] + 0.20]), ROBOT_BODY)]},
+        # Kept below the head cameras: a 0.45 m plate whose top sat under the wide camera made the
+        # self-mask hull explode across the tabletop (bowl and plate fell inside the mask).
+        geometry={"collision": [primitive("box", [0.12, min(separation - 0.12, CHASSIS["width"]), 0.28],
+                                          pose([ARM_MOUNT_OFFSET[0] - 0.13, 0.0, ARM_MOUNT_OFFSET[2] + 0.08]), ROBOT_BODY)]},
         inertial=exact({"mass": 40.0}),
     )
     links = [chassis, frame, head_link()]

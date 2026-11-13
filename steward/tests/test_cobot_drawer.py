@@ -21,7 +21,10 @@ CABINET_YAW = 3.141592653589793
 HANDLE = [CABINET_AT - 0.27, 0.0, 0.676]
 AXIS = [-1.0, 0.0, 0.0]  # opening direction: toward the robot
 STANDOFF = 0.58 - ARM_MOUNT_X  # the arm mounts 0.58 m from the origin, the carcass's face at 0.95
-LIFT = 0.60              # shoulders at 0.755: the wrist reaches 0.811 with the tool down
+# Raw lift is displacement above the lowest carriage ([0, 0.60]). The handle sits at z=0.676; the
+# mounts are already ~0.97 m up at lift 0, so raising the torso further puts the wrist above the
+# handle and the drawer IK misses by tens of centimetres.
+LIFT = 0.0
 TRAVEL = 0.18            # a real opening, and the pinch stays well inside the reachable band
 
 

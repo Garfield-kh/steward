@@ -945,7 +945,9 @@ COBOT_ERRAND_MISSION = {
     # The counter's top (0.90) plus the bowl's half height and the 3 cm it is released above it.
     "place": [2.80, 0.0, 0.96],
     # The counter is 15 cm taller than the table: the torso rises before the place.
-    "lift": 0.78,
+    # Raw lift is displacement above the lowest carriage ([0, 0.60]), not the pre-USD absolute
+    # carriage height (0.78 was outside the new range and refused the place).
+    "lift": 0.15,
     "grip": "L_link6",
 }
 

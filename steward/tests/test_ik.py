@@ -55,8 +55,10 @@ def test_unreachable_goal_raises_with_the_distance_missed(ik: CobotIK) -> None:
 
 def test_orientation_constrained_solve_points_the_tool_down(ik: CobotIK) -> None:
     # Tool pointing straight down: -z of the world expressed in the link's own frame.
+    # Goal height follows the USD mount (~0.97 m at lift 0); 0.80 m was reachable on the pre-USD
+    # model and now misses by more than the 5 mm tolerance.
     down = [0.0, 0.7071068, 0.7071068, 0.0]  # wxyz: 180 deg about the (1, 1, 0) axis
-    goal = [0.44, 0.28, 0.80]
+    goal = [0.45, 0.30, 0.90]
     solution = ik.solve("L", goal, down, q_init=ik.neutral("L"))
     pose = ik.fk("L", solution)
     assert np.linalg.norm(np.subtract(pose["p"], goal)) < 5e-3

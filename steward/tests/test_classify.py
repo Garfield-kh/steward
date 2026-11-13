@@ -40,3 +40,24 @@ def test_a_flat_sheet_on_the_floor_is_not_furniture() -> None:
 def test_a_counter_top_at_counter_height_is_a_counter() -> None:
     probs = classify(np.array([1.85, 0.62, 0.01]), 0.89, WOOD)
     assert _top(probs) == "counter", probs
+
+
+def test_stemware_sized_box_with_table_bleed_colour_is_still_a_wine_glass() -> None:
+    """Clear glass often averages to table beige with few depth holes; size must still win."""
+    beige = np.array([0.76, 0.68, 0.55])
+    probs = classify(np.array([0.079, 0.073, 0.188]), 0.75, beige, invalid_frac=0.0)
+    assert _top(probs) == "wine_glass", probs
+
+
+def test_stemware_with_partial_depth_holes_is_a_wine_glass() -> None:
+    beige = np.array([0.76, 0.68, 0.55])
+    probs = classify(np.array([0.08, 0.08, 0.19]), 0.75, beige, invalid_frac=0.1)
+    assert _top(probs) == "wine_glass", probs
+
+
+def test_a_wide_beige_box_is_not_rescued_as_a_wine_glass() -> None:
+    """Geometry-softened clear must not turn an unrelated beige region into stemware."""
+    beige = np.array([0.76, 0.68, 0.55])
+    probs = classify(np.array([0.22, 0.22, 0.07]), 0.75, beige, invalid_frac=0.0)
+    assert _top(probs) != "wine_glass", probs
+    assert _top(probs) == "bowl", probs

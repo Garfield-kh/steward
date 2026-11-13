@@ -110,6 +110,24 @@ def test_placement_starts_from_a_carrying_reach_short_of_the_planning_range():
     assert transitions and all(path[0]["reach"] == geometry.reach_min for path in transitions)
 
 
+def test_place_with_a_quarter_turn_roll_tips_the_tool_onto_its_side():
+    model, scene = _scene()
+    esim = Esim(model)
+    arm = esim.arm = OrientationArm(esim.arm.geometry)
+    receipt = esim.predict(scene, "place", {"on": "e:4", "offset": [0.0, 0.1], "roll": math.pi / 2})
+    assert receipt["feasible"], receipt["issues"]
+    assert receipt["plan"]["wristRoll"] == pytest.approx(math.pi / 2)
+    rolled = [path for path, _ in arm.paths if any(abs(t["wrist_roll"] - math.pi / 2) < 1e-6 for t in path)]
+    assert rolled
+
+
+def test_place_rejects_flip_together_with_roll():
+    model, scene = _scene()
+    receipt = Esim(model).predict(scene, "place", {"on": "e:4", "flip": True, "roll": math.pi / 2})
+    assert not receipt["feasible"]
+    assert "cannot flip and roll" in "; ".join(receipt["issues"])
+
+
 def test_pouring_preserves_held_yaw_while_sampling_roll():
     model, scene = _scene(0.3)
     scene.entity("e:3").rigid.links[0].affordances.append(exact("pourable"))

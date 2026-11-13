@@ -31,7 +31,7 @@ from steward.ego.perception import (
     _largest_compact, box_at_yaw, box_of, oversized_bowl_core, raised_object_points, segments,
 )
 from steward.ego.planner import Box2D, front_box, protrusion, room_centre
-from steward.ego.priors import compatible, default_affordances, prior
+from steward.ego.priors import compatible, default_affordances, prior, screw_holes
 from steward.math3d import (matrix_from_quat, pose_compose, pose_inverse, quat_from_axis_angle, quat_from_yaw,
                             quat_mul, quat_rotate, wrap_angle, yaw_from_quat)
 from steward.scene.schema import Entity, Est, Link, Relation, RigidTree, SceneState, primitive
@@ -118,6 +118,8 @@ class Track:
     bottom_seen: bool = False  # some view showed its base (not cut by the image edge or hidden)
     label: str | None = None  # a category named by the robot's agent; it outranks the classifier
     annotated_affordances: list[str] | None = None  # affordances named with it, in place of the category prior
+    # Screw holes last seen on this object (body frame), from detections; None until perception reports any.
+    screw_holes: list[dict] | None = None
     held_yaw: float = 0.0  # while held: its heading relative to the gripper link's heading
     held_up: np.ndarray | None = None  # while held: the gripper-link axis that was vertical at the grasp
     carried_offset: np.ndarray | None = None  # while inside the held container: its offset from that container, in the gripper's frame
@@ -3390,22 +3392,10 @@ class EgoEstimator:
                         return
                 elif _over_furniture_cap(track, grown, yaw, centre, cam_p):
                     return
-        if not moving:
-            # What the robot holds was identified before the grasp; views of it in the gripper are
-            # partly hidden and may mix with what lies around, so they do not relabel it.
-            # A depth fill has no name. On a content, whether the segmenter or the drawer rule
-            # named it, its shape-prior vote is a vote for whatever the drawer floor made the
-            # box look like, not for the object.
-            if not (track.category in _CONTENT and not seg.semantics):
-                for cat, prob in m["probs"].items():
-                    track.category_counts[cat] = track.category_counts.get(cat, 0.0) + prob
-            if seg.semantics:
-                for cat, score in seg.semantics.items():
-                    track.semantic_counts[cat] = track.semantic_counts.get(cat, 0.0) + score
-                track.semantic_views += 1
-            name = color_name(seg.color, seg.invalid_frac)
-            track.color_counts[name] = track.color_counts.get(name, 0.0) + 1.0
+        # Category / colour votes happen after swell / hollow rejects below so a rejected view
+        # refreshes existence without outvoting a well-sized transparent glass.
         track.observations += 1
+
         track.last_seen = self.stamp
         track.existence = min(1.0, track.existence + 0.2 * (1.0 - track.existence))
         track.absent_views.clear()
@@ -3417,6 +3407,8 @@ class EgoEstimator:
         track.mean_invalid += (seg.invalid_frac - track.mean_invalid) / n
         track.bottom_seen = track.bottom_seen or seg.bottom_seen
         if moving:
+            # What the robot holds was identified before the grasp; views of it in the gripper are
+            # partly hidden and may mix with what lies around, so they do not relabel it.
             return
         # A wide view of the counter lip is one slab longer than a bowl. Unioning it into a bowl
         # that already fits the bowl moves the centre onto the lip.
@@ -3434,6 +3426,9 @@ class EgoEstimator:
         if track.voxels is not None:
             union = np.vstack([_points(track.voxels), seg.points])
             centre, grown, yaw = box_of(union)
+            # Rejected views still refresh existence / mean appearance above, but must not cast a
+            # category vote: otherwise a swollen or hollow neighbour (often ``unknown``) can outvote
+            # a well-sized transparent glass that rarely accepts new points.
             if track.observations > 2 and max(grown[0], grown[1]) > 1.5 * max(track.footprint, 0.05) and track.footprint < 0.3:
                 return  # the region would swell an established box: not this object's surface
             if track.category == "wall" and min(grown[0], grown[1]) > 0.35:
@@ -3441,6 +3436,18 @@ class EgoEstimator:
             if max(grown[0], grown[1]) > CONVEX_CHECK_M and _footprint_fill(union, centre, grown, yaw) < MIN_FOOTPRINT_FILL:
                 return  # the points would outline an L or a hollow (two walls at a corner), which no single
                 # box describes: filled in, the concave corner would become a solid cube
+        # A depth fill has no name. On a content, whether the segmenter or the drawer rule
+        # named it, its shape-prior vote is a vote for whatever the drawer floor made the
+        # box look like, not for the object.
+        if not (track.category in _CONTENT and not seg.semantics):
+            for cat, prob in m["probs"].items():
+                track.category_counts[cat] = track.category_counts.get(cat, 0.0) + prob
+        if seg.semantics:
+            for cat, score in seg.semantics.items():
+                track.semantic_counts[cat] = track.semantic_counts.get(cat, 0.0) + score
+            track.semantic_views += 1
+        name = color_name(seg.color, seg.invalid_frac)
+        track.color_counts[name] = track.color_counts.get(name, 0.0) + 1.0
         points = seg.points
         if len(points) > self.config.points_per_cloud:
             points = points[self._rng.choice(len(points), self.config.points_per_cloud, replace=False)]
@@ -4130,8 +4137,17 @@ class EgoEstimator:
             last_seen=self.stamp,
             color_counts={det["color"]: 1.0} if det.get("color") else {},
         )
+        self._remember_screw_holes(track, det)
         self.tracks[track.id] = track
         return track
+
+    @staticmethod
+    def _remember_screw_holes(track: Track, det: dict) -> None:
+        """Keep the screw holes a detection reports on ``track`` (body-frame markers)."""
+        holes = det.get("screwHoles")
+        if not holes:
+            return
+        track.screw_holes = [{"id": str(h["id"]), "p": [float(v) for v in h["p"][:3]]} for h in holes]
 
     def _newcomer(self, pos: np.ndarray, size: np.ndarray, sigma: float, others: list[tuple[np.ndarray, np.ndarray, float]]) -> str:
         """How a detection no track explains enters the belief. ``"carried"``: it lies in the held
@@ -4195,6 +4211,7 @@ class EgoEstimator:
         track.category_counts[det["category"]] = track.category_counts.get(det["category"], 0.0) + 1.0
         if det.get("color"):
             track.color_counts[det["color"]] = track.color_counts.get(det["color"], 0.0) + 1.0
+        self._remember_screw_holes(track, det)
         track.observations += 1
         track.last_seen = self.stamp
         track.existence = min(1.0, track.existence + 0.2 * (1.0 - track.existence))
@@ -4708,8 +4725,14 @@ class EgoEstimator:
             holds_contents = "receptacle" in affordances or "pourable" in affordances
             if holds_contents and track.footprint < other.footprint:
                 within = abs(local[0]) <= other.size[0] / 2 and abs(local[1]) <= other.size[1] / 2
-                if within and -0.03 <= track.bottom() - other.bottom() <= min(z_tol, 0.5 * other.size[2]):
-                    if inside is None or other.bottom() > inside.bottom():
+                # Nested bowls: the inner bottom lies from the outer floor up through its rim. A
+                # rim-only view centres the inner bowl high and thin, so the old 0.5×height cap
+                # missed nesting and fell through to the furniture under both.
+                floor_delta = track.bottom() - other.bottom()
+                max_above_floor = float(other.size[2]) + max(z_tol, 0.06)
+                if within and -0.03 <= floor_delta <= max_above_floor:
+                    if inside is None or other.footprint < inside.footprint \
+                            or (other.footprint == inside.footprint and other.bottom() > inside.bottom()):
                         inside = other
                     continue
             # A resting object's base is often hidden from view, so its estimate may float a little above
@@ -5290,12 +5313,19 @@ class EgoEstimator:
         src = "fused" if track.observations > 1 else "observed"
         inflate = 0.0 if track.held else 2.0 * track.sigma
         size = [float(track.size[0] + inflate), float(track.size[1] + inflate), float(track.size[2])]
+        affordances = [Est(value=a, src="prior" if track.annotated_affordances is None else "inferred")
+                       for a in track.affordances]
+        if track.screw_holes is not None:
+            hole_src, holes = "observed", track.screw_holes
+        else:
+            hole_src, holes = "prior", screw_holes(track.category)
+        affordances.extend(Est(value={"screw-hole": {"id": hole["id"], "p": list(hole["p"])}}, src=hole_src)
+                           for hole in holes)
         link = Link(
             id="body", name=track.category,
             geometry={"collision": [primitive("box", size)]},
             material=Est(value={"fragility": p["fragility"]}, src="prior"),
-            affordances=[Est(value=a, src="prior" if track.annotated_affordances is None else "inferred")
-                         for a in track.affordances],
+            affordances=affordances,
         )
         root_value = max(p["root"], key=p["root"].get)
         return Entity(

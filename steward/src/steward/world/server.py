@@ -32,7 +32,7 @@ from steward.embodiments import EMBODIMENTS, embodiment_catalog, scenario_embodi
 from steward.glrender import IMAGE_FORMATS
 from steward.net import NO_CONTENT, Binary, HttpError, JsonServer, call, fetch
 from steward.observer.observer import Observer
-from steward.world.console import CONSOLE_HTML, console_state
+from steward.world.console import CONSOLE_HTML, console_state, console_thinking_text
 from steward.phases import DEFAULT_PHASE, phase_catalog, phase_modules
 from steward.scene.extent import entity_body_ids
 from steward.scene.mjcf import build_mjcf
@@ -449,6 +449,7 @@ class StewardHost:
             ("GET", "/"): console_page,
             ("GET", "/console"): console_page,
             ("GET", "/console/state"): guard(lambda q, b: console_state(self)),
+            ("GET", "/console/thinking"): guard(lambda q, b: console_thinking_text(self, q.get("robot", ""), q.get("entry", ""))),
             ("GET", "/console/frame"): guard(frame),
             ("GET", "/console/view"): guard(lambda q, b: self.view_state()),
             ("POST", "/console/view"): guard(lambda q, b: self.set_view(b)),

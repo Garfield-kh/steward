@@ -110,6 +110,33 @@ def test_nested_bowls_stay_separate_tracks_and_know_what_holds_them():
     assert est.support_of(bowls["red"]) is board
 
 
+def test_support_of_nested_bowls_with_rim_biased_boxes():
+    """Inner bowls seen only as a high thin rim must still nest: blue⊂green⊂red⊂sideboard."""
+    from steward.ego.estimator import Track
+
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    board_top = 0.85
+    # Rim bias: inner bowls are thin and centred near the outer rim, so bottom-bottom delta
+    # exceeds the old 0.5×height nesting cap and support used to fall through to None/sideboard.
+
+    def add(oid, cat, color, pos, size):
+        est.tracks[oid] = Track(
+            id=oid, category_counts={cat: 5.0}, pos=np.array(pos, float), var=np.full(3, 1e-4),
+            yaw=0.0, yaw_var=1e-3, size=np.array(size, float), observations=5,
+            first_seen=0.0, last_seen=1.0, existence=1.0, color_counts={color: 5.0},
+        )
+
+    add("e:board", "sideboard", "beige", [1.5, 0.0, board_top / 2], [0.45, 1.4, board_top])
+    add("e:red", "bowl", "red", [1.5, 0.0, board_top + 0.035], [0.22, 0.22, 0.07])
+    add("e:green", "bowl", "green", [1.5, 0.0, board_top + 0.065], [0.17, 0.17, 0.02])
+    add("e:blue", "bowl", "blue", [1.5, 0.0, board_top + 0.078], [0.13, 0.13, 0.015])
+    red, green, blue = est.tracks["e:red"], est.tracks["e:green"], est.tracks["e:blue"]
+    board = est.tracks["e:board"]
+    assert est.support_of(blue) is green, f"got {getattr(est.support_of(blue), 'id', None)}"
+    assert est.support_of(green) is red, f"got {getattr(est.support_of(green), 'id', None)}"
+    assert est.support_of(red) is board
+
+
 def test_drawer_protrusion_is_measured_from_the_furniture_front():
     cabinet = Box2D("cab", 0.0, 0.0, 0.0, 0.25, 0.3)
     closed = Box2D("d", 0.02, 0.0, 0.0, 0.24, 0.25)
@@ -433,6 +460,545 @@ def test_a_size_ordered_row_counts_from_either_end_of_the_table():
     assert check_table(scene([-0.3, 0.0, 0.3]), boxes)[0]
     assert check_table(scene([0.3, 0.0, -0.3]), boxes)[0], "smallest at the other end"
     assert not check_table(scene([0.0, -0.3, 0.3]), boxes)[0], "not in size order"
+
+
+def _stack_bowl(oid: str, pos: list[float], size: list[float], *, color: str, on: str | None,
+                role: str = "bowl") -> dict:
+    return {
+        "id": oid, "category": role, "role": role, "categories": {role: 0.9},
+        "position": pos, "sizeM": size, "extentM": size, "color": color,
+        "existence": 1.0, "on": on, "yawDeg": 0.0, "lastSeenAgoS": 0.0, "uncertaintyM": 0.02,
+    }
+
+
+def _sideboard_fixture():
+    board = {
+        "id": "e:board", "category": "sideboard", "role": "sideboard", "existence": 1.0,
+        "position": [1.5, 0.0, 0.4], "extentM": [0.5, 1.2, 0.85], "sizeM": [0.5, 1.2, 0.85],
+        "yawDeg": 0.0, "categories": {"sideboard": 1.0}, "color": None, "lastSeenAgoS": 0.0,
+    }
+    red = _stack_bowl("e:r", [1.5, 0.0, 0.88], [0.22, 0.22, 0.07], color="red", on="e:board")
+    green = _stack_bowl("e:g", [1.5, 0.0, 0.92], [0.17, 0.17, 0.06], color="green", on="e:r")
+    blue = _stack_bowl("e:b", [1.5, 0.2, 0.88], [0.13, 0.13, 0.05], color="blue", on="e:table")
+    wine = {
+        "id": "e:w", "category": "wine_glass", "role": "wine_glass", "categories": {"wine_glass": 0.9},
+        "position": [1.7, 0.0, 0.9], "sizeM": [0.06, 0.06, 0.15], "extentM": [0.06, 0.06, 0.15],
+        "color": "clear", "existence": 1.0, "on": "e:table", "yawDeg": 0.0, "lastSeenAgoS": 0.0,
+        "uncertaintyM": 0.02,
+    }
+    return board, red, green, blue, wine
+
+
+def _patch_sideboard_runner(monkeypatch, chores_mod, state, board, *, move=None, table=None):
+    from steward.mission import MissionFailed
+
+    def live(obj):
+        return next(o for o in state["objects"] if o["id"] == obj["id"])
+
+    def fake_refresh(api, obj):
+        try:
+            return dict(live(obj))
+        except StopIteration as exc:
+            raise MissionFailed(f"{obj['id']} gone") from exc
+
+    monkeypatch.setattr(chores_mod, "_summary", lambda api: state)
+    # Unit fixtures already hold a full room; do not burn wall time in ``_settle``.
+    monkeypatch.setattr(chores_mod, "_settle", lambda api, seconds=25.0, want=2: state)
+    monkeypatch.setattr(chores_mod, "_refresh", fake_refresh)
+    monkeypatch.setattr(chores_mod, "_refresh_or_recover", fake_refresh)
+    monkeypatch.setattr(chores_mod, "_approach_to_observe", lambda *a, **k: None)
+    monkeypatch.setattr(chores_mod, "simtime_sleep", lambda *a, **k: None)
+    monkeypatch.setattr(chores_mod, "_place_at",
+                        lambda api, support, xy: {"on": support["id"], "offset": [0.0, 0.0]})
+    if move is None:
+        def move(api, obj, place, observe, log, timeout_s, attempts=2):
+            # Upstream stack path assigns the return value as the moved object (``_landed``).
+            landed = dict(obj)
+            if place.get("on") is not None:
+                landed["on"] = place["on"]
+            return landed
+    monkeypatch.setattr(chores_mod, "_move", move)
+    runner = chores_mod.Chores("http://unused")
+
+    def confirmed(role):
+        if role == "table" and table is not None:
+            return table
+        return board
+
+    monkeypatch.setattr(runner, "_confirmed", confirmed)
+    monkeypatch.setattr(runner, "_doing", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "publish", lambda **k: None)
+    monkeypatch.setattr(runner, "_clearing", lambda phase, action: action())
+    return runner
+
+
+def test_sideboard_plan_keeps_unsupported_tableware_near_the_table():
+    """Scheme 1: missing ``on`` does not drop fresh tableware that sits over the table.
+
+    ``_supported_first`` would keep only the mug once it has ``on``, and omit the wine glass
+    whose support is still unknown — then the main loop never moves it."""
+    from steward.chores import _sideboard_plan_bowls, _sideboard_plan_others, _sideboard_plan_inventory
+
+    table = {
+        "id": "e:table", "category": "table", "role": "table", "existence": 1.0,
+        "position": [0.5, -1.0, 0.38], "extentM": [1.2, 0.8, 0.75], "sizeM": [1.2, 0.8, 0.75],
+        "yawDeg": 0.0, "categories": {"table": 1.0}, "color": None, "lastSeenAgoS": 0.0, "on": None,
+    }
+    board, red, green, blue, wine = _sideboard_fixture()
+    mug = {
+        "id": "e:m", "category": "mug", "role": "mug", "categories": {"mug": 0.9},
+        "position": [0.4, -1.0, 0.80], "sizeM": [0.08, 0.08, 0.09], "extentM": [0.08, 0.08, 0.09],
+        "color": "black", "existence": 1.0, "on": "e:table", "yawDeg": 0.0, "lastSeenAgoS": 0.0,
+        "uncertaintyM": 0.02,
+    }
+    # Far from every support surface: a wall-corner fragment misread as a cup.
+    fragment = {
+        "id": "e:frag", "category": "cup", "role": "cup", "categories": {"cup": 0.8},
+        "position": [5.0, 5.0, 0.9], "sizeM": [0.07, 0.07, 0.08], "extentM": [0.07, 0.07, 0.08],
+        "color": None, "existence": 1.0, "on": None, "yawDeg": 0.0, "lastSeenAgoS": 0.0,
+        "uncertaintyM": 0.02,
+    }
+    red = {**red, "on": "e:table", "position": [0.3, -1.0, 0.78]}
+    green = {**green, "on": "e:table", "position": [0.5, -1.0, 0.78]}
+    blue = {**blue, "on": None, "position": [0.7, -1.0, 0.78]}
+    wine = {**wine, "on": None, "position": [0.9, -1.0, 0.80]}
+    summary = {"objects": [table, board, red, green, blue, wine, mug, fragment]}
+    assert {b["id"] for b in _sideboard_plan_bowls(summary)} == {"e:r", "e:g", "e:b"}
+    assert {o["id"] for o in _sideboard_plan_others(summary)} == {"e:w", "e:m"}
+    assert "e:frag" not in {o["id"] for o in _sideboard_plan_others(summary)}
+    _bowls, _others, rejected = _sideboard_plan_inventory(summary)
+    by_id = {r["id"]: r for r in rejected}
+    assert by_id["e:frag"]["reasons"] == ["far"]
+
+
+def test_doubtful_tableware_includes_stemware_shaped_unknown_and_role_rejects():
+    """Rescan targets: unlabeled stemware geometry, and role-rejected tracks with wine mass."""
+    from steward.chores import _doubtful_tableware_for_rescan
+
+    table = {
+        "id": "e:table", "category": "table", "role": "table", "existence": 1.0,
+        "position": [0.5, -1.0, 0.38], "extentM": [1.2, 0.8, 0.75], "sizeM": [1.2, 0.8, 0.75],
+        "yawDeg": 0.0, "categories": {"table": 1.0}, "color": None, "lastSeenAgoS": 0.0, "on": None,
+    }
+    board, red, _green, _blue, wine = _sideboard_fixture()
+    red = {**red, "on": "e:table", "position": [0.3, -1.0, 0.78]}
+    # Beige stemware with no tableware mass yet (seed4-style): not a plan candidate, still rescanned.
+    ghost = {
+        "id": "e:ghost", "category": "unknown", "role": "unknown",
+        "categories": {"unknown": 1.0},
+        "position": [0.49, -1.12, 0.85], "sizeM": [0.08, 0.07, 0.19], "extentM": [0.08, 0.07, 0.19],
+        "color": "beige", "existence": 1.0, "on": "e:table", "yawDeg": 0.0, "lastSeenAgoS": 0.0,
+    }
+    misrole = {
+        "id": "e:mis", "category": "wine_glass", "role": "unknown",
+        "categories": {"wine_glass": 0.7, "unknown": 0.3},
+        "position": [0.7, -1.0, 0.80], "sizeM": [0.06, 0.06, 0.15], "extentM": [0.06, 0.06, 0.15],
+        "color": "clear", "existence": 1.0, "on": "e:table", "yawDeg": 0.0, "lastSeenAgoS": 0.0,
+    }
+    far_unknown = {
+        "id": "e:far", "category": "unknown", "role": "unknown", "categories": {"unknown": 1.0},
+        "position": [3.0, 3.0, 0.85], "sizeM": [0.08, 0.07, 0.19], "extentM": [0.08, 0.07, 0.19],
+        "color": "beige", "existence": 1.0, "on": None, "yawDeg": 0.0, "lastSeenAgoS": 0.0,
+    }
+    summary = {"objects": [table, board, red, ghost, misrole, far_unknown]}
+    ids = {o["id"] for o in _doubtful_tableware_for_rescan(summary)}
+    assert ids == {"e:ghost", "e:mis"}
+
+
+def _stack_rescan_harness(monkeypatch, chores_mod, *, ghost_states: list[dict], board, table,
+                          red, green, blue):
+    """Drive stack_on_sideboard with a scripted ghost identity across close-look summaries."""
+    state = {"i": 0, "looked": []}
+
+    def objects_now():
+        ghost = ghost_states[min(state["i"], len(ghost_states) - 1)]
+        return [table, board, red, green, blue, ghost]
+
+    def fake_summary(api):
+        return {"objects": objects_now()}
+
+    def fake_settle(api, seconds=25.0, want=2):
+        return {"objects": objects_now()}
+
+    def fake_approach(api, obj, distance=1.3, prefer_offset=None):
+        state["looked"].append({"id": obj["id"], "distance": distance, "prefer_offset": prefer_offset})
+        if obj["id"] == "e:ghost" and state["i"] + 1 < len(ghost_states):
+            state["i"] += 1
+
+    def fake_move(api, obj, place, observe, log, timeout_s, attempts=2):
+        landed = dict(obj)
+        if place.get("on") is not None:
+            landed["on"] = place["on"]
+            for o in objects_now():
+                if o["id"] == obj["id"]:
+                    o["on"] = place["on"]
+        return landed
+
+    monkeypatch.setattr(chores_mod, "_summary", fake_summary)
+    monkeypatch.setattr(chores_mod, "_settle", fake_settle)
+    monkeypatch.setattr(chores_mod, "_refresh_or_recover",
+                        lambda api, obj: board if obj.get("role") == "sideboard"
+                        else next(o for o in objects_now() if o["id"] == obj["id"]))
+    monkeypatch.setattr(chores_mod, "_approach_to_observe", fake_approach)
+    monkeypatch.setattr(chores_mod, "simtime_sleep", lambda *a, **k: None)
+    monkeypatch.setattr(chores_mod, "_move", fake_move)
+    monkeypatch.setattr(chores_mod, "_place_at",
+                        lambda api, support, xy: {"on": support["id"], "offset": [0.0, 0.0]})
+    runner = chores_mod.Chores("http://unused")
+    monkeypatch.setattr(runner, "_confirmed", lambda role: board)
+    monkeypatch.setattr(runner, "_doing", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "_step", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "_clearing", lambda phase, action: action())
+    monkeypatch.setattr(runner, "_with_known_support", lambda obj, expect=None: obj)
+    runner.stack_on_sideboard()
+    return runner, state["looked"]
+
+
+def test_stack_rescans_doubtful_unknown_before_planning(monkeypatch):
+    """Stemware unknown that becomes plan-ready after the first close look stops early and is planned."""
+    import steward.chores as chores_mod
+
+    table = {
+        "id": "e:table", "category": "table", "role": "table", "existence": 1.0,
+        "position": [0.5, -1.0, 0.38], "extentM": [1.2, 0.8, 0.75], "sizeM": [1.2, 0.8, 0.75],
+        "yawDeg": 0.0, "categories": {"table": 1.0}, "color": None, "lastSeenAgoS": 0.0, "on": None,
+    }
+    board, red, green, blue, wine = _sideboard_fixture()
+    red = {**red, "on": "e:table", "position": [0.3, -1.0, 0.78]}
+    green = {**green, "on": "e:table", "position": [0.5, -1.0, 0.78]}
+    blue = {**blue, "on": "e:table", "position": [0.7, -1.0, 0.78]}
+    ghost = {
+        "id": "e:ghost", "category": "unknown", "role": "unknown", "categories": {"unknown": 1.0},
+        "position": [0.49, -1.12, 0.85], "sizeM": [0.08, 0.07, 0.19], "extentM": [0.08, 0.07, 0.19],
+        "color": "beige", "existence": 1.0, "on": "e:table", "yawDeg": 0.0, "lastSeenAgoS": 0.0,
+    }
+    named = {**wine, "id": "e:ghost", "category": "wine_glass", "role": "wine_glass",
+             "categories": {"wine_glass": 0.95}, "on": "e:table",
+             "position": [0.49, -1.12, 0.85], "sizeM": [0.08, 0.07, 0.19], "extentM": [0.08, 0.07, 0.19],
+             "lastSeenAgoS": 0.0}
+    runner, looked = _stack_rescan_harness(
+        monkeypatch, chores_mod, ghost_states=[ghost, named], board=board, table=table,
+        red=red, green=green, blue=blue)
+    ghost_looks = [e for e in looked if e["id"] == "e:ghost"]
+    assert len(ghost_looks) == 1
+    assert ghost_looks[0]["prefer_offset"] == 0.0
+    assert any(e.get("step") == "rescan-object" and e.get("id") == "e:ghost" and e.get("confirmed")
+               and e.get("views") == 1 for e in runner.log)
+    plan = next(e for e in runner.log if e.get("step") == "plan-sideboard")
+    assert any(o["id"] == "e:ghost" and o["role"] == "wine_glass" for o in plan["others"])
+
+
+def test_stack_rescans_stop_when_any_plan_tableware_role_appears(monkeypatch):
+    """Early stop uses plan-ready TABLEWARE (e.g. mug), not a wine_glass-only check."""
+    import steward.chores as chores_mod
+
+    table = {
+        "id": "e:table", "category": "table", "role": "table", "existence": 1.0,
+        "position": [0.5, -1.0, 0.38], "extentM": [1.2, 0.8, 0.75], "sizeM": [1.2, 0.8, 0.75],
+        "yawDeg": 0.0, "categories": {"table": 1.0}, "color": None, "lastSeenAgoS": 0.0, "on": None,
+    }
+    board, red, green, blue, _wine = _sideboard_fixture()
+    red = {**red, "on": "e:table", "position": [0.3, -1.0, 0.78]}
+    green = {**green, "on": "e:table", "position": [0.5, -1.0, 0.78]}
+    blue = {**blue, "on": "e:table", "position": [0.7, -1.0, 0.78]}
+    ghost = {
+        "id": "e:ghost", "category": "unknown", "role": "unknown", "categories": {"unknown": 1.0},
+        "position": [0.49, -1.12, 0.85], "sizeM": [0.08, 0.07, 0.19], "extentM": [0.08, 0.07, 0.19],
+        "color": "beige", "existence": 1.0, "on": "e:table", "yawDeg": 0.0, "lastSeenAgoS": 0.0,
+    }
+    as_mug = {
+        "id": "e:ghost", "category": "mug", "role": "mug", "categories": {"mug": 0.9},
+        "position": [0.49, -1.12, 0.85], "sizeM": [0.1, 0.08, 0.1], "extentM": [0.1, 0.08, 0.1],
+        "color": "black", "existence": 1.0, "on": "e:table", "yawDeg": 0.0, "lastSeenAgoS": 0.0,
+    }
+    # Still unknown after view 0; mug after view 1.
+    runner, looked = _stack_rescan_harness(
+        monkeypatch, chores_mod, ghost_states=[ghost, ghost, as_mug], board=board, table=table,
+        red=red, green=green, blue=blue)
+    ghost_looks = [e for e in looked if e["id"] == "e:ghost"]
+    assert len(ghost_looks) == 2
+    assert [e["prefer_offset"] for e in ghost_looks] == [0.0, 1.0]
+    plan = next(e for e in runner.log if e.get("step") == "plan-sideboard")
+    assert any(o["id"] == "e:ghost" and o["role"] == "mug" for o in plan["others"])
+
+
+def test_stack_leaves_unconfirmed_doubtful_out_of_others_after_max_views(monkeypatch):
+    """After RESCAN_MAX_VIEWS without a plan-ready role, the track is not in others."""
+    import steward.chores as chores_mod
+
+    table = {
+        "id": "e:table", "category": "table", "role": "table", "existence": 1.0,
+        "position": [0.5, -1.0, 0.38], "extentM": [1.2, 0.8, 0.75], "sizeM": [1.2, 0.8, 0.75],
+        "yawDeg": 0.0, "categories": {"table": 1.0}, "color": None, "lastSeenAgoS": 0.0, "on": None,
+    }
+    board, red, green, blue, _wine = _sideboard_fixture()
+    red = {**red, "on": "e:table", "position": [0.3, -1.0, 0.78]}
+    green = {**green, "on": "e:table", "position": [0.5, -1.0, 0.78]}
+    blue = {**blue, "on": "e:table", "position": [0.7, -1.0, 0.78]}
+    ghost = {
+        "id": "e:ghost", "category": "unknown", "role": "unknown", "categories": {"unknown": 1.0},
+        "position": [0.49, -1.12, 0.85], "sizeM": [0.08, 0.07, 0.19], "extentM": [0.08, 0.07, 0.19],
+        "color": "beige", "existence": 1.0, "on": "e:table", "yawDeg": 0.0, "lastSeenAgoS": 0.0,
+    }
+    runner, looked = _stack_rescan_harness(
+        monkeypatch, chores_mod, ghost_states=[ghost, ghost, ghost, ghost], board=board, table=table,
+        red=red, green=green, blue=blue)
+    ghost_looks = [e for e in looked if e["id"] == "e:ghost"]
+    assert len(ghost_looks) == chores_mod.RESCAN_MAX_VIEWS
+    assert [e["prefer_offset"] for e in ghost_looks] == list(chores_mod.RESCAN_VIEW_OFFSETS)
+    assert any(e.get("step") == "rescan-object" and e.get("id") == "e:ghost" and not e.get("confirmed")
+               and e.get("views") == chores_mod.RESCAN_MAX_VIEWS for e in runner.log)
+    plan = next(e for e in runner.log if e.get("step") == "plan-sideboard")
+    assert all(o["id"] != "e:ghost" for o in plan["others"])
+    rejected = {r["id"]: r for r in plan["rejected"]}
+    assert "e:ghost" in rejected
+    assert "unconfirmed" in rejected["e:ghost"]["reasons"]
+    assert rejected["e:ghost"]["views"] == chores_mod.RESCAN_MAX_VIEWS
+
+
+def test_move_rebinds_place_on_after_support_renumber(monkeypatch):
+    """chores._move refreshes the support and rewrites place.on before predicting place."""
+    import steward.chores as chores_mod
+
+    obj = {
+        "id": "e:8", "category": "bowl", "role": "bowl", "categories": {"bowl": 1.0},
+        "position": [0.0, 0.0, 0.9], "sizeM": [0.12, 0.12, 0.05], "extentM": [0.12, 0.12, 0.05],
+        "color": "blue", "existence": 1.0, "on": "e:table",
+    }
+    stale = {
+        "id": "e:31", "category": "bowl", "role": "bowl", "categories": {"bowl": 1.0},
+        "position": [-2.7, 0.5, 0.9], "sizeM": [0.19, 0.19, 0.06], "extentM": [0.19, 0.19, 0.06],
+        "color": "green", "existence": 1.0, "on": "e:7",
+    }
+    fresh = {**stale, "id": "e:484"}
+    places: list[dict] = []
+
+    monkeypatch.setattr(chores_mod, "_approach_to_observe", lambda *a, **k: None)
+    monkeypatch.setattr(chores_mod, "_refresh", lambda api, o: obj if o["id"] == "e:8" else o)
+    monkeypatch.setattr(chores_mod, "_refresh_or_recover",
+                        lambda api, o: fresh if o["id"] == "e:31" else o)
+
+    def fake_safe(api, skill, params, observe, log):
+        if skill == "pick":
+            return {"id": "pick", "feasible": True, "withinRiskLimit": True, "issues": [],
+                    "blockers": [], "risk": 0.0, "skill": "pick"}
+        places.append(dict(params))
+        assert observe["id"] == "e:484" and params["on"] == "e:484"
+        return {"id": "place", "feasible": True, "withinRiskLimit": True, "issues": [],
+                "blockers": [], "risk": 0.0, "skill": "place", "plan": {"spot": [0, 0]}}
+
+    monkeypatch.setattr(chores_mod, "_safe_receipt", fake_safe)
+    monkeypatch.setattr(chores_mod, "_run", lambda api, receipt, timeout_s: {"state": "succeeded", "message": "ok"})
+    monkeypatch.setattr(chores_mod, "simtime_sleep", lambda *a, **k: None)
+    monkeypatch.setattr(chores_mod, "_landed", lambda api, o, spot: {**o, "on": "e:484"})
+    log: list = []
+    chores_mod._move("http://unused", obj, {"on": "e:31"}, stale, log, timeout_s=30.0)
+    assert places == [{"on": "e:484"}]
+
+
+def test_sideboard_plan_rejected_rows_name_stale_role_and_floor():
+    """plan-sideboard diagnostics: each omitted tableware-like track carries stable reason codes."""
+    from steward.chores import FRESH_S, _sideboard_plan_inventory
+
+    table = {
+        "id": "e:table", "category": "table", "role": "table", "existence": 1.0,
+        "position": [0.5, -1.0, 0.38], "extentM": [1.2, 0.8, 0.75], "sizeM": [1.2, 0.8, 0.75],
+        "yawDeg": 0.0, "categories": {"table": 1.0}, "color": None, "lastSeenAgoS": 0.0, "on": None,
+    }
+    board, red, _green, _blue, wine = _sideboard_fixture()
+    red = {**red, "on": "e:table", "position": [0.3, -1.0, 0.78]}
+    stale = {**wine, "id": "e:stale", "on": "e:table", "position": [0.6, -1.0, 0.80],
+             "lastSeenAgoS": FRESH_S + 1.0}
+    misrole = {
+        "id": "e:mis", "category": "wine_glass", "role": "unknown",
+        "categories": {"wine_glass": 0.7, "unknown": 0.3},
+        "position": [0.7, -1.0, 0.80], "sizeM": [0.06, 0.06, 0.15], "extentM": [0.06, 0.06, 0.15],
+        "color": "clear", "existence": 1.0, "on": "e:table", "yawDeg": 0.0, "lastSeenAgoS": 0.0,
+    }
+    floor = {
+        "id": "e:mat", "category": "bowl", "role": "bowl", "categories": {"bowl": 0.9},
+        "position": [0.5, -1.0, 0.02], "sizeM": [0.24, 0.24, 0.02], "extentM": [0.24, 0.24, 0.02],
+        "color": None, "existence": 1.0, "on": None, "yawDeg": 0.0, "lastSeenAgoS": 0.0,
+    }
+    summary = {"objects": [table, board, red, stale, misrole, floor]}
+    bowls, others, rejected = _sideboard_plan_inventory(summary)
+    assert [b["id"] for b in bowls] == ["e:r"] and others == []
+    by_id = {r["id"]: r["reasons"] for r in rejected}
+    assert by_id["e:stale"] == ["stale"]
+    assert by_id["e:mis"] == ["role"]
+    assert by_id["e:mat"] == ["floor"]
+
+
+def test_sideboard_plan_includes_tableware_once_a_close_look_gives_support(monkeypatch):
+    """Open-plan after observing the table: pieces that lacked ``on`` are moved via pick-time look."""
+    import steward.chores as chores_mod
+
+    table = {
+        "id": "e:table", "category": "table", "role": "table", "existence": 1.0,
+        "position": [0.5, -1.0, 0.38], "extentM": [1.2, 0.8, 0.75], "sizeM": [1.2, 0.8, 0.75],
+        "yawDeg": 0.0, "categories": {"table": 1.0}, "color": None, "lastSeenAgoS": 0.0, "on": None,
+    }
+    board, red, green, blue, wine = _sideboard_fixture()
+    red = {**red, "on": "e:table", "position": [0.3, -1.0, 0.78]}
+    green = {**green, "on": "e:table", "position": [0.5, -1.0, 0.78]}
+    blue = {**blue, "on": None, "position": [0.7, -1.0, 0.78]}
+    wine = {**wine, "on": None, "position": [0.9, -1.0, 0.80]}
+    state = {"objects": [table, board, red, green, blue, wine]}
+    looked: list[str] = []
+
+    def approach(api, obj, distance=1.3):
+        looked.append(obj["id"])
+        # Only fill support when looking at the piece itself (pick-time), not the table overview.
+        if obj["id"] in ("e:b", "e:w"):
+            for o in state["objects"]:
+                if o["id"] == obj["id"] and o.get("on") is None:
+                    o["on"] = "e:table"
+
+    def move(api, obj, place, observe, log, timeout_s, attempts=2):
+        for o in state["objects"]:
+            if o["id"] == obj["id"] and place.get("on"):
+                o["on"] = place["on"]
+        return {"state": "succeeded"}
+
+    runner = _patch_sideboard_runner(monkeypatch, chores_mod, state, board, move=move, table=table)
+    monkeypatch.setattr(chores_mod, "_approach_to_observe", approach)
+    runner.stack_on_sideboard()
+    plan = next(e for e in runner.log if e.get("step") == "plan-sideboard")
+    assert looked[0] == "e:table"
+    assert {b["id"] for b in plan["bowls"]} == {"e:r", "e:g", "e:b"}
+    assert {o["id"] for o in plan["others"]} == {"e:w"}
+    # Plan listed wine while its ``on`` was still None; pick-time look then placed it.
+    assert any(oid == "e:w" for oid in looked[1:])
+    assert next(o for o in state["objects"] if o["id"] == "e:b")["on"] == "e:g"
+    assert next(o for o in state["objects"] if o["id"] == "e:w")["on"] == "e:board"
+
+
+def test_stack_looks_again_when_support_is_unknown(monkeypatch):
+    """M5: before moving a bowl with on=None, look closer once so support can appear."""
+    import steward.chores as chores_mod
+
+    board = {
+        "id": "e:board", "category": "sideboard", "role": "sideboard", "existence": 1.0,
+        "position": [1.5, 0.0, 0.4], "extentM": [0.5, 1.2, 0.85], "sizeM": [0.5, 1.2, 0.85],
+        "yawDeg": 0.0, "categories": {"sideboard": 1.0}, "color": None,
+    }
+    red = _stack_bowl("e:1", [1.5, 0.0, 0.88], [0.22, 0.22, 0.07], color="red", on=None)
+    red_supported = {**red, "on": "e:board"}
+    looked: list[str] = []
+    state = {"objects": [board, red]}
+
+    def fake_refresh(api, obj):
+        live = next(o for o in state["objects"] if o["id"] == obj["id"])
+        return live
+
+    def fake_approach(api, obj, distance=0.9):
+        looked.append(obj["id"])
+        state["objects"] = [board, red_supported]
+
+    monkeypatch.setattr(chores_mod, "_refresh_or_recover", fake_refresh)
+    monkeypatch.setattr(chores_mod, "_approach_to_observe", fake_approach)
+    monkeypatch.setattr(chores_mod, "simtime_sleep", lambda *a, **k: None)
+    runner = chores_mod.Chores("http://unused")
+    monkeypatch.setattr(runner, "_doing", lambda *a, **k: None)
+    out = runner._with_known_support(red)
+    assert looked == ["e:1"] and out["on"] == "e:board"
+
+
+def test_refresh_alone_misses_a_bowl_that_drifted_beyond_local_reach(monkeypatch):
+    """M2 before: M1 ``_refresh`` only searches ~0.25 m; a renumbered bowl a metre away is lost."""
+    from steward import mission as mission_mod
+    from steward.mission import MissionFailed, _refresh
+
+    lost = _stack_bowl("e:2", [1.5, 0.0, 0.9], [0.17, 0.17, 0.06], color="green", on="e:1")
+    far = _stack_bowl("e:20", [2.5, 0.0, 0.9], [0.17, 0.16, 0.06], color="green", on="e:1")
+    monkeypatch.setattr(mission_mod, "call", lambda *a, **k: {"objects": [far]})
+    with pytest.raises(MissionFailed, match="e:2"):
+        _refresh("http://unused", lost)
+
+
+def test_refresh_or_recover_finds_a_renumbered_bowl_beyond_local_reach(monkeypatch):
+    """M2 after: look again, then match footprint anywhere in the summary."""
+    import steward.chores as chores_mod
+    from steward import mission as mission_mod
+
+    lost = _stack_bowl("e:2", [1.5, 0.0, 0.9], [0.17, 0.17, 0.06], color="green", on="e:1")
+    far = _stack_bowl("e:20", [2.5, 0.0, 0.9], [0.17, 0.16, 0.06], color="green", on="e:1")
+    looked = []
+    monkeypatch.setattr(mission_mod, "call", lambda *a, **k: {"objects": [far]})
+    monkeypatch.setattr(chores_mod, "_approach_to_observe", lambda api, obj, distance=0.9: looked.append(obj["id"]))
+    monkeypatch.setattr(chores_mod, "_summary", lambda api: {"objects": [far]})
+    found = chores_mod._refresh_or_recover("http://unused", lost)
+    assert found["id"] == "e:20" and looked == ["e:2"]
+
+
+def test_stack_recovers_renumbered_bowl_mid_stack(monkeypatch):
+    """Mid-stack lost id: recover the renumbered bowl and continue instead of MissionFailed."""
+    import steward.chores as chores_mod
+    from steward.mission import MissionFailed
+
+    board = {
+        "id": "e:board", "category": "sideboard", "role": "sideboard", "existence": 1.0,
+        "position": [1.5, 0.0, 0.4], "extentM": [0.5, 1.2, 0.85], "sizeM": [0.5, 1.2, 0.85],
+        "yawDeg": 0.0, "categories": {"sideboard": 1.0}, "color": None,
+    }
+    red = _stack_bowl("e:1", [1.5, 0.0, 0.88], [0.22, 0.22, 0.07], color="red", on="e:board")
+    # Already on the board so the largest bowl needs no move; green is missing until recover.
+    green_old = _stack_bowl("e:2", [1.5, 0.2, 0.88], [0.17, 0.17, 0.06], color="green", on="e:board")
+    green_new = _stack_bowl("e:20", [2.5, 0.2, 0.88], [0.17, 0.16, 0.06], color="green", on="e:board")
+    blue = _stack_bowl("e:3", [1.5, -0.2, 0.88], [0.13, 0.13, 0.05], color="blue", on="e:board")
+
+    # Initial plan sees green_old; refresh of e:2 fails; summary for recover has green_new far away.
+    plan_summary = {"objects": [board, red, green_old, blue]}
+    recover_summary = {"objects": [board, red, green_new, blue]}
+    moves: list[tuple] = []
+
+    def fake_refresh(api, obj):
+        if obj["id"] == "e:2":
+            raise MissionFailed("e:2 (bowl) is no longer in the ego state")
+        live = next((o for o in recover_summary["objects"] if o["id"] == obj["id"]), None)
+        if live is None:
+            raise MissionFailed(f"{obj['id']} ({obj.get('category')}) is no longer in the ego state")
+        return live
+
+    def fake_move(api, obj, place, observe, log, timeout_s, attempts=2):
+        moves.append((obj["id"], dict(place)))
+        for o in recover_summary["objects"]:
+            if o["id"] == obj["id"] and place.get("on"):
+                o["on"] = place["on"]
+        return {"state": "succeeded"}
+
+    monkeypatch.setattr(chores_mod, "_summary",
+                        lambda api: recover_summary if moves else plan_summary)
+    monkeypatch.setattr(chores_mod, "_settle",
+                        lambda api, seconds=25.0, want=2: recover_summary if moves else plan_summary)
+    monkeypatch.setattr(chores_mod, "_refresh", fake_refresh)
+    monkeypatch.setattr(chores_mod, "_approach_to_observe", lambda *a, **k: None)
+    # After look, recover reads the summary that holds the renumbered track.
+    monkeypatch.setattr(chores_mod, "_match_by_footprint",
+                        lambda summary, obj: green_new if obj["id"] == "e:2" else None)
+    # Force _refresh_or_recover to use our failing refresh + match path.
+    def recover(api, obj):
+        try:
+            return fake_refresh(api, obj)
+        except MissionFailed as first:
+            found = chores_mod._match_by_footprint(recover_summary, obj)
+            if found is not None:
+                return found
+            raise first
+
+    monkeypatch.setattr(chores_mod, "_refresh_or_recover", recover)
+    monkeypatch.setattr(chores_mod, "_move", fake_move)
+    monkeypatch.setattr(chores_mod, "simtime_sleep", lambda *a, **k: None)
+    monkeypatch.setattr(chores_mod, "_place_at",
+                        lambda api, support, xy: {"on": support["id"], "offset": [0.0, 0.0]})
+    runner = chores_mod.Chores("http://unused")
+    monkeypatch.setattr(runner, "_confirmed", lambda role: board)
+    monkeypatch.setattr(runner, "_doing", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "_step", lambda *a, **k: None)
+    monkeypatch.setattr(runner, "_clearing", lambda phase, action: action())
+    runner.stack_on_sideboard()
+    assert any(oid == "e:20" for oid, _ in moves), f"expected move of recovered bowl, got {moves}"
+    assert any(place.get("on") == "e:1" for _, place in moves), "blue/green should nest onto the red base"
 
 
 def test_a_timed_out_request_fails_the_phase_instead_of_ending_the_loop(monkeypatch):

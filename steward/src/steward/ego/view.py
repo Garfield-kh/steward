@@ -38,6 +38,10 @@ CATEGORY_RGB = {
     "plate": [0.95, 0.95, 0.95], "wall": [0.55, 0.58, 0.62], "drawer": [0.80, 0.67, 0.50],
     "wine_glass": [0.80, 0.92, 0.98], "mug": [0.12, 0.12, 0.13], "teddy_bear": [0.58, 0.38, 0.20],
     "scissors": [0.70, 0.72, 0.75], "toy_airplane": [0.95, 0.78, 0.10], "pistol": [0.12, 0.12, 0.13],
+    "airplane_fuselage": [0.95, 0.78, 0.10], "airplane_wing": [0.85, 0.15, 0.15],
+    "airplane_propeller": [0.92, 0.45, 0.10], "airplane_landing_gear": [0.70, 0.72, 0.75],
+    "car_body": [0.20, 0.45, 0.85], "car_wheel": [0.12, 0.12, 0.13], "toy_screw": [0.55, 0.58, 0.62],
+    "electric_screwdriver": [0.90, 0.40, 0.08], "manual": [0.97, 0.95, 0.88], "picture": [0.90, 0.93, 0.97],
     "pill_bottle": [0.94, 0.94, 0.92], "perfume_bottle": [0.95, 0.60, 0.75], "plant": [0.24, 0.52, 0.24],
 }
 COLOR_RGB = {

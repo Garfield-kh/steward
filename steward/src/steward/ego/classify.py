@@ -33,6 +33,16 @@ SHAPES: dict[str, dict] = {
     "teddy_bear": {"dims": (0.11, 0.105, 0.18), "floor": False, "color": "brown"},
     "scissors": {"dims": (0.16, 0.07, 0.012), "floor": False},
     "toy_airplane": {"dims": (0.22, 0.20, 0.06), "floor": False, "color": "yellow"},
+    "airplane_fuselage": {"dims": (0.18, 0.045, 0.04), "floor": False, "color": "yellow"},
+    "airplane_wing": {"dims": (0.20, 0.055, 0.01), "floor": False, "color": "red"},
+    "airplane_propeller": {"dims": (0.06, 0.06, 0.01), "floor": False, "color": "orange"},
+    "airplane_landing_gear": {"dims": (0.08, 0.03, 0.025), "floor": False},
+    "car_body": {"dims": (0.16, 0.10, 0.07), "floor": False, "color": "blue"},
+    "car_wheel": {"dims": (0.05, 0.05, 0.016), "floor": False, "color": "dark"},
+    "toy_screw": {"dims": (0.016, 0.016, 0.022), "floor": False},
+    "electric_screwdriver": {"dims": (0.16, 0.035, 0.04), "floor": False, "color": "orange"},
+    "manual": {"dims": (0.24, 0.24, 0.004), "floor": False},
+    "picture": {"dims": (0.24, 0.24, 0.004), "floor": False},
     "pistol": {"dims": (0.18, 0.12, 0.03), "floor": False, "color": "dark"},
     "pill_bottle": {"dims": (0.046, 0.046, 0.085), "floor": False},
     "perfume_bottle": {"dims": (0.065, 0.04, 0.10), "floor": False, "color": "pink"},
@@ -47,12 +57,27 @@ UNKNOWN_COST = 7.0  # a region that fits no prototype this badly is something th
 # one broken placement rule (6) on an otherwise fitting shape still names the category
 
 
-def _color_score(rule: str | None, color: np.ndarray, invalid_frac: float) -> float:
+def _color_score(rule: str | None, color: np.ndarray, invalid_frac: float,
+                 geom_cost: float | None = None) -> float:
+    """Colour agreement for a shape rule; ``geom_cost`` softens a clear miss when size already fits.
+
+    Transparent glass often paints table beige into the mask while depth holes are uneven, so a hard
+    clear fail would demote a well-measured stemware box to :data:`UNKNOWN`. A miss with a low
+    geometric cost therefore only lightly penalises ``clear``; a miss on a poorly fitting box still
+    costs the full −2.
+    """
     r, g, b = (float(x) for x in color)
     value, low = max(r, g, b), min(r, g, b)
     saturation = 0.0 if value == 0 else (value - low) / value
     if rule == "clear":
-        return 1.0 if invalid_frac > 0.15 or (saturation < 0.12 and value > 0.6) else -2.0
+        if invalid_frac > 0.15 or (saturation < 0.12 and value > 0.6):
+            return 1.0
+        # Partial depth dropouts on glass: weaker than the clear hit, but not a full reject.
+        if invalid_frac > 0.08 and value > 0.5:
+            return 0.25
+        if geom_cost is not None and geom_cost < 2.0:
+            return -0.25
+        return -2.0
     if rule == "dark":
         return 0.0 if value < 0.3 else -3.0
     if rule == "brown":
@@ -237,7 +262,9 @@ def classify(size: np.ndarray, bottom: float, color: np.ndarray, invalid_frac: f
             cost += 6.0
         if bottom + obs[2] < shape.get("min_top", -1.0):
             cost += 6.0
-        cost -= _color_score(shape.get("color"), color, invalid_frac)
+        geom_cost = cost
+        cost -= _color_score(shape.get("color"), color, invalid_frac,
+                             geom_cost if shape.get("color") == "clear" else None)
         scores[name] = -cost / temperature
     scores[UNKNOWN] = -UNKNOWN_COST / temperature
     top = max(scores.values())

@@ -1274,10 +1274,29 @@ class WorldSim:
             if category not in p.misnames and category in p.confusion and rng.random() < p.confusion_prob:
                 label = str(rng.choice(p.confusion[category]))
             seen.add(part)
-            dets.append({"category": label, "confidence": round(float(0.9 - 0.05 * rng_m / p.max_range), 3),
-                         "pose": {"p": noisy_p, "q": noisy_q}, "size": size, "range": rng_m,
-                         "color": "clear" if alpha < 0.5 else color, "camera": sensor["id"]})
+            det = {"category": label, "confidence": round(float(0.9 - 0.05 * rng_m / p.max_range), 3),
+                   "pose": {"p": noisy_p, "q": noisy_q}, "size": size, "range": rng_m,
+                   "color": "clear" if alpha < 0.5 else color, "camera": sensor["id"]}
+            holes = self._screw_holes(ent, links)
+            if holes:
+                det["screwHoles"] = holes
+            dets.append(det)
         return dets
+
+    @staticmethod
+    def _screw_holes(ent, links: list[str] | None) -> list[dict]:
+        """Screw-hole markers on the detected part, in that part's body frame (ideal perception)."""
+        wanted = set(links) if links else None
+        out = []
+        for link in ent.rigid.links:
+            if wanted is not None and link.id not in wanted:
+                continue
+            for aff in link.affordances:
+                value = aff.value
+                if isinstance(value, dict) and "screw-hole" in value:
+                    hole = value["screw-hole"]
+                    out.append({"id": str(hole["id"]), "p": [round(float(v), 4) for v in hole["p"][:3]]})
+        return out
 
     def _visible(self, obb, cam_inv: dict, cam_p: np.ndarray, half_h: float, half_v: float,
                  robot_base: int, target_bodies: set[int]) -> bool:

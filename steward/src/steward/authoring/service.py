@@ -350,6 +350,244 @@ def chores_spec() -> dict:
     }
 
 
+TOY_ASSEMBLY_TASK = (
+    "两张桌子上分别有一套拆开的玩具。左边桌子上是玩具飞机的零件：飞机身体、翅膀、起落架，以及四根螺丝和一把"
+    "电动螺丝刀；翅膀与飞机身体上各有两个螺丝孔用于把翅膀固定到机身上，飞机身体底部与起落架上各有两个螺丝孔"
+    "用于安装起落架。右边桌子上是拆散的汽车玩具：汽车身体、四个车轮和四根螺丝；每个车轮中央有一个螺丝孔，"
+    "汽车身体上有四个对应的螺丝孔。每张桌子靠近机器人的一边放着该套玩具的组装说明书，以及一张组装完成后的"
+    "参考图。组装规则：一次只装一个零件——先把该零件摆准螺丝孔，立刻用螺丝和电动螺丝刀拧紧固定，确认固定好"
+    "后再装下一个零件；不要先把所有零件都摆上再统一拧螺丝。请先按飞机桌的说明书和成品图组装玩具飞机，"
+    "再按汽车桌的说明书和成品图组装汽车玩具。"
+)
+
+# Square printed sheets (metres); MuJoCo cube-face textures must be square PNGs.
+ASSEMBLY_SHEET_M = (0.24, 0.24)
+
+
+def _sheet_fonts():
+    from PIL import ImageFont
+
+    title = body = ImageFont.load_default()
+    for path in (
+        "/System/Library/Fonts/PingFang.ttc",
+        "/System/Library/Fonts/Hiragino Sans GB.ttc",
+        "/System/Library/Fonts/STHeiti Light.ttc",
+        "/Library/Fonts/Arial Unicode.ttf",
+    ):
+        if not Path(path).exists():
+            continue
+        try:
+            return ImageFont.truetype(path, 36), ImageFont.truetype(path, 26)
+        except OSError:
+            continue
+    return title, body
+
+
+def _png_b64_image(image) -> str:
+    buf = io.BytesIO()
+    image.convert("RGB").save(buf, "PNG", optimize=True)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def _text_sheet(title: str, title_rgb: tuple[int, int, int], lines: list[str]) -> str:
+    """Square base64 PNG: a titled step list on a cream card."""
+    from PIL import Image, ImageDraw
+
+    side = 720
+    image = Image.new("RGB", (side, side), (248, 244, 232))
+    draw = ImageDraw.Draw(image)
+    title_font, body_font = _sheet_fonts()
+    draw.text((48, 48), title, fill=title_rgb, font=title_font)
+    y = 120
+    for text in lines:
+        draw.text((48, y), text, fill=(20, 20, 20), font=body_font)
+        y += 40
+    draw.rectangle((24, 24, side - 25, side - 25), outline=(90, 70, 40), width=5)
+    return _png_b64_image(image)
+
+
+def airplane_manual_texture() -> str:
+    """Airplane assembly steps for the plane-table instruction sheet."""
+    return _text_sheet("飞机组装说明书", (160, 40, 30), [
+        "规则：每装一个零件就拧紧，",
+        "      再装下一个。",
+        "1. 翅膀对准机身孔放下，",
+        "   立刻拧两颗螺丝固定。",
+        "2. 翻过来，起落架对准底孔",
+        "   放下，立刻拧螺丝固定。",
+    ])
+
+
+def car_manual_texture() -> str:
+    """Car assembly steps for the car-table instruction sheet."""
+    return _text_sheet("汽车组装说明书", (30, 70, 150), [
+        "规则：每装一个轮子就拧紧，",
+        "      再装下一个。",
+        "1. 一侧朝上：放一个轮子，",
+        "   拧紧；再放下一个，拧紧。",
+        "2. 翻到另一侧：同样逐个",
+        "   放轮子并立刻拧紧。",
+    ])
+
+
+def airplane_finished_texture() -> str:
+    """Reference picture of the assembled toy airplane (top-down schematic)."""
+    from PIL import Image, ImageDraw
+
+    side = 720
+    image = Image.new("RGB", (side, side), (235, 242, 248))
+    draw = ImageDraw.Draw(image)
+    title_font, body_font = _sheet_fonts()
+    draw.text((48, 36), "飞机 · 组装完成参考图", fill=(30, 40, 70), font=title_font)
+    cx, cy = side // 2, side // 2 + 40
+    # Fuselage along +x of the page (rightward).
+    draw.rounded_rectangle((cx - 160, cy - 28, cx + 160, cy + 28), radius=18, fill=(242, 198, 26))
+    draw.rectangle((cx - 40, cy - 140, cx + 40, cy + 140), fill=(210, 45, 45))  # wing across
+    draw.rectangle((cx - 50, cy + 40, cx + 10, cy + 70), fill=(150, 155, 160))  # landing gear under nose
+    draw.ellipse((cx - 55, cy + 62, cx - 35, cy + 82), fill=(60, 60, 65))
+    draw.ellipse((cx - 5, cy + 62, cx + 15, cy + 82), fill=(60, 60, 65))
+    draw.text((48, side - 80), "翅膀在上，起落架在机腹", fill=(50, 50, 50), font=body_font)
+    draw.rectangle((24, 24, side - 25, side - 25), outline=(90, 70, 40), width=5)
+    return _png_b64_image(image)
+
+
+def car_finished_texture() -> str:
+    """Reference picture of the assembled toy car (side schematic)."""
+    from PIL import Image, ImageDraw
+
+    side = 720
+    image = Image.new("RGB", (side, side), (235, 242, 248))
+    draw = ImageDraw.Draw(image)
+    title_font, body_font = _sheet_fonts()
+    draw.text((48, 36), "汽车 · 组装完成参考图", fill=(30, 40, 70), font=title_font)
+    cx, cy = side // 2, side // 2 + 30
+    draw.rounded_rectangle((cx - 180, cy - 50, cx + 180, cy + 40), radius=22, fill=(50, 110, 210))
+    draw.rounded_rectangle((cx - 40, cy - 110, cx + 100, cy - 40), radius=16, fill=(40, 90, 180))  # cabin
+    for x in (cx - 110, cx + 110):
+        draw.ellipse((x - 48, cy + 10, x + 48, cy + 106), fill=(25, 25, 28), outline=(90, 90, 95), width=4)
+        draw.ellipse((x - 18, cy + 40, x + 18, cy + 76), fill=(150, 155, 160))
+    draw.text((48, side - 80), "车身两侧各两个车轮，螺丝固定在轮心", fill=(50, 50, 50), font=body_font)
+    draw.rectangle((24, 24, side - 25, side - 25), outline=(90, 70, 40), width=5)
+    return _png_b64_image(image)
+
+
+def toy_assembly_spec() -> dict:
+    """Two tables of disassembled toys. Each table carries that kit's instruction sheet and a
+    finished-assembly reference picture near the robot, with the parts behind them."""
+    plane_screws = [{"id": f"w:plane-screw-{i}", "asset": "toy-screw", "on": "w:table-plane",
+                     "offset": [0.40, -0.05 + 0.08 * i]} for i in range(4)]
+    car_screws = [{"id": f"w:car-screw-{i}", "asset": "toy-screw", "on": "w:table-car",
+                  "offset": [0.38, -0.05 + 0.08 * i]} for i in range(4)]
+    return {
+        "name": "toy-assembly",
+        "entities": [
+            {"id": "w:room", "asset": "kitchen-room", "at": {"x": 0.0, "y": 0.0}},
+            {"id": "w:table-plane", "asset": "dining-table", "at": {"x": -1.35, "y": -0.7}},
+            {"id": "w:table-car", "asset": "dining-table", "at": {"x": 1.35, "y": -0.7}},
+            # Near-side (−y) faces the robot: manuals and finished pictures for each kit.
+            {"id": "w:plane-manual", "asset": "airplane-manual", "on": "w:table-plane",
+             "offset": [-0.18, -0.28]},
+            {"id": "w:plane-picture", "asset": "airplane-finished", "on": "w:table-plane",
+             "offset": [0.18, -0.28]},
+            {"id": "w:plane-fuselage", "asset": "airplane-fuselage", "on": "w:table-plane", "offset": [-0.40, 0.12]},
+            {"id": "w:plane-wing", "asset": "airplane-wing", "on": "w:table-plane", "offset": [-0.12, 0.22], "yaw": 0.4},
+            {"id": "w:plane-gear", "asset": "airplane-landing-gear", "on": "w:table-plane", "offset": [-0.38, 0.28]},
+            {"id": "w:screwdriver", "asset": "electric-screwdriver", "on": "w:table-plane", "offset": [0.10, 0.20],
+             "yaw": -0.6},
+            *plane_screws,
+            {"id": "w:car-manual", "asset": "car-manual", "on": "w:table-car", "offset": [-0.18, -0.28]},
+            {"id": "w:car-picture", "asset": "car-finished", "on": "w:table-car", "offset": [0.18, -0.28]},
+            {"id": "w:car-body", "asset": "car-body", "on": "w:table-car", "offset": [-0.32, 0.15]},
+            {"id": "w:car-wheel-fl", "asset": "car-wheel", "on": "w:table-car", "offset": [0.05, 0.28]},
+            {"id": "w:car-wheel-fr", "asset": "car-wheel", "on": "w:table-car", "offset": [0.20, 0.24]},
+            {"id": "w:car-wheel-rl", "asset": "car-wheel", "on": "w:table-car", "offset": [0.05, 0.08]},
+            {"id": "w:car-wheel-rr", "asset": "car-wheel", "on": "w:table-car", "offset": [0.22, 0.05]},
+            *car_screws,
+            {"id": "w:robot-1", "asset": "steward-bot", "at": {"x": 0.0, "y": -1.85, "yaw": math.pi / 2}},
+        ],
+        "regions": [{"id": "workshop", "label": "workshop", "polygon": [[-3, -2.5], [3, -2.5], [3, 2.5], [-3, 2.5]]}],
+    }
+
+
+def toy_assembly_goal() -> dict:
+    """Assembled airplane and car as relative poses of the structural parts (screws are left to the task)."""
+    return {
+        "kind": "relative-poses",
+        "upright": True,
+        "tolerance": {"positionM": 0.04, "yawDeg": 20.0},
+        "entities": [
+            "w:plane-fuselage", "w:plane-wing", "w:plane-gear",
+            "w:car-body", "w:car-wheel-fl", "w:car-wheel-fr", "w:car-wheel-rl", "w:car-wheel-rr",
+        ],
+        "constraints": [
+            # Wing centred on the fuselage; gear under the fuselage.
+            {"a": "w:plane-fuselage", "b": "w:plane-wing", "offset": [0.02, 0.0]},
+            {"a": "w:plane-fuselage", "b": "w:plane-gear", "offset": [0.0, 0.0]},
+            # Wheels at the four undercarriage mounts of the car body.
+            {"a": "w:car-body", "b": "w:car-wheel-fl", "offset": [0.05, 0.06]},
+            {"a": "w:car-body", "b": "w:car-wheel-fr", "offset": [0.05, -0.06]},
+            {"a": "w:car-body", "b": "w:car-wheel-rl", "offset": [-0.05, 0.06]},
+            {"a": "w:car-body", "b": "w:car-wheel-rr", "offset": [-0.05, -0.06]},
+        ],
+    }
+
+
+TOY_ASSEMBLY_ASSETS = {
+    "kitchen-room": ("building", {"width": 6.0, "depth": 5.0}),
+    "dining-table": ("dining_table", {}),
+    "steward-bot": ("steward_bot", {}),
+    "airplane-fuselage": ("airplane_fuselage", {}),
+    "airplane-wing": ("airplane_wing", {}),
+    "airplane-landing-gear": ("airplane_landing_gear", {}),
+    "car-body": ("car_body", {}),
+    "car-wheel": ("car_wheel", {}),
+    "toy-screw": ("toy_screw", {}),
+    "electric-screwdriver": ("electric_screwdriver", {}),
+}
+
+
+def _publish_sheet(service: AuthoringService, name: str, texture: str, category: str) -> dict:
+    created = service.create_asset(generator="printed_board", params={
+        "width": ASSEMBLY_SHEET_M[0], "depth": ASSEMBLY_SHEET_M[1], "thickness": 0.004,
+        "texture": texture, "mass": 0.04, "category": category,
+    })
+    if not created["validation"]["ok"]:
+        raise AuthoringError(f"generated asset {name} failed validation: {created['validation']['errors']}")
+    return service.publish_asset(name, created["template"],
+                                 meta={"generator": "printed_board",
+                                       "params": {"width": ASSEMBLY_SHEET_M[0], "depth": ASSEMBLY_SHEET_M[1],
+                                                  "category": category}})
+
+
+def build_toy_assembly(service: AuthoringService) -> dict:
+    """Publish the toy-assembly parts and save the ``toy-assembly`` scenario."""
+    published = {}
+    for name, (generator, params) in TOY_ASSEMBLY_ASSETS.items():
+        created = service.create_asset(generator=generator, params=params)
+        if not created["validation"]["ok"]:
+            raise AuthoringError(f"generated asset {name} failed validation: {created['validation']['errors']}")
+        published[name] = service.publish_asset(name, created["template"],
+                                                meta={"generator": generator, "params": params})
+    for name, texture, category in (
+        ("airplane-manual", airplane_manual_texture(), "manual"),
+        ("airplane-finished", airplane_finished_texture(), "picture"),
+        ("car-manual", car_manual_texture(), "manual"),
+        ("car-finished", car_finished_texture(), "picture"),
+    ):
+        published[name] = _publish_sheet(service, name, texture, category)
+    scene = service.compose_scene(toy_assembly_spec())
+    scenario = service.save_scenario({
+        "name": "toy-assembly",
+        "scene": "toy-assembly",
+        "robots": ["w:robot-1"],
+        "task": TOY_ASSEMBLY_TASK,
+        "goal": toy_assembly_goal(),
+        "phase": "phase0",
+        "view": {"lookat": [0.0, -0.5, 0.7], "distance": 4.2, "azimuth": 90.0, "elevation": -35.0},
+    })
+    return {"assets": {k: v["version"][:12] for k, v in published.items()}, "scene": scene, "scenario": scenario}
+
+
 KITCHEN_ASSETS = {
     "kitchen-room": ("building", {"width": 6.0, "depth": 5.0}),
     "counter": ("counter", {}),
@@ -778,6 +1016,7 @@ BUILTIN_SCENARIOS: dict[str, dict] = {
     "phase0-kitchen": {"build": build_default_kitchen, "spec": kitchen_spec, "task": KITCHEN_TASK},
     "phase0-shuttle": {"build": build_default_kitchen, "spec": shuttle_spec, "task": SHUTTLE_TASK},
     "phase0-chores": {"build": build_default_kitchen, "spec": chores_spec, "task": CHORES_TASK},
+    "toy-assembly": {"build": build_toy_assembly, "spec": toy_assembly_spec, "task": TOY_ASSEMBLY_TASK},
     "cobot-table": {"build": build_cobot_workstation, "spec": cobot_spec, "task": COBOT_TASK,
                     "mission": "bowl-on-plate"},
     "cobot-kitchen": {"build": build_cobot_kitchen, "spec": cobot_kitchen_spec, "task": COBOT_KITCHEN_TASK,

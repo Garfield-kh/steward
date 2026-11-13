@@ -14,6 +14,7 @@ $consoleUrl = "$wcaUrl/console"
 $scenarios = [ordered]@{
     'puzzle-dog' = '拼图·狗'; 'puzzle-cat' = '拼图·猫'; 'puzzle-greatwall' = '拼图·长城'
     'phase0-chores' = '家务整理'; 'phase0-shuttle' = '循环搬运'; 'phase0-kitchen' = '杯子放到桌上'
+    'toy-assembly' = '玩具组装'
 }
 New-Item -ItemType Directory -Force -Path $logDir | Out-Null
 

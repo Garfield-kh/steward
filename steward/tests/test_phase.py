@@ -344,6 +344,38 @@ def test_what_the_robot_holds_keeps_its_identity_while_carried():
     assert mug.category == "mug" and "table" not in mug.category_counts
 
 
+def test_a_swelling_neighbour_view_does_not_vote_unknown_onto_stemware():
+    """Rejected swollen fusions must not outvote an established wine glass into unknown."""
+    from steward.assets.generators import steward_bot
+    from steward.ego.estimator import EgoEstimator, Track, _voxelize
+    from steward.ego.perception import Segment
+
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    rng = np.random.default_rng(1)
+    glass_cloud = rng.uniform([0.45, -1.16, 0.75], [0.53, -1.08, 0.94], (120, 3))
+    glass = Track(
+        id="e:w", category_counts={"wine_glass": 8.0}, pos=np.array([0.49, -1.12, 0.85]),
+        var=np.full(3, 1e-4), yaw=0.0, yaw_var=1e-3, size=np.array([0.08, 0.08, 0.19]),
+        observations=6, first_seen=0.0, last_seen=1.0, existence=1.0,
+        voxels=_voxelize(glass_cloud), mean_rgb=np.array([0.76, 0.68, 0.55]), mean_invalid=0.05,
+    )
+    before = dict(glass.category_counts)
+    est.tracks[glass.id] = glass
+    # A much larger neighbour cloud that would swell the established small footprint.
+    neighbour = rng.uniform([0.2, -1.4, 0.7], [1.0, -0.8, 1.0], (200, 3))
+    bad = Segment(points=neighbour, color=np.array([0.5, 0.45, 0.4]), pixels=200, invalid_frac=0.0,
+                  border=False, range=1.2)
+    est._fuse_cloud(
+        glass,
+        {"seg": bad, "centre": neighbour.mean(axis=0), "size": np.array([0.8, 0.6, 0.3]),
+         "yaw": 0.0, "probs": {"unknown": 1.0}, "footprint": 0.8},
+        np.array([0.0, 0.0, 1.4]),
+    )
+    assert glass.category == "wine_glass", glass.category_counts
+    assert glass.category_counts.get("unknown", 0.0) == before.get("unknown", 0.0)
+    assert glass.category_counts["wine_glass"] == before["wine_glass"]
+
+
 def _remembered(oid: str, category: str, pos: list[float], size: list[float]):
     from steward.ego.estimator import Track
 

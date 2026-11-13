@@ -7,11 +7,13 @@ port.
 
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 
 from steward.math3d import quat_rotate, yaw_from_quat
-from steward.world.thinking import thinking_state
+from steward.net import HttpError
+from steward.world.thinking import thinking_state, thinking_text
 
 CONSOLE_HTML = Path(__file__).with_name("console.html")
 
@@ -93,13 +95,37 @@ def console_state(host) -> dict:
     }
 
 
-def _thinking(host) -> dict[str, dict]:
-    """The robot agent's live thinking, from its Harness home when the console knows it."""
+def _thinking_homes(host) -> dict[str, str]:
+    """Harness homes visible to this console's thinking panel."""
     config = host.chat.config if host.chat is not None else None
     home = getattr(config, "robot_home", None)
     if home is None:
         return {}
-    return thinking_state({"w:robot-1": str(home)}, exclude=host.stale_sessions)
+    return {"w:robot-1": str(home)}
+
+
+def _thinking(host) -> dict[str, dict]:
+    """The robot agent's live thinking, from its Harness home when the console knows it."""
+    return thinking_state(_thinking_homes(host), exclude=host.stale_sessions)
+
+
+def console_thinking_text(host, robot: str, entry: str) -> dict:
+    """Read full reasoning for an opaque preview id; reset sessions remain inaccessible.
+
+    :param host: World host owning the configured Harness home and episode exclusions.
+    :param robot: robot id from the thinking preview.
+    :param entry: entry id from the thinking preview.
+    :returns: entry id and complete text, without changing the episode or session.
+    :raises HttpError: 400 for missing ids, 404 for unavailable entries, 503 for read failures.
+    """
+    if not robot or not entry:
+        raise HttpError(400, "需要指定机器人和思考记录")
+    try:
+        return thinking_text(_thinking_homes(host), robot, entry, exclude=host.stale_sessions)
+    except KeyError as exc:
+        raise HttpError(404, "这条思考记录已不可用，请刷新后重试") from exc
+    except (OSError, RuntimeError, TimeoutError, json.JSONDecodeError) as exc:
+        raise HttpError(503, "无法读取思考全文，请重试") from exc
 
 
 def _ego_view(ego: dict) -> dict:

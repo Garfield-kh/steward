@@ -1803,15 +1803,20 @@ class SkillExecutor:
         """Drive in with the held object, lower it to just above the floor, release and back away.
 
         The arm keeps its carrying reach, or extends to the plan's ``reach`` where the object would
-        otherwise land on the base: retracting it would pull the object over the base."""
+        otherwise land on the base: retracting it would pull the object over the base. ``wristRoll``
+        tips the object (for example π/2 onto its side) before the gripper opens."""
         self._dock(job, plan, retract=False)
         if "reach" in plan:
             self._set_joint("reach", plan["reach"])
+        if "wristRoll" in plan:
+            self._ramp_joint("wrist_roll", plan["wristRoll"], self.config.wrist_turn_s)
         self._set_joint("lift", plan["lift"])
         self._command({"gripper": "open"})
         self._released(plan["object"], plan["floor"])
         self._wait(self.config.release_wait_s)
         job.log.append(f"released {plan['object']} on the floor at ({plan['floor'][0]:.2f}, {plan['floor'][1]:.2f})")
+        if "wristRoll" in plan:
+            self._set_joint("wrist_roll", 0.0)
         self._backoff(plan)
         self._set_joint("lift", self.config.stow_lift)
         job.message = f"placed {plan['object']} on the floor"

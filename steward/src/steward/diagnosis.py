@@ -19,7 +19,11 @@ COLOR_ZH = {"red": "红色", "green": "绿色", "blue": "蓝色", "black": "黑�
 CATEGORY_ZH = {"table": "餐桌", "counter": "操作台", "cabinet": "柜子", "sideboard": "餐边柜", "cup": "杯子", "bowl": "碗",
                "plate": "盘子", "drawer": "抽屉", "wine_glass": "高脚杯", "mug": "咖啡杯", "teddy_bear": "玩具熊",
                "scissors": "剪刀", "chair": "椅子", "wall": "墙", "unknown": "未知物体", "toy_airplane": "玩具飞机",
-               "pistol": "手枪", "pill_bottle": "药瓶", "perfume_bottle": "香水瓶", "plant": "绿植"}
+               "airplane_fuselage": "飞机身体", "airplane_wing": "飞机翅膀", "airplane_propeller": "螺旋桨",
+               "airplane_landing_gear": "起落架", "car_body": "汽车身体", "car_wheel": "车轮",
+               "toy_screw": "螺丝", "electric_screwdriver": "电动螺丝刀", "manual": "说明书",
+               "picture": "参考图", "pistol": "手枪", "pill_bottle": "药瓶", "perfume_bottle": "香水瓶",
+               "plant": "绿植"}
 SKILL_ZH = {"pick": "抓取", "place": "放置", "navigate": "导航", "open": "打开", "close": "关上"}
 
 

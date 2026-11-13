@@ -14,6 +14,8 @@ from __future__ import annotations
 import io
 import json
 import math
+from collections.abc import Callable
+from concurrent.futures import CancelledError
 from dataclasses import dataclass
 
 import numpy as np
@@ -717,43 +719,102 @@ def _grid(face) -> np.ndarray:
     return np.array([[c if c is not None else [np.nan] * 3 for c in row] for row in face], float)
 
 
-def match_face(face: list[list], reference: list[list], top: int = 3) -> dict:
+def _face_score_map(turned: np.ndarray, reference: np.ndarray, reference_fft: dict) -> np.ndarray:
+    """Masked, per-channel normalized correlations at every valid translation, using FFT sums.
+
+    The six correlations give overlap counts, both sums and squared sums, and the cross product.
+    Each window therefore uses exactly its jointly visible cells, including partial RGB channels.
+    FFT intermediates scale with image area rather than area times the piece's pixel count.
+    ``reference_fft`` is owned by one match call and reused only for equal piece dimensions.
+    """
+    h, w = turned.shape[:2]
+    height, width = reference.shape[:2]
+    shape = (height + h - 1, width + w - 1)
+
+    def moments(image: np.ndarray) -> np.ndarray:
+        finite = np.isfinite(image)
+        counts = finite.sum(axis=(0, 1))
+        means = np.divide(np.where(finite, image, 0).sum(axis=(0, 1)), counts,
+                          out=np.zeros(3), where=counts > 0)
+        values = np.where(finite, image - means, 0)
+        return np.moveaxis(np.stack((finite, values, values * values)).astype(float), -1, 1)
+
+    if (h, w) not in reference_fft:
+        reference_fft[h, w] = np.fft.rfft2(moments(reference), s=shape, axes=(-2, -1))
+    ref = reference_fft[h, w]
+    obj_moments = moments(turned)[..., ::-1, ::-1]
+    out_shape = (height - h + 1, width - w + 1)
+    cross, norm_a, norm_b, count_total = (np.zeros(out_shape) for _ in range(4))
+
+    def variance(square: np.ndarray, total: np.ndarray, divisor: np.ndarray) -> np.ndarray:
+        correction = total * total / divisor
+        result = square - correction
+        # Exact constant windows have zero variance; FFT roundoff must not create a match.
+        tolerance = 64 * np.finfo(float).eps * np.maximum(1, np.maximum(np.abs(square), correction))
+        return np.where(result > tolerance, result, 0)
+
+    for channel in range(3):
+        obj = np.fft.rfft2(obj_moments[:, channel], s=shape, axes=(-2, -1))
+        sums = np.empty((6, *out_shape))
+        for index, (a, b) in enumerate(((0, 0), (1, 0), (0, 1), (2, 0), (0, 2), (1, 1))):
+            sums[index] = np.fft.irfft2(obj[a] * ref[b, channel], s=shape)[h - 1:height, w - 1:width]
+        count = np.maximum(np.rint(sums[0]), 0)
+        count_total += count
+        divisor = np.maximum(count, 1)
+        cross += sums[5] - sums[1] * sums[2] / divisor
+        norm_a += variance(sums[3], sums[1], divisor)
+        norm_b += variance(sums[4], sums[2], divisor)
+    norm = np.sqrt(norm_a * norm_b)
+    scores = np.divide(cross, norm, out=np.zeros_like(cross), where=norm > 1e-9)
+    return np.where(count_total >= 0.5 * turned.size, np.clip(scores, -1, 1), -np.inf)
+
+
+def match_face(face: list[list], reference: list[list], top: int = 3,
+               cancelled: Callable[[], bool] | None = None) -> dict:
     """Where a face appears on a reference face sampled at the same cell size, and turned how.
 
     Each grid is in its object's frame (column = +x, row 0 = +y), as JSON rows (cells ``[r, g, b]``
     or ``None``) or as an array with NaN where unseen.
     The face is turned by k quarter turns counter-clockwise (as :func:`world_up_face` turns) and
-    slid over the reference cell by cell; each placement scores the normalized correlation of the
-    colours both grids hold there.
+    compared at every translation using FFT correlations of masked colour moments. Each placement
+    scores normalized correlation of the colours both grids hold there, centred per channel.
 
     :param face: grid of the object's face.
     :param reference: grid of the reference face, larger than ``face``.
     :param top: placements to return, best first; each sits apart from the better ones by at least
         half the face.
+    :param cancelled: optional cancellation check before each rotation and candidate selection;
+        absent means the calculation runs to completion. Cancellation raises ``CancelledError``.
     :returns: ``{matches: [{row, col, turns, score}], spread}`` where ``row`` and ``col`` are the
         reference cell under the turned face's centre (fractional), ``turns`` is k and ``spread``
         is the face's colour standard deviation (near 0: a plain face)."""
     obj, ref = _grid(face), _grid(reference)
     spread = float(np.nanstd(obj)) if np.isfinite(obj).any() else 0.0
-    candidates = []
+    score_maps = []
+    reference_fft: dict = {}
     for k in range(4):
+        if cancelled is not None and cancelled():
+            raise CancelledError("face matching cancelled")
         turned = np.rot90(obj, k)  # counter-clockwise seen from above, row 0 at +y
         h, w = turned.shape[:2]
-        for i in range(ref.shape[0] - h + 1):
-            for j in range(ref.shape[1] - w + 1):
-                window = ref[i:i + h, j:j + w]
-                both = np.isfinite(turned) & np.isfinite(window)
-                if both.sum() < 0.5 * turned.size:
-                    continue
-                # Each channel against its own mean: a picture's overall tint matches everywhere.
-                a = np.where(both, turned - np.nanmean(np.where(both, turned, np.nan), axis=(0, 1)), 0.0)
-                b = np.where(both, window - np.nanmean(np.where(both, window, np.nan), axis=(0, 1)), 0.0)
-                norm = math.sqrt(float((a * a).sum() * (b * b).sum()))
-                score = float((a * b).sum() / norm) if norm > 1e-9 else 0.0
-                candidates.append((score, i + h / 2, j + w / 2, k, max(h, w)))
-    candidates.sort(key=lambda c: -c[0])
+        if h > ref.shape[0] or w > ref.shape[1]:
+            continue
+        score_maps.append((_face_score_map(turned, ref, reference_fft), h, w, k))
+    reference_fft.clear()
+    if cancelled is not None and cancelled():
+        raise CancelledError("face matching cancelled")
+    if not score_maps:
+        return {"matches": [], "spread": round(spread, 1)}
+    scores = np.concatenate([score.ravel() for score, _, _, _ in score_maps])
+    ends = np.cumsum([score.size for score, _, _, _ in score_maps])
     chosen: list[tuple] = []
-    for cand in candidates:
+    for index in np.argsort(-scores, kind="stable"):
+        if not np.isfinite(scores[index]):
+            break
+        which = int(np.searchsorted(ends, index, side="right"))
+        score_map, h, w, turn = score_maps[which]
+        row, col = divmod(int(index - (ends[which - 1] if which else 0)), score_map.shape[1])
+        cand = (float(scores[index]), row + h / 2, col + w / 2, turn, max(h, w))
         if all(math.hypot(cand[1] - c[1], cand[2] - c[2]) >= c[4] / 2 for c in chosen):
             chosen.append(cand)
         if len(chosen) == top:

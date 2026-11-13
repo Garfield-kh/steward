@@ -128,6 +128,56 @@ def test_place_rejects_flip_together_with_roll():
     assert "cannot flip and roll" in "; ".join(receipt["issues"])
 
 
+def test_tabletop_flip_fits_the_slide_robots_declared_wrist_limits():
+    model, scene = _scene()
+    receipt = Esim(model).predict(scene, "place", {"on": "e:4", "offset": [0.0, 0.1], "flip": True})
+    assert receipt["feasible"], receipt["issues"]
+    assert receipt["plan"]["wristRoll"] == pytest.approx(math.pi)
+
+
+@pytest.mark.parametrize("at", [[0.0, 0.6], [0.6, 1.0]])
+def test_floor_flip_plans_a_half_turn_before_release(at):
+    model, scene = _scene()
+    receipt = Esim(model).predict(scene, "place", {"at": at, "flip": True})
+    assert receipt["feasible"], receipt["issues"]
+    assert receipt["plan"]["wristRoll"] == pytest.approx(math.pi)
+
+
+def test_floor_flip_respects_an_explicitly_narrower_wrist_limit():
+    from steward.ego.esim import EsimConfig
+
+    model, scene = _scene()
+    receipt = Esim(model, EsimConfig(wrist_roll_max=2.5)).predict(scene, "place", {"at": [0.6, 1.0], "flip": True})
+    assert not receipt["feasible"]
+
+
+def test_slide_arm_does_not_plan_roll_beyond_the_model_joint_stop():
+    from steward.ego.esim import EsimConfig
+
+    model, scene = _scene()
+    joint = next(j for j in model["body"]["joints"] if j["id"] == "wrist_roll")
+    joint["limits"]["value"] = {"lo": -2.0, "hi": 2.0}
+    esim = Esim(model, EsimConfig(wrist_roll_max=math.pi))
+    assert esim.arm.geometry.wrist_roll_max == 2.0
+    receipt = esim.predict(scene, "place", {"at": [0.6, 1.0], "flip": True})
+    assert not receipt["feasible"]
+
+
+def test_floor_flip_rejects_a_blocked_path_even_if_endpoints_are_reachable():
+    model, scene = _scene()
+    esim = Esim(model)
+
+    class BlockedPath(OrientationArm):
+        def reachable_path(self, targets, *, start_joints=None):
+            return False
+
+    esim.arm = BlockedPath(esim.arm.geometry)
+    assert esim.arm.reachable(0.01, 0.1, wrist_roll=math.pi)
+    receipt = esim.predict(scene, "place", {"at": [0.6, 1.0], "flip": True})
+    assert not receipt["feasible"]
+    assert "current arm posture" in "; ".join(receipt["issues"])
+
+
 def test_pouring_preserves_held_yaw_while_sampling_roll():
     model, scene = _scene(0.3)
     scene.entity("e:3").rigid.links[0].affordances.append(exact("pourable"))

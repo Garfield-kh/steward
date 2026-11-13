@@ -2,6 +2,8 @@
 
 [English](README.md) | 中文
 
+`steward-bot` 的 `place` 在设置 `flip: true` 时，会先翻转持物，再释放到支撑面或地面。默认腕部转角上限允许半圈翻转，并与机器人模型声明的关节限位取交集；显式配置的更小上限仍然有效。地面旋转会从实测关节状态检查伸臂、转腕及下降路径；不可达时在执行前拒绝，不会忽略 `flip` 后仍返回放置成功。
+
 机器人 Ego Harness 可选用 `rgbd_video_gen` 和 `NovelAnything` 两个 skill 调用远程新视角生成服务。`scripts/setup-dsh-profiles.sh`（Linux/macOS）和 `scripts/setup-dsh-profiles.ps1`（Windows）会在机器人 profile 中安装两者；Windows 上也可用 `scripts/setup-rgbd-video-gen.ps1`、`scripts/setup-novelanything.ps1` 加到已有 profile。使用方法见 [rgbd_video_gen](dsh/packages/dsh-bundle-rgbd-video-gen/README.zh.md) 和 [NovelAnything](dsh/packages/dsh-bundle-novelanything/README.zh.md)。
 
 模型证据沿用原有 `head_camera`；连续录制按仿真时钟采样并保存机器人里程计和编码器，手爪目标由机器人自身运动学计算。快照工具使用现有头部／广角相机各自的标定，不改变两者的布局、视场或感知分工。此次集成不包含 SLARM 或新增三目相机。
@@ -11,6 +13,10 @@
 Steward 是基于 DeepSeek Harness 的具身智能机器人系统。设计见仓库根目录的 [steward.md](../steward.md)，当前实现进度与运行命令见其中的「13. Implementation Progress」；Phase 1 感知如何从 RGB-D 得到几何与类别、以及泛化路线见 [13.7](../steward.md#137-phase-1-感知方法与泛化)。
 
 ## 快速开始
+
+图案匹配在一个已记录的世界时刻复制机器人观测，再释放输入调度锁和世界时钟暂停，随后计算相关性。计算期间状态查询可以继续；关闭 HTTP 连接会在拼片或四分之一转之间取消计算，观测快照的获取仍会完成。结果保留快照时刻及当时的参考物姿态，物体移动后应重新观察。`/ego/inputs` 记录快照获取，包括之后被取消的请求，不是计算完成日志。
+
+诊断运行中 Ego API 的拼图匹配：先摊开拼图片，让机器人观察拼图片和盒盖，停止其他模型和工具请求，然后在仓库根目录运行 `python3 steward/scripts/diagnose_match.py --api http://127.0.0.1:7420 --output /tmp/match-diagnosis.json`。脚本只用 Python 标准库，自动发现 `puzzle_piece` 和唯一的 `lid`，测量三次状态查询基线，再分别测试 15 秒匹配超时和 2 秒后主动断开。`--px 32` 提高匹配分辨率；`--reference ID` 和 `--entities ID ...` 可覆盖自动发现。脚本不移动机器人。JSON 保存响应、并发及断开后的状态查询耗时和输入应用计数；恢复失败、断开后无法确认计算已停止或匹配返回无有效候选时退出码为 2，并停止后续匹配。未观察到问题不代表已修复，HTTP 证据也不能证明 CPU 持续计算。API 地址必须是没有路径前缀的直接 HTTP 地址；每个恢复查询最多等待 `--recovery-timeout` 秒（默认 120），脚本总耗时可能超过该值。
 
 ```sh
 uv sync

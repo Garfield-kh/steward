@@ -19,6 +19,8 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable
+from concurrent.futures import CancelledError
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -43,6 +45,20 @@ from steward.math3d import matrix_from_quat, pose_compose, pose_inverse, quat_ro
 from steward.net import HttpError, call
 from steward.scene.schema import SceneState
 from steward.viewloop import ViewLoop
+
+
+@dataclass(frozen=True)
+class FaceMatchSnapshot:
+    """Copied robot observations for pure matching after the input/world-clock hold is released."""
+
+    reference: str
+    rgb: np.ndarray
+    size: np.ndarray
+    yaw: float
+    faces: dict[str, tuple | str]
+    entities: list[str]
+    px: int
+    stamp: float
 
 
 @dataclass
@@ -1303,6 +1319,17 @@ class EgoRuntime:
             identical), or ``entity`` and ``error`` when its face is not known well enough.
         :raises KeyError: unknown object; :raises ValueError: ``px`` out of range or the reference
             face not known well enough."""
+        return self.compute_face_match(self.prepare_face_match(entities, reference, px))
+
+    def prepare_face_match(self, entities: list[str], reference: str, px: int = 24) -> FaceMatchSnapshot:
+        """Refresh and copy observed faces at one input instant, without doing correlation.
+
+        :param entities: nonempty Ego IDs to compare.
+        :param reference: Ego ID with the reference print.
+        :param px: cells across a piece's shorter side, 4 to 32.
+        :returns: independent pixel/pose copies; later perception and motion cannot change them.
+        :raises KeyError: unknown ID; :raises ValueError: invalid input or insufficient reference.
+        """
         if not isinstance(entities, list) or not entities or not all(isinstance(e, str) for e in entities):
             raise ValueError("entities must be a non-empty list of object ids")
         if not 4 <= px <= 32:
@@ -1338,9 +1365,24 @@ class EgoRuntime:
                 else:
                     faces[eid] = (known.rgb.copy(), track.size.copy(), round(est.stamp - known.stamp, 1),
                                   known.spread, known.interior_spread)
+        return FaceMatchSnapshot(reference, ref_rgb, ref_size, ref_yaw, faces, list(entities), px, frame["header"]["stamp"])
+
+    @staticmethod
+    def compute_face_match(snapshot: FaceMatchSnapshot, cancelled: Callable[[], bool] | None = None) -> dict:
+        """Correlate frozen observations without holding input, estimator or world-clock locks.
+
+        :param snapshot: copied observations returned by :meth:`prepare_face_match`.
+        :param cancelled: peer-disconnect check, or None to run to completion (including replay).
+        :returns: matches in the reference pose at ``snapshot.stamp``, not its later pose.
+        :raises CancelledError: cancellation observed between pieces/rotations; no partial result.
+        """
+        reference, ref_rgb, ref_size, ref_yaw = snapshot.reference, snapshot.rgb, snapshot.size, snapshot.yaw
+        px = snapshot.px
         results = []
-        for eid in entities:
-            face = faces[eid]
+        for eid in snapshot.entities:
+            face = snapshot.faces[eid]
+            if cancelled is not None and cancelled():
+                raise CancelledError("face matching cancelled")
             if isinstance(face, str):
                 results.append({"entity": eid, "error": face})
                 continue
@@ -1355,7 +1397,7 @@ class EgoRuntime:
                 results.append({"entity": eid, "error": f"{reference} spans more than {MATCH_REFERENCE_CELLS_MAX} "
                                                         f"cells of {cell:.3f} m; use a smaller px"})
                 continue
-            found = match_face(resample_face(rgb, ox, oy), resample_face(ref_rgb, rx, ry))
+            found = match_face(resample_face(rgb, ox, oy), resample_face(ref_rgb, rx, ry), cancelled=cancelled)
             matches = [{"offsetM": [round(float((m["col"] - rx / 2) * ref_size[0] / rx), 3),
                                     round(float((ry / 2 - m["row"]) * ref_size[1] / ry), 3)],
                         "turnDeg": 90 * m["turns"],
@@ -1366,7 +1408,7 @@ class EgoRuntime:
                             "faceCoverage": round(float(np.isfinite(rgb[..., 0]).mean()), 2), "seenAgoS": ago,
                             "matches": matches})
         return {"reference": reference, "referenceCoverage": round(float(np.isfinite(ref_rgb[..., 0]).mean()), 2),
-                "results": results, "stamp": frame["header"]["stamp"]}
+                "results": results, "stamp": snapshot.stamp}
 
     def observe(self) -> dict:
         frame = self.link.sensors()

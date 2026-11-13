@@ -114,7 +114,7 @@ class EsimConfig:
     graspable_max_m: float = 0.35  # a raised thing this small is tableware whatever the classifier says
     miscategorised_risk: float = 0.15
     wrist_yaw_max: float = 3.1
-    wrist_roll_max: float = 2.5
+    wrist_roll_max: float = math.pi  # a half turn for flip; slide_arm also enforces the model's joint stops
     pour_roll: float = 1.9
     # Tipped less, the contents stay in the container: its walls hold them until it is past upright
     # (measured with the puzzle box: at 1.5 rad nothing came out, at 1.75 everything did).
@@ -148,7 +148,8 @@ def _wrap(a: float) -> float:
 class Esim:
     def __init__(self, robot_model: dict, config: EsimConfig | None = None, arm: Arm | None = None):
         """``arm`` is the body's planar arm (:mod:`steward.ego.arm`); without one the model is the
-        mobile kitchen robot's and its arm limits are ``config``'s reach, lift and wrist fields."""
+        mobile kitchen robot's. Reach and lift use ``config``; wrist caps also respect the model's
+        declared joint stops."""
         self.config = config or EsimConfig()
         tree = robot_model["body"]
         base = next(link for link in tree["links"] if link["id"] == "base")
@@ -1504,13 +1505,28 @@ class Esim:
         """Put the held object down on the floor with its centre at ``at``: stand behind the spot
         facing it, drive straight in from a pre-pose, lower the object to just above the floor and
         release. ``yaw`` (radians) sets the object's final heading; otherwise the robot tries
-        several headings, starting with the direction it is coming from."""
+        several headings, starting with the direction it is coming from. ``flip`` requests a
+        half roll before release; ``roll`` requests its explicit angle. Rotation and lowering
+        must form a reachable path from the current encoders, otherwise prediction fails."""
         cfg = self.config
         try:
             tx, ty = (float(v) for v in params["at"][:2])
         except (TypeError, ValueError) as exc:
             raise PredictionError(f"at must be [x, y] in metres: {exc}") from None
         rel = self._held_relative(es)
+        carrying = rel
+        flip = bool(params.get("flip"))
+        if flip:
+            # A half roll reflects an off-centre grasp about the current wrist's forward axis.
+            # Dock for the resulting centre and heading, while navigation still carries the old pose.
+            lx, ly, dyaw, hx, hy = rel
+            joints = self._arm_joints(es)
+            angle = joints.get("wrist_yaw", 0.0)
+            tool_x = self.tool_offset + joints["reach"]
+            ox, oy = lx - tool_x, ly - self.lateral
+            c, s = math.cos(2 * angle), math.sin(2 * angle)
+            rel = (tool_x + c * ox + s * oy, self.lateral + s * ox - c * oy,
+                   2 * angle - dyaw, hx, hy)
         lx, ly, dyaw, _, _ = rel
         rx, ry, ryaw = self._robot_xy_yaw(es)
         if "yaw" in params:
@@ -1522,7 +1538,7 @@ class Esim:
         _, held_bottom, _ = entity_box(held)
         if lift_now is None:
             raise PredictionError("the lift position is unknown")
-        place_roll = self._place_roll(params)
+        place_roll = math.pi if flip else self._place_roll(params)
         if place_roll is not None and abs(abs(place_roll) - math.pi / 2) <= 0.2:
             # Sideways on the floor: the former footprint stands up, so the release lift rises.
             held_box_now, _, held_top = entity_box(held)
@@ -1535,25 +1551,27 @@ class Esim:
         obstacles = self._floor_obstacles(es, {held.id})
         held_box, _, _ = entity_box(held)
         here_yaw = held_box.yaw if "yaw" not in params else float(params["yaw"])
-        if math.hypot(tx - held_box.cx, ty - held_box.cy) <= 0.05 and abs(_wrap(here_yaw - held_box.yaw)) <= 0.1:
+        if not flip and math.hypot(tx - held_box.cx, ty - held_box.cy) <= 0.05 and abs(_wrap(here_yaw - held_box.yaw)) <= 0.1:
             here, trapped = self._put_down_here(es, held, obstacles)
             if trapped:
                 raise PredictionError(f"cannot put {held.id} down where it is: {trapped}; set it on a surface "
                                       "within reach with place on=<surface id>, or carry it elsewhere")
             plan = {"path": [[rx, ry]], "yaw": ryaw, "lift": lift, "object": held.id,
                     "floor": [held_box.cx, held_box.cy], "pathLength": 0.0, **here}
-            if place_roll is not None:
-                plan["wristRoll"] = place_roll
+            plan.update(self._floor_rotation(es, plan, place_roll))
             return self._receipt(es, "place", params, 0.02, [], plan)
         rel, reach = self._release_reach(es, held, rel)
         lx = rel[0]
-        sweep = self._sweep(rel)
+        nav_load = carrying if flip else rel
+        sweep = max(self._sweep(rel), self._sweep(nav_load))
         grid = build_grid(obstacles, sweep + cfg.nav_margin, [(rx, ry), (tx, ty)])
         reasons = []
         for h in headings:
             c, s = math.cos(h), math.sin(h)
             dock = (tx - (c * lx - s * ly), ty - (s * lx + c * ly))
             blocked = self._footprint_blocked(obstacles, dock, h, rel)
+            if blocked is None and flip:
+                blocked = self._footprint_blocked(obstacles, dock, h, carrying)
             if blocked:
                 reasons.append(f"heading {math.degrees(h):.0f} deg: {held.id} or the robot would hit {blocked}")
                 continue
@@ -1561,7 +1579,7 @@ class Esim:
             if trapped:
                 reasons.append(f"heading {math.degrees(h):.0f} deg: {trapped}")
                 continue
-            predock = self._retreat(obstacles, dock, (-c, -s), h, rel, cfg.predock_backoff)
+            predock = self._retreat(obstacles, dock, (-c, -s), h, nav_load, cfg.predock_backoff)
             if predock is None:
                 reasons.append(f"heading {math.degrees(h):.0f} deg: no straight approach with room to turn while "
                                f"carrying {held.id}")
@@ -1574,12 +1592,35 @@ class Esim:
                     "lift": lift, "object": held.id, "floor": [tx, ty], "pathLength": path_length(path)}
             if reach is not None:
                 plan["reach"] = reach
-            if place_roll is not None:
-                plan["wristRoll"] = place_roll
+            plan.update(self._floor_rotation(es, plan, place_roll))
             return self._receipt(es, "place", params, 0.03, [], plan)
         hint = self._boxed_in(es, obstacles, rel)
         raise PredictionError(f"cannot put {held.id} down at ({tx:.2f}, {ty:.2f}): " + "; ".join(reasons[:4])
                               + (f"; {hint}" if hint else ""))
+
+    def _floor_rotation(self, es: SceneState, plan: dict, roll: float | None) -> dict:
+        """Validate floor placement's extension, rotation and lowering in execution order.
+
+        No requested rotation returns no extra fields. A requested rotation returns ``wristRoll``
+        only after the sampled path is reachable from measured joints, or raises ``PredictionError``.
+        """
+        if roll is None:
+            return {}
+        current = self._arm_joints(es)
+        at = {"wrist_yaw": 0.0, "wrist_roll": 0.0, "wrist_pitch": 0.0, **current}
+        targets = [at]
+        for change in ({"reach": plan.get("reach", at["reach"])}, {"wrist_roll": roll}, {"lift": plan["lift"]}):
+            end = {**at, **change}
+            steps = max(1, *(math.ceil(abs(end[k] - at[k]) /
+                                      (self.config.lift_check_step if k in ("reach", "lift")
+                                       else self.config.wrist_check_step)) for k in change))
+            targets.extend({k: at[k] + (end[k] - at[k]) * i / steps for k in at} for i in range(1, steps + 1))
+            at = end
+        measured = {j.id: j.q.value[0] for j in self._self(es).rigid.joints if j.q.value}
+        if not self.arm.reachable_path(targets, start_joints=measured):
+            raise PredictionError(f"cannot rotate the held object to roll {roll:.2f} rad and lower it to the floor "
+                                  "from the current arm posture; place it on a reachable support instead")
+        return {"wristRoll": roll}
 
     def _nest_spot(self, es: SceneState, bowl: Entity, held: Entity, held_half: float):
         """Nest a stackable object in the centre of a larger receptacle that holds nothing yet."""

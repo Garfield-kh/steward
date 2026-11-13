@@ -26,6 +26,7 @@ from steward.mission import (
     MissionFailed,
     _approach_to_observe,
     _explore,
+    _footprint_m,
     _refresh,
     _run,
     _safe_receipt,
@@ -35,6 +36,7 @@ from steward.mission import (
     simtime_sleep,
 )
 from steward.net import HttpError
+from steward.world.chores_diagnostics import receipt_brief
 
 TABLEWARE = ("bowl", "wine_glass", "mug", "cup")
 ROW_GAP = 0.06
@@ -42,6 +44,14 @@ FLOOR_LEVEL_M = 0.15  # tableware whose base is lower than this lies on the floo
 FRESH_S = 45.0  # a piece planned into today's row must have been seen this recently
 TABLE_ROW_Y = 0.18
 VIEW_DISTANCE = 1.1
+# Close-look rescan: tracks that may be tableware but are not yet planned as such.
+WEAK_TABLEWARE_MIN = 0.15  # categories mass worth a closer look for a named tableware label
+STEMWARE_MIN_H_M = 0.14  # height of a stemware-like box (wine glass prior is ~0.19 m)
+STEMWARE_MAX_FOOT_M = 0.14  # long footprint side of that box
+RESCAN_SETTLE_S = 2.0
+RESCAN_MAX_VIEWS = 3  # distinct headings tried before leaving a doubtful track unplanned
+# Preferred approach headings (rad) for successive close looks; distinct sides of the same object.
+RESCAN_VIEW_OFFSETS = (0.0, 1.0, -1.0)
 
 
 def _summary(api: str) -> dict:
@@ -69,6 +79,177 @@ def _supported_first(objects: list[dict]) -> list[dict]:
     """The objects known to stand on something, or all of them when nothing is."""
     supported = [o for o in objects if o.get("on") is not None]
     return supported or objects
+
+
+def _off_floor(objects: list[dict]) -> list[dict]:
+    """Drop tracks whose base is on the floor (mats/markers misread as tableware)."""
+    return [o for o in objects if _bottom(o) >= FLOOR_LEVEL_M]
+
+
+def _near_support_surface(obj: dict, summary: dict, margin: float = 0.15) -> bool:
+    """Whether ``obj`` already has ``on``, or its XY lies on/near a furniture support surface.
+
+    Used when planning moves: a fresh track with ``on is None`` (common for thin or transparent
+    pieces) stays in the list if it sits over a table or sideboard; a wall-corner fragment far
+    from every support surface stays out."""
+    if obj.get("on") is not None:
+        return True
+    surfaces = [o for cat in ("table", "sideboard", "cabinet", "counter") for o in _objects(summary, cat)]
+    if not surfaces:
+        return True  # no surface known yet — keep candidates rather than emptying the plan
+    ox, oy = obj["position"][0], obj["position"][1]
+    for surf in surfaces:
+        e = surf.get("extentM") or surf["sizeM"]
+        yaw = math.radians(surf.get("yawDeg", 0.0))
+        c, s = math.cos(yaw), math.sin(yaw)
+        dx, dy = ox - surf["position"][0], oy - surf["position"][1]
+        local_x, local_y = c * dx + s * dy, -s * dx + c * dy
+        if abs(local_x) <= e[0] / 2 + margin and abs(local_y) <= e[1] / 2 + margin:
+            return True
+    return False
+
+
+def _sideboard_plan_bowls(summary: dict) -> list[dict]:
+    """Bowls for the sideboard plan/inventory: fresh, off the floor, near a support if ``on`` unknown.
+
+    Unlike :func:`_supported_first`, a missing ``on`` does not drop a piece when siblings already
+    have support — pick time uses :meth:`Chores._with_known_support` instead."""
+    bowls, _others, _rejected = _sideboard_plan_inventory(summary)
+    return bowls
+
+
+def _sideboard_plan_others(summary: dict) -> list[dict]:
+    """Non-bowl tableware for the sideboard plan/inventory (same filters as bowls)."""
+    _bowls, others, _rejected = _sideboard_plan_inventory(summary)
+    return others
+
+
+def _tableware_plan_candidates(summary: dict) -> list[dict]:
+    """Objects that look like tableware for sideboard planning or rejection diagnostics.
+
+    Includes tracks whose ``role`` or ``category`` is a tableware label, and tracks whose category
+    distribution still puts mass on a tableware label (mis-roled pieces that planning would miss)."""
+    out, seen = [], set()
+    for o in summary.get("objects", []):
+        oid = o.get("id")
+        if oid in seen:
+            continue
+        role = o.get("role", o.get("category"))
+        cat = o.get("category")
+        cats = o.get("categories") or {}
+        if role in TABLEWARE or cat in TABLEWARE or any(c in TABLEWARE for c in cats):
+            seen.add(oid)
+            out.append(o)
+    return out
+
+
+def _sideboard_reject_reasons(obj: dict, summary: dict) -> list[str]:
+    """Why ``obj`` is left out of the sideboard move list (empty ⇒ it would be selected).
+
+    Reason codes: ``role`` (not a planned tableware role), ``existence``, ``stale``, ``floor``,
+    ``far`` (no ``on`` and XY not near a support surface)."""
+    role = obj.get("role", obj.get("category"))
+    reasons: list[str] = []
+    if role not in TABLEWARE:
+        reasons.append("role")
+        return reasons  # planning never considers it; further filters are moot for the plan slot
+    if obj.get("existence", 0.0) < 0.5:
+        reasons.append("existence")
+    if obj.get("lastSeenAgoS", 0.0) > FRESH_S:
+        reasons.append("stale")
+    if _bottom(obj) < FLOOR_LEVEL_M:
+        reasons.append("floor")
+    if not _near_support_surface(obj, summary):
+        reasons.append("far")
+    return reasons
+
+
+def _reject_brief(obj: dict, reasons: list[str]) -> dict:
+    """Compact rejected-candidate row for ``plan-sideboard`` diagnostics."""
+    return {
+        **_plan_obj(obj),
+        "lastSeenAgoS": obj.get("lastSeenAgoS"),
+        "reasons": reasons,
+    }
+
+
+def _sideboard_plan_inventory(summary: dict) -> tuple[list[dict], list[dict], list[dict]]:
+    """Bowls (large→small), other tableware, and rejected tableware candidates with reasons.
+
+    Selection matches :func:`_sideboard_plan_bowls` / :func:`_sideboard_plan_others`; rejected rows
+    explain every other tableware-like track so open-plan omissions are greppable from the log."""
+    bowls, others, rejected = [], [], []
+    for obj in _tableware_plan_candidates(summary):
+        reasons = _sideboard_reject_reasons(obj, summary)
+        if reasons:
+            rejected.append(_reject_brief(obj, reasons))
+            continue
+        role = obj.get("role", obj.get("category"))
+        if role == "bowl":
+            bowls.append(obj)
+        else:
+            others.append(obj)
+    bowls = sorted(bowls, key=_area, reverse=True)
+    others = sorted(others, key=_area, reverse=True)
+    rejected = sorted(rejected, key=lambda r: r.get("id") or "")
+    return bowls, others, rejected
+
+
+def _stemware_shaped(obj: dict) -> bool:
+    """Whether the measured box is tall and narrow like a wine glass (geometry-only hint)."""
+    size = obj.get("extentM") or obj.get("sizeM") or [0.0, 0.0, 0.0]
+    if len(size) < 3:
+        return False
+    foot = float(max(size[0], size[1]))
+    height = float(size[2])
+    return height >= STEMWARE_MIN_H_M and 0.03 < foot <= STEMWARE_MAX_FOOT_M
+
+
+def _doubtful_tableware_for_rescan(summary: dict) -> list[dict]:
+    """Tracks worth a close look before planning: unlabeled or weakly labeled tableware on a support.
+
+    Covers (1) ``role`` rejected pieces that still carry tableware mass in ``categories``, and
+    (2) stemware-shaped boxes labeled ``unknown`` with no tableware mass yet (transparent glass
+    often starts that way). Already-selected plan bowls/others are skipped."""
+    bowls, others, rejected = _sideboard_plan_inventory(summary)
+    planned = {o["id"] for o in bowls} | {o["id"] for o in others}
+    out, seen = [], set()
+    for obj in rejected:
+        if obj["id"] in planned or obj["id"] in seen:
+            continue
+        if "role" in (obj.get("reasons") or []):
+            seen.add(obj["id"])
+            out.append(obj)
+    for obj in summary.get("objects", []):
+        oid = obj.get("id")
+        if oid in planned or oid in seen or obj.get("existence", 0.0) < 0.5:
+            continue
+        if obj.get("lastSeenAgoS", 0.0) > FRESH_S or _bottom(obj) < FLOOR_LEVEL_M:
+            continue
+        if not _near_support_surface(obj, summary):
+            continue
+        role = obj.get("role", obj.get("category"))
+        cat = obj.get("category")
+        cats = obj.get("categories") or {}
+        weak = any(float(cats.get(t, 0.0)) >= WEAK_TABLEWARE_MIN for t in TABLEWARE)
+        unlabeled = role == "unknown" or cat == "unknown"
+        if unlabeled and (weak or _stemware_shaped(obj)):
+            seen.add(oid)
+            out.append(obj)
+        elif weak and role not in TABLEWARE and cat not in TABLEWARE:
+            seen.add(oid)
+            out.append(obj)
+    return sorted(out, key=lambda o: o.get("id") or "")
+
+
+def _plan_ready_tableware(obj: dict, summary: dict) -> bool:
+    """Whether ``obj`` would enter the sideboard move list: a confirmed tableware role and filters."""
+    return not _sideboard_reject_reasons(obj, summary)
+
+
+def _summary_object(summary: dict, oid: str) -> dict | None:
+    """The summary row for ``oid``, or None when the track is gone."""
+    return next((o for o in summary.get("objects", []) if o.get("id") == oid), None)
 
 
 def _one(summary: dict, category: str) -> dict:
@@ -130,10 +311,73 @@ def _world(support: dict, offset: list[float]) -> list[float]:
     return [support["position"][0] + c * offset[0] - s * offset[1], support["position"][1] + s * offset[0] + c * offset[1]]
 
 
+def _plan_obj(obj: dict) -> dict:
+    """Compact object fields recorded when a phase plans what it will move."""
+    return {
+        "id": obj.get("id"),
+        "category": obj.get("category"),
+        "role": obj.get("role"),
+        "on": obj.get("on"),
+        "color": obj.get("color"),
+        "sizeM": obj.get("extentM") or obj.get("sizeM"),
+        "position": obj.get("position"),
+        "existence": obj.get("existence"),
+    }
+
+
+def _match_by_footprint(summary: dict, obj: dict) -> dict | None:
+    """Best summary object matching ``obj``'s footprint (and preferably role/color), any distance.
+
+    Used after a close look when :func:`_refresh` still fails because the renumbered track drifted
+    beyond the local search radius (stacked bowls can be re-seen a metre away after a drive)."""
+    want = _footprint_m(obj)
+    if want <= 0:
+        return None
+    role = obj.get("role", obj.get("category"))
+    color = obj.get("color")
+    fp_tol = max(0.04, 0.35 * want)
+    pos = obj.get("position")
+    cands = []
+    for o in summary.get("objects", []):
+        if o["existence"] < 0.5 or abs(_footprint_m(o) - want) > fp_tol:
+            continue
+        cands.append(o)
+    if not cands:
+        return None
+
+    def rank(o: dict) -> tuple:
+        role_ok = role in (o.get("role"), o["category"])
+        color_ok = bool(color) and o.get("color") == color
+        dist = math.dist(o["position"][:2], pos[:2]) if pos is not None else 0.0
+        return (0 if role_ok else 1, 0 if color_ok else 1, abs(_footprint_m(o) - want), dist)
+
+    return min(cands, key=rank)
+
+
+def _refresh_or_recover(api: str, obj: dict) -> dict:
+    """Like :func:`_refresh`, but after a lost id: look again, retry refresh, then match by footprint
+    anywhere in the summary. Stacking must not abort solely because a bowl was renumbered mid-drive."""
+    try:
+        return _refresh(api, obj)
+    except MissionFailed as first:
+        try:
+            _approach_to_observe(api, obj, distance=0.9)
+        except MissionFailed:
+            pass
+        try:
+            return _refresh(api, obj)
+        except MissionFailed:
+            pass
+        found = _match_by_footprint(_summary(api), obj)
+        if found is not None:
+            return found
+        raise first
+
+
 def _place_at(api: str, support: dict, xy: list[float]) -> dict:
     """Place params for a fixed world spot on a support, in the support's current frame (a fitted box
     may turn half way round between views; the spot must not move with it)."""
-    current = _refresh(api, support)
+    current = _refresh_or_recover(api, support)
     return {"on": current["id"], "offset": [round(v, 4) for v in _local(current, xy)]}
 
 
@@ -181,8 +425,11 @@ def _move(api: str, obj: dict, place: dict, observe: dict, log: list, timeout_s:
         # the same role stands there before asking for a pick of it.
         obj = _refresh(api, obj)
         pick = _safe_receipt(api, "pick", {"target": obj["id"]}, obj, log)
+        log.append({"step": "pick-receipt", "object": obj["id"], "attempt": attempt, **receipt_brief(pick)})
         try:
-            _run(api, pick, timeout_s)
+            job = _run(api, pick, timeout_s)
+            log.append({"step": "pick", "object": obj["id"], "jobState": job.get("state"),
+                        "message": job.get("message")})
             break
         except MissionFailed as exc:
             # A missed grasp is worth a second look and a second try; an infeasible approach or a
@@ -191,9 +438,15 @@ def _move(api: str, obj: dict, place: dict, observe: dict, log: list, timeout_s:
                 raise
             log.append({"step": "pick-retry", "object": obj["id"], "error": str(exc)})
             obj = _refresh(api, obj)
+    # Pick can take long enough for a nested support bowl to be renumbered; rebind ``on`` before place.
+    if place.get("on") is not None:
+        observe = _refresh_or_recover(api, observe)
+        place = {**place, "on": observe["id"]}
     receipt = _safe_receipt(api, "place", place, observe, log)
-    _run(api, receipt, timeout_s)
-    log.append({"step": "place", "object": obj["id"], **place})
+    log.append({"step": "place-receipt", "object": obj["id"], "params": place, **receipt_brief(receipt)})
+    job = _run(api, receipt, timeout_s)
+    log.append({"step": "place", "object": obj["id"], **place, "jobState": job.get("state"),
+                "message": job.get("message")})
     simtime_sleep(api, 0.8)
     plan = receipt["plan"]
     return _landed(api, obj, plan["spot"] if "spot" in plan else plan["floor"])
@@ -256,9 +509,26 @@ def _contents(summary: dict, holder: dict) -> list[dict]:
 
 
 def _drawer_of(summary: dict, furniture: dict) -> dict | None:
-    drawers = _objects(summary, "drawer")
-    near = [d for d in drawers if math.dist(d["position"][:2], furniture["position"][:2]) < 0.6]
-    return min(near, key=lambda d: math.dist(d["position"][:2], furniture["position"][:2])) if near else None
+    """The drawer that belongs to ``furniture``.
+
+    Search radius scales with the furniture footprint: a wide sideboard's closed drawer centre can
+    sit more than 0.6 m from the fitted box centre, which used to yield "no drawer seen". Falls
+    back to lower-existence drawer tracks (still labelled drawer) when role filtering finds none.
+    """
+    extent = furniture.get("extentM") or furniture["sizeM"]
+    radius = max(0.9, max(extent[0], extent[1]) / 2 + 0.5)
+    fx, fy = furniture["position"][:2]
+
+    def near(cands: list[dict]) -> dict | None:
+        hit = [d for d in cands if math.dist(d["position"][:2], [fx, fy]) < radius]
+        return min(hit, key=lambda d: math.dist(d["position"][:2], [fx, fy])) if hit else None
+
+    found = near(_objects(summary, "drawer"))
+    if found is not None:
+        return found
+    weak = [o for o in summary["objects"]
+            if (o.get("role") == "drawer" or o["category"] == "drawer") and o["existence"] >= 0.2]
+    return near(weak)
 
 
 class Chores:
@@ -312,14 +582,19 @@ class Chores:
         if not spots:
             raise MissionFailed(f"{blocker['id']} ({blocker['category']}) is in the way and there is no free spot to move it to")
         self._doing(f"清障：把挡住操作路径的 {describe(obj)} 搬开")
+        self.log.append({"step": "clear-start", "phase": phase, "object": obj["id"],
+                         "category": obj.get("category"), "parkAt": spots})
         pick = _safe_receipt(self.api, "pick", {"target": obj["id"]}, obj, self.log)
+        self.log.append({"step": "pick-receipt", "object": obj["id"], "reason": "clear", **receipt_brief(pick)})
         _run(self.api, pick, self.timeout_s)
         for spot in spots:
             receipt = call("POST", f"{self.api}/ego/predict", {"skill": "place", "params": {"at": spot}})
+            self.log.append({"step": "place-receipt", "object": obj["id"], "reason": "clear",
+                             "params": {"at": spot}, **receipt_brief(receipt)})
             if receipt["withinRiskLimit"]:
                 _run(self.api, receipt, self.timeout_s)
                 self._step(phase, f"清障完成：{describe(obj)} 放到 ({spot[0]:.2f}, {spot[1]:.2f})",
-                           object=blocker["id"])
+                           object=blocker["id"], parkAt=spot)
                 return
         raise MissionFailed(f"picked {blocker['id']} but none of the parking spots {spots} is reachable")
 
@@ -382,7 +657,10 @@ class Chores:
     def _doing(self, text: str) -> None:
         """Record and publish the action about to start, so a failure names what was being attempted."""
         self.attempt = text
+        self.log.append({"step": "doing", "text": text})
         self.publish(current=f"正在{text}")
+        if self.on_step is not None:
+            self.on_step({"step": "doing", "text": text})
 
     def note_failure(self, phase: str, message: str) -> None:
         """Keep a failed phase with the action it was attempting and where the robot stood."""
@@ -439,21 +717,105 @@ class Chores:
     # -------------------------------------------------------------- sideboard
     def stack_on_sideboard(self) -> None:
         board = self._confirmed("sideboard")
-        s = _summary(self.api)
-        # A piece standing on nothing is a fragment of a wall corner, not a bowl — but when the
-        # support surface itself has not been read yet, no piece has one, and dropping them all
-        # would leave nothing to stack. Prefer supported pieces; fall back to all of them.
-        bowls = _supported_first(_fresh_objects(s, "bowl"))
-        others = _supported_first([o for cat in TABLEWARE if cat != "bowl"
-                                   for o in _fresh_objects(s, cat)])
-        bowls = sorted(bowls, key=_area, reverse=True)
-        others = sorted(others, key=_area, reverse=True)
+        # Plan only after a close look at the surface tableware still stands on (same idea as
+        # arrange_on_table): small bowls and transparent glasses often lack ``on`` until seen
+        # from nearby, and ``_supported_first`` would then drop them from the stacking list.
+        s0 = _summary(self.api)
+        source = max(_objects(s0, "table"), key=lambda o: o["existence"], default=None)
+        if source is not None:
+            self._doing(f"近看{describe(source)} 上的餐具再规划叠放")
+            self.log.append({"step": "observe-before-plan", "surface": source["id"]})
+            try:
+                _approach_to_observe(self.api, source, distance=1.3)
+            except MissionFailed:
+                pass
+            simtime_sleep(self.api, 2.0)
+        else:
+            self.log.append({"step": "observe-before-plan", "surface": None})
+        s = _settle(self.api, seconds=25.0, want=2)
+        board = _refresh_or_recover(self.api, board)
+        # Transparent glass and other look-alikes often sit as ``unknown`` until nearer multi-view
+        # looks raise a plan-ready tableware role. Stop early per track once ``role`` clears inventory
+        # filters; after RESCAN_MAX_VIEWS still-unconfirmed tracks are left out of others (no
+        # geometry-forced planning).
+        doubtful = _doubtful_tableware_for_rescan(s)
+        if doubtful:
+            self.log.append({"step": "rescan-before-plan",
+                             "targets": [o["id"] for o in doubtful]})
+        unconfirmed: list[dict] = []
+        for obj in doubtful:
+            oid = obj["id"]
+            confirmed = False
+            views = 0
+            last_role = obj.get("role", obj.get("category"))
+            for offset in RESCAN_VIEW_OFFSETS[:RESCAN_MAX_VIEWS]:
+                self._doing(f"近看{describe(obj)} 以确认类别")
+                try:
+                    _approach_to_observe(self.api, obj, distance=0.9, prefer_offset=offset)
+                except MissionFailed:
+                    pass
+                views += 1
+                simtime_sleep(self.api, RESCAN_SETTLE_S)
+                s = _summary(self.api)
+                fresh = _summary_object(s, oid)
+                if fresh is None:
+                    continue
+                obj = fresh
+                last_role = fresh.get("role", fresh.get("category"))
+                if _plan_ready_tableware(fresh, s):
+                    confirmed = True
+                    break
+            self.log.append({"step": "rescan-object", "id": oid, "views": views,
+                             "confirmed": confirmed, "role": last_role})
+            if not confirmed:
+                unconfirmed.append({"id": oid, "role": last_role, "views": views})
+        if doubtful:
+            s = _settle(self.api, seconds=12.0, want=1)
+            board = _refresh_or_recover(self.api, board)
+        # Inventory by freshness / off-floor / near a support — not by ``on``. Thin or transparent
+        # pieces often lack ``on`` after a table look while siblings already have one; dropping them
+        # here left them on the table. Unknown support is resolved at pick via ``_with_known_support``.
+        bowls, others, rejected = _sideboard_plan_inventory(s)
+        planned_ids = {o["id"] for o in bowls} | {o["id"] for o in others}
+        rejected_ids = {r["id"] for r in rejected}
+        for row in unconfirmed:
+            if row["id"] in planned_ids:
+                continue
+            if row["id"] in rejected_ids:
+                for r in rejected:
+                    if r["id"] == row["id"]:
+                        reasons = list(r.get("reasons") or [])
+                        if "unconfirmed" not in reasons:
+                            reasons.append("unconfirmed")
+                        r["reasons"] = reasons
+                        r["views"] = row["views"]
+                        break
+                continue
+            track = _summary_object(s, row["id"])
+            if track is not None:
+                brief = {**_reject_brief(track, ["unconfirmed"]), "views": row["views"]}
+            else:
+                brief = {"id": row["id"], "role": row.get("role"), "reasons": ["unconfirmed"],
+                         "views": row["views"]}
+            rejected.append(brief)
+            rejected_ids.add(row["id"])
+        rejected = sorted(rejected, key=lambda r: r.get("id") or "")
+        plan = {
+            "step": "plan-sideboard",
+            "board": board["id"],
+            "bowls": [_plan_obj(b) for b in bowls],
+            "others": [_plan_obj(o) for o in others],
+            "rejected": rejected,
+        }
+        self.log.append(plan)
+        if self.on_step is not None:
+            self.on_step(plan)
         widths = ([_width(bowls[0])] if bowls else []) + [_width(o) for o in others]
         offsets = row_offsets(widths, gap=0.08)
         slot = iter(offsets)
         below = None
         for bowl in bowls:
-            bowl = _refresh(self.api, bowl)
+            bowl = self._with_known_support(bowl)
             if below is None:
                 offset = next(slot)
                 if bowl["on"] != board["id"]:
@@ -463,26 +825,52 @@ class Chores:
                     bowl = self._clearing("sideboard", lambda b=bowl, xy=spot: _move(
                         self.api, b, _place_at(self.api, board, xy), board, self.log, self.timeout_s))
                     self._step("sideboard", f"{describe(was)} → 餐边柜（叠放底座）", object=bowl["id"])
+                else:
+                    self.log.append({"step": "skip", "phase": "sideboard", "reason": "already-on-board",
+                                     "object": bowl["id"], "on": bowl.get("on"), "board": board["id"]})
             else:
-                below = _refresh(self.api, below)
+                below = _refresh_or_recover(self.api, below)
+                bowl = self._with_known_support(bowl, expect=below)
                 if bowl["on"] != below["id"]:
                     self._doing(f"把{describe(bowl)} 叠进{describe(below)}")
                     was = bowl
                     bowl = self._clearing("sideboard", lambda b=bowl, u=below: _move(
                         self.api, b, {"on": u["id"]}, u, self.log, self.timeout_s))
                     self._step("sideboard", f"{describe(was)} → 叠进{describe(below)}",
-                               object=bowl["id"])
+                               object=bowl["id"], below=below["id"])
+                else:
+                    self.log.append({"step": "skip", "phase": "sideboard", "reason": "already-nested",
+                                     "object": bowl["id"], "on": bowl.get("on"), "below": below["id"]})
             below = bowl
         for obj in others:
-            obj = _refresh(self.api, obj)
+            obj = self._with_known_support(obj)
             offset = next(slot)
             if obj["on"] == board["id"]:
+                self.log.append({"step": "skip", "phase": "sideboard", "reason": "already-on-board",
+                                 "object": obj["id"], "on": obj.get("on"), "board": board["id"]})
                 continue
             spot = _world(board, _offset(board, offset, 0.0))
             self._doing(f"把{describe(obj)} 放到餐边柜上")
             self._clearing("sideboard", lambda o=obj, xy=spot: _move(
                 self.api, o, _place_at(self.api, board, xy), board, self.log, self.timeout_s))
             self._step("sideboard", f"{describe(obj)} → 餐边柜", object=obj["id"])
+
+    def _with_known_support(self, obj: dict, expect: dict | None = None) -> dict:
+        """Refresh ``obj``; if its support is still unknown (or not ``expect``), look closer once.
+
+        Phase 1 nesting often leaves ``on`` empty until a near look updates the bowl–bowl link;
+        picking blind then fails or places on the wrong surface."""
+        obj = _refresh_or_recover(self.api, obj)
+        need = obj.get("on") is None or (expect is not None and obj.get("on") != expect["id"])
+        if not need:
+            return obj
+        self._doing(f"近看{describe(obj)} 以确认它放在什么上面")
+        try:
+            _approach_to_observe(self.api, obj, distance=0.9)
+        except MissionFailed:
+            pass
+        simtime_sleep(self.api, 1.5)
+        return _refresh_or_recover(self.api, obj)
 
     # ----------------------------------------------------------------- drawers
     def _open(self, furniture: dict) -> dict:
@@ -494,6 +882,11 @@ class Chores:
         s = _summary(self.api)
         drawer = _drawer_of(s, furniture)
         if drawer is None:
+            # One more close look: the first stop sometimes sees only the furniture body.
+            _approach_to_observe(self.api, furniture, distance=0.95)
+            simtime_sleep(self.api, 1.5)
+            drawer = _drawer_of(_summary(self.api), furniture)
+        if drawer is None:
             raise MissionFailed(f"no drawer seen in front of {furniture['id']}")
         if drawer.get("openingM", 0.0) < 0.2:
             receipt = call("POST", f"{self.api}/ego/predict", {"skill": "open", "params": {"target": drawer["id"]}})
@@ -502,6 +895,10 @@ class Chores:
             _run(self.api, receipt, self.timeout_s)
             simtime_sleep(self.api, 1.5)
             self._step("drawers", f"打开{describe(furniture)} 的抽屉", object=drawer["id"])
+        # Look into the open drawer so young content tracks gather observations before picking.
+        drawer = _refresh(self.api, drawer)
+        _approach_to_observe(self.api, drawer, distance=0.95)
+        simtime_sleep(self.api, 1.5)
         return _refresh(self.api, drawer)
 
     def _close(self, drawer: dict) -> None:

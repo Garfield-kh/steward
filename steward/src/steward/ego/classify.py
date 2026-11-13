@@ -57,12 +57,27 @@ UNKNOWN_COST = 7.0  # a region that fits no prototype this badly is something th
 # one broken placement rule (6) on an otherwise fitting shape still names the category
 
 
-def _color_score(rule: str | None, color: np.ndarray, invalid_frac: float) -> float:
+def _color_score(rule: str | None, color: np.ndarray, invalid_frac: float,
+                 geom_cost: float | None = None) -> float:
+    """Colour agreement for a shape rule; ``geom_cost`` softens a clear miss when size already fits.
+
+    Transparent glass often paints table beige into the mask while depth holes are uneven, so a hard
+    clear fail would demote a well-measured stemware box to :data:`UNKNOWN`. A miss with a low
+    geometric cost therefore only lightly penalises ``clear``; a miss on a poorly fitting box still
+    costs the full −2.
+    """
     r, g, b = (float(x) for x in color)
     value, low = max(r, g, b), min(r, g, b)
     saturation = 0.0 if value == 0 else (value - low) / value
     if rule == "clear":
-        return 1.0 if invalid_frac > 0.15 or (saturation < 0.12 and value > 0.6) else -2.0
+        if invalid_frac > 0.15 or (saturation < 0.12 and value > 0.6):
+            return 1.0
+        # Partial depth dropouts on glass: weaker than the clear hit, but not a full reject.
+        if invalid_frac > 0.08 and value > 0.5:
+            return 0.25
+        if geom_cost is not None and geom_cost < 2.0:
+            return -0.25
+        return -2.0
     if rule == "dark":
         return 0.0 if value < 0.3 else -3.0
     if rule == "brown":
@@ -247,7 +262,9 @@ def classify(size: np.ndarray, bottom: float, color: np.ndarray, invalid_frac: f
             cost += 6.0
         if bottom + obs[2] < shape.get("min_top", -1.0):
             cost += 6.0
-        cost -= _color_score(shape.get("color"), color, invalid_frac)
+        geom_cost = cost
+        cost -= _color_score(shape.get("color"), color, invalid_frac,
+                             geom_cost if shape.get("color") == "clear" else None)
         scores[name] = -cost / temperature
     scores[UNKNOWN] = -UNKNOWN_COST / temperature
     top = max(scores.values())

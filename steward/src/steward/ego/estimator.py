@@ -3392,22 +3392,10 @@ class EgoEstimator:
                         return
                 elif _over_furniture_cap(track, grown, yaw, centre, cam_p):
                     return
-        if not moving:
-            # What the robot holds was identified before the grasp; views of it in the gripper are
-            # partly hidden and may mix with what lies around, so they do not relabel it.
-            # A depth fill has no name. On a content, whether the segmenter or the drawer rule
-            # named it, its shape-prior vote is a vote for whatever the drawer floor made the
-            # box look like, not for the object.
-            if not (track.category in _CONTENT and not seg.semantics):
-                for cat, prob in m["probs"].items():
-                    track.category_counts[cat] = track.category_counts.get(cat, 0.0) + prob
-            if seg.semantics:
-                for cat, score in seg.semantics.items():
-                    track.semantic_counts[cat] = track.semantic_counts.get(cat, 0.0) + score
-                track.semantic_views += 1
-            name = color_name(seg.color, seg.invalid_frac)
-            track.color_counts[name] = track.color_counts.get(name, 0.0) + 1.0
+        # Category / colour votes happen after swell / hollow rejects below so a rejected view
+        # refreshes existence without outvoting a well-sized transparent glass.
         track.observations += 1
+
         track.last_seen = self.stamp
         track.existence = min(1.0, track.existence + 0.2 * (1.0 - track.existence))
         track.absent_views.clear()
@@ -3419,6 +3407,8 @@ class EgoEstimator:
         track.mean_invalid += (seg.invalid_frac - track.mean_invalid) / n
         track.bottom_seen = track.bottom_seen or seg.bottom_seen
         if moving:
+            # What the robot holds was identified before the grasp; views of it in the gripper are
+            # partly hidden and may mix with what lies around, so they do not relabel it.
             return
         # A wide view of the counter lip is one slab longer than a bowl. Unioning it into a bowl
         # that already fits the bowl moves the centre onto the lip.
@@ -3436,6 +3426,9 @@ class EgoEstimator:
         if track.voxels is not None:
             union = np.vstack([_points(track.voxels), seg.points])
             centre, grown, yaw = box_of(union)
+            # Rejected views still refresh existence / mean appearance above, but must not cast a
+            # category vote: otherwise a swollen or hollow neighbour (often ``unknown``) can outvote
+            # a well-sized transparent glass that rarely accepts new points.
             if track.observations > 2 and max(grown[0], grown[1]) > 1.5 * max(track.footprint, 0.05) and track.footprint < 0.3:
                 return  # the region would swell an established box: not this object's surface
             if track.category == "wall" and min(grown[0], grown[1]) > 0.35:
@@ -3443,6 +3436,18 @@ class EgoEstimator:
             if max(grown[0], grown[1]) > CONVEX_CHECK_M and _footprint_fill(union, centre, grown, yaw) < MIN_FOOTPRINT_FILL:
                 return  # the points would outline an L or a hollow (two walls at a corner), which no single
                 # box describes: filled in, the concave corner would become a solid cube
+        # A depth fill has no name. On a content, whether the segmenter or the drawer rule
+        # named it, its shape-prior vote is a vote for whatever the drawer floor made the
+        # box look like, not for the object.
+        if not (track.category in _CONTENT and not seg.semantics):
+            for cat, prob in m["probs"].items():
+                track.category_counts[cat] = track.category_counts.get(cat, 0.0) + prob
+        if seg.semantics:
+            for cat, score in seg.semantics.items():
+                track.semantic_counts[cat] = track.semantic_counts.get(cat, 0.0) + score
+            track.semantic_views += 1
+        name = color_name(seg.color, seg.invalid_frac)
+        track.color_counts[name] = track.color_counts.get(name, 0.0) + 1.0
         points = seg.points
         if len(points) > self.config.points_per_cloud:
             points = points[self._rng.choice(len(points), self.config.points_per_cloud, replace=False)]
@@ -4720,8 +4725,14 @@ class EgoEstimator:
             holds_contents = "receptacle" in affordances or "pourable" in affordances
             if holds_contents and track.footprint < other.footprint:
                 within = abs(local[0]) <= other.size[0] / 2 and abs(local[1]) <= other.size[1] / 2
-                if within and -0.03 <= track.bottom() - other.bottom() <= min(z_tol, 0.5 * other.size[2]):
-                    if inside is None or other.bottom() > inside.bottom():
+                # Nested bowls: the inner bottom lies from the outer floor up through its rim. A
+                # rim-only view centres the inner bowl high and thin, so the old 0.5×height cap
+                # missed nesting and fell through to the furniture under both.
+                floor_delta = track.bottom() - other.bottom()
+                max_above_floor = float(other.size[2]) + max(z_tol, 0.06)
+                if within and -0.03 <= floor_delta <= max_above_floor:
+                    if inside is None or other.footprint < inside.footprint \
+                            or (other.footprint == inside.footprint and other.bottom() > inside.bottom()):
                         inside = other
                     continue
             # A resting object's base is often hidden from view, so its estimate may float a little above

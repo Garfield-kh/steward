@@ -29,7 +29,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable
 
-from steward.assets.cobot import LIFT_RANGE, TCP_OFFSET, park
+from steward.assets.cobot import HOME, LIFT_RANGE, TCP_OFFSET, park
 from steward.ego.ik import CobotIK, IkError
 from steward.math3d import pose_compose, quat_from_axis_angle, wrap_angle
 
@@ -440,10 +440,14 @@ class CobotSkills:
         """Return one arm to the twin's rest posture, out of the head cameras' view.
 
         A mission that gives up while holding something over the table leaves its own forearm in
-        the camera; parking is a verb because "look again" needs a clear view first."""
+        the camera; parking is a verb because "look again" needs a clear view first.
+
+        Arms boot at the all-zero USD posture (#29). Swinging ``park``'s shoulder yaw from that
+        fold collides with the lift carriage, so the arm unfolds through ``HOME`` first."""
         arm = self._arm(plan)
-        self.move_joints(job, {"arm": arm,
-                               "joints": dict(zip(self.ik.joint_names(arm), park(arm), strict=True))})
+        names = self.ik.joint_names(arm)
+        self.move_joints(job, {"arm": arm, "joints": dict(zip(names, HOME, strict=True))})
+        self.move_joints(job, {"arm": arm, "joints": dict(zip(names, park(arm), strict=True))})
 
     def move_joints(self, job: Job, plan: dict) -> None:
         """Drive one arm's six joints to the requested posture."""

@@ -92,9 +92,19 @@ class PiperArmConfig:
     self_clearance: float = 0.01  # the least gap the solver keeps between the arm and the robot's own frame
     small_step: tuple[float, float] = (0.05, 0.2)  # metres, radians: a command this close to the last is a step
     arrived_rad: float = 0.04  # encoders this close to the last solution report its command
-    arrived_lift_m: float = 0.01
+    # The torso lift lags the arm joints by more than a centimetre under load; a 1 cm gate made
+    # joints_of fall through to FK of a mixed posture and report reach several centimetres off,
+    # so drawer grasps refused to close and settle checks saw a phantom error.
+    arrived_lift_m: float = 0.06
+    # mink will park joint2 on its 3.14 rad stop for low tilted grasps; the servo never gets there
+    # and the TCP settles several centimetres off. Prefer a seed with this much room at every stop.
+    joint_limit_margin: float = 0.03
     home_speed_rad_s: float = 0.6  # maximum setpoint speed while both empty arms return to zero
     home_settle_s: float = 8.0  # time after the ramp for encoder confirmation
+    # Hole-free planar tip after HOME unfold. 0.28 m sits next to the 0.32 m tool-down ridge;
+    # settle within a few centimetres lands inside it. Prefer a tip past that ridge.
+    working_lift: float = 0.85
+    working_reach: float = 0.40
 
 
 class PiperArm(Arm):
@@ -131,6 +141,62 @@ class PiperArm(Arm):
         """The planar target is unset before the first command and after joint-space homing."""
         with self._lock:
             return self._target is None
+
+    def deploy_working(self, command: Callable[[dict], None], tick: Callable[[], dict]) -> None:
+        """Joint-space unfold through ``HOME`` so the next planar command leaves a working posture.
+
+        PARK / all-zero rest has no safe one-shot IK swing to a working tip (the shoulder hits the
+        lift carriage; the servo stalls near 0.21 m FK). ``CobotSkills.park`` uses the same HOME
+        waypoint for the opposite fold. Sets the planar ``_target`` to the HOME tip afterward.
+        """
+        state = tick()
+        # ``tick`` is virtualized: ``joints["lift"]`` is TCP height. The torso encoder lives in
+        # ``_last`` (set by :meth:`virtualize` before the planar overwrite).
+        raw = (self._last.get("joints") or {})
+        joints = state.get("joints") or {}
+        if not all(n in raw for n in self.names) or "lift" not in raw:
+            raise SkillFailed("cannot deploy the arm without its encoders")
+        start = [float(raw[n]) for n in self.names]
+        torso = float(raw["lift"])
+        goal = list(HOME)
+        cfg = self.config
+        if max(abs(a - b) for a, b in zip(start, goal, strict=True)) >= cfg.arrived_rad:
+            duration = 1.5 * max(abs(a - b) for a, b in zip(start, goal, strict=True)) / cfg.home_speed_rad_s
+            began = state["stamp"]
+            while True:
+                state = tick()
+                elapsed = state["stamp"] - began
+                frac = min(1.0, elapsed / duration) if duration > 0 else 1.0
+                share = frac * frac * (3.0 - 2.0 * frac)
+                q = [a + (b - a) * share for a, b in zip(start, goal, strict=True)]
+                command({"joints": {"lift": torso, **dict(zip(self.names, q, strict=True))}})
+                if frac >= 1.0:
+                    raw_now = (self._last.get("joints") or {})
+                    now = [float(raw_now[n]) for n in self.names]
+                    if max(abs(a - b) for a, b in zip(now, goal, strict=True)) < cfg.arrived_rad:
+                        command({"joints": {"lift": torso, **dict(zip(self.names, goal, strict=True))}})
+                        break
+                if elapsed > duration + cfg.home_settle_s:
+                    raise SkillFailed("the working arm did not reach its HOME posture; stopped deploying")
+        # HOME's own FK tip (~0.51 m @ ~1.34 m) sits on an IK ridge the solver cannot rediscover.
+        # Clear the planar cache and step to a hole-free working tip from the HOME joint seed.
+        with self._lock:
+            self._target = self._solved = None
+        tick()  # refresh `_last` encoders at HOME
+        tip_lift, tip_reach = cfg.working_lift, cfg.working_reach
+        out = self.command({"lift": tip_lift, "reach": tip_reach, "wrist_pitch": 0.0})
+        if "joints" in out:
+            command(out)
+            t0 = tick()["stamp"]
+            while True:
+                st = tick()
+                tip = st.get("joints") or {}
+                # Tight reach gate: a 5 cm window around 0.28 accepted the neighbouring 0.32 hole.
+                if (abs(float(tip.get("lift", 0.0)) - tip_lift) < 0.08
+                        and abs(float(tip.get("reach", 0.0)) - tip_reach) < 0.03):
+                    return
+                if st["stamp"] - t0 > 20.0:
+                    return  # planar follow-ups still start from the HOME seed even if settle is slow
 
     def home_empty(self, command: Callable[[dict], None], tick: Callable[[], dict]) -> bool:
         """Ramp both empty arms' six joints to zero, keeping lift and fingers unchanged.
@@ -188,10 +254,11 @@ class PiperArm(Arm):
     def _fk(self, torso: float, arm: list[float]) -> dict:
         self.ik.set_base(0.0, 0.0, 0.0, torso)
         tcp = pose_compose(self.ik.fk(self.config.arm, arm), {"p": TCP_OFFSET, "q": [1.0, 0.0, 0.0, 0.0]})
-        # m = Rz(yaw) Rx(roll) Ry(-pitch); the pitch never reaches a quarter turn, so the tipped
-        # (roll beyond a quarter turn) reading is the one turned back by half a turn. Tipped a
-        # quarter turn the pitch does not show in the posture: it is the one last commanded.
-        m = matrix_from_quat(tcp["q"]) @ matrix_from_quat(TOOL_DOWN).T
+        # Inverse of :meth:`_solve_from`: R_tcp = Rz(yaw) Ry(-pitch) R_down Rz(roll). Pitch near a
+        # quarter turn hides in the matrix; reuse the last commanded pitch then.
+        down = matrix_from_quat(TOOL_DOWN)
+        r_tcp = matrix_from_quat(tcp["q"])
+        m = r_tcp @ down.T
         if math.hypot(m[2, 0], m[2, 2]) < self.config.pitch_unseen_cos:
             pitch = self._target["wrist_pitch"] if self._target is not None else 0.0
         else:
@@ -200,9 +267,12 @@ class PiperArm(Arm):
                 pitch = math.atan2(-m[2, 0], -m[2, 2])
             if -self.config.pitch_read_slack <= pitch < 0.0:
                 pitch = 0.0
-        m = m @ matrix_from_quat(quat_from_axis_angle([0.0, 1.0, 0.0], pitch))
+        m_yaw = m @ matrix_from_quat(quat_from_axis_angle([0.0, 1.0, 0.0], pitch))
+        yaw = math.atan2(m_yaw[1, 0], m_yaw[0, 0])
+        rolled = (down.T @ matrix_from_quat(quat_from_axis_angle([0.0, 1.0, 0.0], pitch))
+                  @ matrix_from_quat(quat_from_axis_angle([0.0, 0.0, 1.0], -yaw)) @ r_tcp)
         return {"lift": float(tcp["p"][2]), "reach": float(tcp["p"][0]) - self.geometry.tool_offset,
-                "wrist_yaw": math.atan2(m[1, 0], m[0, 0]), "wrist_roll": math.atan2(m[2, 1], m[2, 2]),
+                "wrist_yaw": yaw, "wrist_roll": math.atan2(rolled[1, 0], rolled[0, 0]),
                 "wrist_pitch": pitch}
 
     # ----------------------------------------------------------- commanding
@@ -227,14 +297,19 @@ class PiperArm(Arm):
             if target is None:
                 if not all(n in joints for n in self.names) or "lift" not in joints:
                     raise SkillFailed("the arm's encoders have not been read yet")
-                # From the resting posture the first command starts with the tool pointing down, as
-                # the kitchen robot's wrist starts at zero, and inside the workspace: the resting arm
-                # stands folded upright, its tool sideways and above the highest working point.
+                # PARK rest FK is ~1.74 m lift / ~0 reach — a wrist-only first command used to seed
+                # that tip into `_target` and every later reach inherit an unreachable height. Start
+                # from the caller's lift/reach (or a hole-free working band) and seed IK from HOME,
+                # not from the folded PARK encoders (a singularity with no useful gradient).
                 g = self.geometry
-                here = self._fk(float(joints["lift"]), [float(joints[n]) for n in self.names])
-                target = {"lift": min(max(here["lift"], g.lift_min), g.lift_max),
-                          "reach": min(max(here["reach"], g.reach_min), g.reach_max), "wrist_yaw": 0.0, "wrist_roll": 0.0,
-                          "wrist_pitch": 0.0}
+                seed_lift = float(wanted["lift"]) if "lift" in wanted else max(g.lift_min, min(g.lift_max, 0.85))
+                seed_reach = float(wanted["reach"]) if "reach" in wanted else max(g.reach_min, 0.28)
+                target = {"lift": min(max(seed_lift, g.lift_min), g.lift_max),
+                          "reach": min(max(seed_reach, g.reach_min), g.reach_max),
+                          "wrist_yaw": 0.0, "wrist_roll": 0.0,
+                          "wrist_pitch": float(wanted.get("wrist_pitch", 0.0))}
+                joints = {"lift": float(joints.get("lift", LIFT_HOME)),
+                          **{n: float(h) for n, h in zip(self.names, HOME, strict=True)}}
             previous, prior = dict(target), self._solved
             target.update(wanted)
             holding = ((self._last.get("grippers") or {}).get(self.geometry.gripper) or {}).get("holding")
@@ -308,8 +383,20 @@ class PiperArm(Arm):
                 if rejected is None:
                     rejected = solved
                 continue
+            # Fresh endpoint solves refuse limit-packed postures (the servo never holds them). A
+            # continuous tip may ride near a stop; rejecting those breaks an otherwise valid path.
+            if not continuous and self._crowded(solved[1]):
+                continue
             return solved, None
         return rejected, last
+
+    def _crowded(self, arm: list[float]) -> bool:
+        """Whether any arm joint sits inside ``joint_limit_margin`` of its model stop."""
+        margin = self.config.joint_limit_margin
+        if margin <= 0:
+            return False
+        return any(q < lo + margin or q > hi - margin
+                   for q, (lo, hi) in zip(arm, self.ik.joint_limits(self.config.arm), strict=True))
 
     def _approached(self, target: dict) -> tuple[float, list[float]] | None:
         """``target`` solved by stepping reach and tilt to it from ``continuation_reach`` ahead with
@@ -343,9 +430,12 @@ class PiperArm(Arm):
                     ) -> tuple[tuple[float, list[float]] | None, IkError | None]:
         """``target`` solved from the first of ``seeds`` (torso, arm joints) that reaches it."""
         tcp = [self.geometry.tool_offset + target["reach"], self.geometry.lateral, target["lift"]]
-        tool = quat_mul(quat_mul(quat_from_axis_angle([0.0, 0.0, 1.0], target["wrist_yaw"]),
-                                 quat_from_axis_angle([1.0, 0.0, 0.0], target["wrist_roll"])),
-                        quat_mul(quat_from_axis_angle([0.0, 1.0, 0.0], -target["wrist_pitch"]), TOOL_DOWN))
+        # Yaw about world z, then pitch the tool down about world y, then roll about the tool's own
+        # +z (through the pinch). Rolling about world x before the pitch (the pre-USD composition)
+        # asked for poses the manufacturer wrist cannot hold once the joint frames match the USD.
+        pitched = quat_mul(quat_from_axis_angle([0.0, 1.0, 0.0], -target["wrist_pitch"]), TOOL_DOWN)
+        tool = quat_mul(quat_from_axis_angle([0.0, 0.0, 1.0], target["wrist_yaw"]),
+                        quat_mul(pitched, quat_from_axis_angle([0.0, 0.0, 1.0], target["wrist_roll"])))
         last: IkError | None = None
         for lift, q in seeds:
             try:
@@ -357,12 +447,19 @@ class PiperArm(Arm):
     def reachable(self, lift: float, reach: float, wrist_yaw: float = 0.0, wrist_roll: float = 0.0,
                   wrist_pitch: float = 0.0) -> bool:
         # Endpoint existence does not imply a continuous path from the current posture.
+        # A solution that only exists packed against a joint stop is not reachable in practice:
+        # the servo never gets there and the TCP settles centimetres off the command.
         if not super().reachable(lift, reach, wrist_yaw, wrist_roll, wrist_pitch):
             return False
         with self._lock:
             solved, _ = self._ik({"lift": lift, "reach": reach, "wrist_yaw": wrist_yaw, "wrist_roll": wrist_roll,
                                   "wrist_pitch": wrist_pitch}, {})
-        return solved is not None
+        return solved is not None and not self._crowded(solved[1])
+
+    def _fresh(self, target: dict) -> tuple[float, list[float]] | None:
+        """A non-crowded endpoint solve of ``target``, or None (matches :meth:`reachable`)."""
+        solved, _ = self._ik(target, {})
+        return None if solved is None or self._crowded(solved[1]) else solved
 
     def pitch_for(self, lift: float, reach: float, wrist_yaw: float = 0.0, wrist_roll: float = 0.0) -> float | None:
         g = self.geometry
@@ -370,24 +467,54 @@ class PiperArm(Arm):
             return None
         at = {"lift": lift, "reach": reach, "wrist_yaw": wrist_yaw, "wrist_roll": wrist_roll}
         with self._lock:
-            if self._ik({**at, "wrist_pitch": 0.0}, {})[0] is not None:
+            if self._fresh({**at, "wrist_pitch": 0.0}) is not None:
                 return 0.0
             # A tilt that holds it there, from the most down; the least one lies between it and none.
+            # Limit-packed (crowded) solves are rejected: the servo never holds them, so a pitch that
+            # only exists packed against a stop is not a usable ``pitch_for`` answer.
             lo, hi = 0.0, None
             for share in (1.0, 0.75, 0.5):
-                if self._ik({**at, "wrist_pitch": g.wrist_pitch_max * share}, {})[0] is not None:
+                if self._fresh({**at, "wrist_pitch": g.wrist_pitch_max * share}) is not None:
                     hi = g.wrist_pitch_max * share
                     break
             if hi is None:
                 return None
             while hi - lo > self.config.pitch_tolerance:
                 mid = (lo + hi) / 2
-                if self._ik({**at, "wrist_pitch": mid}, {})[0] is not None:
+                if self._fresh({**at, "wrist_pitch": mid}) is not None:
                     hi = mid
                 else:
                     lo = mid
             wide = min(g.wrist_pitch_max, hi + self.config.pitch_margin)
-            return wide if self._ik({**at, "wrist_pitch": wide}, {})[0] is not None else hi
+            return wide if self._fresh({**at, "wrist_pitch": wide}) is not None else hi
+
+    def min_lift_for(self, reach: float, wrist_pitch: float = 0.0, *,
+                     wrist_yaw: float = 0.0, wrist_roll: float = 0.0,
+                     lo: float | None = None, hi: float | None = None) -> float | None:
+        """Lowest TCP height at which ``reach`` is freshly reachable with the given wrist, or None.
+
+        The geometric lift_max is often outside the non-crowded USD envelope, so the search first
+        walks down from ``hi`` to a feasible seed before bisecting."""
+        g = self.geometry
+        lo = g.lift_min if lo is None else lo
+        hi = g.lift_max if hi is None else hi
+        if hi < lo or not super().reachable(hi, reach, wrist_yaw, wrist_roll, wrist_pitch):
+            # Geometry may still allow a lower band even when lift_max itself is out of range.
+            if not super().reachable((lo + hi) / 2, reach, wrist_yaw, wrist_roll, wrist_pitch):
+                return None
+        seed = hi
+        while seed >= lo and not self.reachable(seed, reach, wrist_yaw, wrist_roll, wrist_pitch):
+            seed -= 0.05
+        if seed < lo:
+            return None
+        hi = seed
+        while hi - lo > 0.01:
+            mid = (lo + hi) / 2
+            if self.reachable(mid, reach, wrist_yaw, wrist_roll, wrist_pitch):
+                hi = mid
+            else:
+                lo = mid
+        return hi
 
     def turn_over(self, lift: float, reach: float, wrist_pitch: float, floor: float, surface_top: float,
                   surface_edge: float, wrist_yaw: float = 0.0) -> float | None:

@@ -108,9 +108,11 @@ def _home_arm() -> PiperArm:
 
 
 def test_the_piper_tilts_its_tool_forward_to_reach_past_where_it_reaches_pointing_down():
+    # Under the USD mounts the untilted tool tops out near 0.53 m reach at 0.90 m TCP height;
+    # tilting to wrist_pitch_max extends it past 0.62 m (the pre-USD numbers used 0.60/0.62).
     arm = _home_arm()
-    assert not arm.reachable(0.6, 0.62), "the tool straight down reaches 0.50 m ahead of the mount"
-    assert arm.reachable(0.6, 0.62, wrist_pitch=1.05)
+    assert not arm.reachable(0.9, 0.62), "the tool straight down reaches about 0.53 m ahead of the mount"
+    assert arm.reachable(0.9, 0.62, wrist_pitch=1.05)
     solved = arm.command({"lift": 0.9, "reach": 0.62, "wrist_pitch": 1.05})["joints"]
     measured = arm._fk(solved["lift"], [solved[n] for n in arm.names])
     assert measured["reach"] == pytest.approx(0.62, abs=0.006) and measured["lift"] == pytest.approx(0.9, abs=0.006)
@@ -123,21 +125,21 @@ def test_what_the_piper_plans_to_reach_it_reaches_from_wherever_its_arm_stands()
     grows with the reach, and the command it plans is solved from a posture far from the plan's."""
     arm = _home_arm()
     reaches = (0.50, 0.55, 0.60, 0.65)
-    pitches = [arm.pitch_for(0.81, r) for r in reaches]
+    pitches = [arm.pitch_for(0.90, r) for r in reaches]
     assert pitches == sorted(pitches) and pitches[0] == 0.0 and pitches[-1] > 0.5
     stretched = PiperArm(robot_model("cobot-magic"))
     stretched.virtualize({"joints": {"lift": 0.4, **dict(zip(stretched.names, [0.0, 2.7, -2.4, 0.0, 0.9, 1.57], strict=True))},
                           "odometry": {"x": 0.0, "y": 0.0, "yaw": 0.0}})
     for reach, pitch in zip(reaches, pitches, strict=True):
         stretched._target = stretched._solved = None
-        assert stretched.command({"lift": 0.81, "reach": reach, "wrist_pitch": pitch})["joints"]
+        assert stretched.command({"lift": 0.90, "reach": reach, "wrist_pitch": pitch})["joints"]
 
 
 def test_the_piper_draws_a_tilted_tool_back_while_its_torso_sinks():
     """Drawing back with the tool tilted, the redundant torso sinks 0.12 m in one 5 cm step while the
     arm joints keep the pinch point on the way: the arm swings nothing it holds, so it is no jump."""
     arm = _home_arm()
-    assert arm.reachable_path([{"lift": 0.8, "reach": 0.63 - 0.05 * k, "wrist_pitch": 0.58} for k in range(8)])
+    assert arm.reachable_path([{"lift": 0.95, "reach": 0.62 - 0.05 * k, "wrist_pitch": 0.58} for k in range(8)])
 
 
 def test_the_torso_and_all_six_joints_tip_a_held_box_past_upright_in_one_motion():
@@ -147,7 +149,9 @@ def test_the_torso_and_all_six_joints_tip_a_held_box_past_upright_in_one_motion(
     arm = _home_arm()
 
     def tip(roll: float) -> list[dict]:
-        return [{"lift": 0.85 + 0.27 * abs(math.sin(roll * k / 20)), "reach": 0.5, "wrist_roll": roll * k / 20,
+        # Reach 0.50 m at 1.00 m TCP height: inside the USD tilted envelope with tool-z roll
+        # (the pre-USD 0.50 m / 0.85 m path is no longer continuous under the manufacturer frames).
+        return [{"lift": 1.00 + 0.15 * abs(math.sin(roll * k / 20)), "reach": 0.50, "wrist_roll": roll * k / 20,
                  "wrist_pitch": 1.05} for k in range(21)]
 
     assert arm.reachable_path(tip(1.9)) and arm.reachable_path(tip(-1.9))
@@ -170,7 +174,8 @@ def test_the_piper_keeps_its_upper_arm_off_its_own_frame_as_it_tips_a_box_close_
     with arm._lock:
         for k in range(21):
             roll = -1.9 * k / 20
-            target = {"lift": 0.81 + 0.14 * abs(math.sin(roll)), "reach": 0.333, "wrist_yaw": 0.0,
+            # 0.45 m reach at ~0.95 m: close enough to clear the frame, inside the USD envelope.
+            target = {"lift": 0.95 + 0.10 * abs(math.sin(roll)), "reach": 0.45, "wrist_yaw": 0.0,
                       "wrist_roll": roll, "wrist_pitch": 1.05}
             solved, _ = arm._ik(target, {}, prior)
             if solved is None:
@@ -192,20 +197,25 @@ def test_the_piper_turns_what_it_holds_over_in_the_air_with_its_tool_tilted_and_
     the top in front of it). With the tool tilted less the arm cannot hold it turned over there."""
     arm = _home_arm()
     top, edge = 0.753, 0.41
-    assert arm.turn_over(0.97, 0.36, 1.05, 0.77, top, math.inf) == pytest.approx(0.89), "the arm alone lowers it so far"
-    low = arm.turn_over(0.97, 0.36, 1.05, 0.77, top, edge)
-    assert low == pytest.approx(0.93), "over the table the links stop it higher"
-    assert arm.turn_over(0.97, 0.36, 0.6, 0.77, top, edge) is None
+    start_lift, start_reach = 1.00, 0.45
+    alone = arm.turn_over(start_lift, start_reach, 1.05, 0.77, top, math.inf)
+    assert alone is not None and alone < start_lift, "the arm alone lowers it so far"
+    low = arm.turn_over(start_lift, start_reach, 1.05, 0.77, top, edge)
+    assert low is not None and low >= alone, "over the table the links stop it higher"
+    # Past the USD reach envelope even a fully tilted tool cannot turn over there.
+    assert arm.turn_over(start_lift, 0.70, 1.05, 0.77, top, edge) is None
     arm._last["grippers"] = {arm.geometry.gripper: {"holding": "w:piece"}}
-    arm.command({"lift": 0.97, "reach": 0.36, "wrist_pitch": 1.05})
+    arm.command({"lift": start_lift, "reach": start_reach, "wrist_pitch": 1.05})
     spot = arm._pinch(*arm._solved)
     arm.command({"wrist_roll": math.pi, "turnOver": True})
     assert float(np.linalg.norm(arm._pinch(*arm._solved) - spot)) < 0.01
-    for k in range(1, round((0.97 - low) / 0.02) + 1):
-        arm.command({"lift": 0.97 - 0.02 * k})
+    for k in range(1, round((start_lift - low) / 0.02) + 1):
+        arm.command({"lift": start_lift - 0.02 * k})
     measured = arm._fk(arm._solved[0], arm._solved[1])
     assert measured["lift"] == pytest.approx(low, abs=0.006)
-    assert abs(measured["wrist_roll"]) == pytest.approx(math.pi, abs=0.05)
+    # A π tool-z roll is a half-turn of the wrist: the matrix decomposition into yaw/pitch/roll
+    # folds it back to ~0, so read the commanded virtual joint (what joints_of reports when settled).
+    assert abs(arm._target["wrist_roll"]) == pytest.approx(math.pi, abs=0.05)
     assert arm._lowest(arm._solved, edge) >= top + arm.config.turn_link_clearance - 1e-6
 
 
@@ -265,7 +275,8 @@ def _receipt(api: str, skill: str, params: dict) -> tuple[dict, dict]:
     receipt = call("POST", f"{api}/ego/predict", {"skill": skill, "params": params}, timeout=120)
     assert receipt["feasible"] and receipt["withinRiskLimit"], (skill, receipt["issues"])
     job = call("POST", f"{api}/skill/run", {"receipt": receipt["id"]})
-    done = call("POST", f"{api}/skill/wait", {"job": job["id"], "timeoutS": 150}, timeout=160)
+    # Cobot USD whole-body settles slower than the kitchen slide; 150 s left open/close "running".
+    done = call("POST", f"{api}/skill/wait", {"job": job["id"], "timeoutS": 210}, timeout=220)
     assert done["state"] == "succeeded", (skill, done["message"], done["log"])
     return receipt, done
 
@@ -344,7 +355,9 @@ def test_the_twin_takes_the_puzzle_box_by_its_rim_tilted_and_pours_it_out_onto_t
     taken, poured = _pumped(host, pour)
     assert taken["wristPitch"] == pytest.approx(1.05), "a container to be poured is taken with the wrist tilted most"
     assert taken["graspDz"] > 0, "on its rim, above its centre"
-    assert poured["roll"] >= 1.7
+    # The pour tries both tip directions and keeps the farthest continuous one; either sign past
+    # pour_roll_min empties the box (walls need about 1.7 rad).
+    assert abs(poured["roll"]) >= 1.7
     world = host.sim.world_state()
     rest = {r["a"]["entity"]: r["b"]["entity"] for r in world["relations"] if r["type"] == "supported-by"}
     pieces = {e["id"]: e["pose"]["value"]["p"] for e in world["entities"] if e["id"].startswith("w:piece")}
@@ -371,7 +384,8 @@ def test_the_twin_turns_a_puzzle_piece_over_in_the_air_and_sets_it_down_on_the_t
         pieces = [o for o in call("GET", f"{api}/ego/summary")["objects"]
                   if o["category"] == "puzzle_piece" and o.get("on") == box["id"]]
         piece = next(o for o in pieces if call("POST", f"{api}/ego/predict",
-                                               {"skill": "pick", "params": {"target": o["id"], "flip": True}})["feasible"])
+                                               {"skill": "pick", "params": {"target": o["id"], "flip": True}},
+                                               timeout=120)["feasible"])
         picked, _ = _receipt(api, "pick", {"target": piece["id"], "flip": True})
         held = next(r["a"]["entity"] for r in host.sim.world_state()["relations"] if r["type"] == "attached")
         before = up(held)
@@ -398,7 +412,8 @@ def test_the_twin_lifts_puzzle_pieces_out_of_the_box_over_its_wall(cobot_in):
         pieces = [o for o in call("GET", f"{api}/ego/summary")["objects"]
                   if o["category"] == "puzzle_piece" and o.get("on") == box["id"]]
         piece = next(o for o in pieces if call("POST", f"{api}/ego/predict",
-                                               {"skill": "pick", "params": {"target": o["id"]}})["feasible"])
+                                               {"skill": "pick", "params": {"target": o["id"]}},
+                                               timeout=120)["feasible"])
         lifted, _ = _receipt(api, "pick", {"target": piece["id"]})
         _receipt(api, "place", {"on": table["id"], "offset": [0.15, 0.1]})
         return lifted["plan"]

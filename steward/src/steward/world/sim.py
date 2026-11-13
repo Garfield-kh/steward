@@ -110,7 +110,9 @@ class PerceptionConfig:
 
 @dataclass
 class GraspConfig:
-    capture_radius: float = 0.06
+    # 6 cm left Cobot Magic drawer closes missing when the planar tip report was already on the
+    # handle but the USD pinch still sat a few centimetres out; 8 cm matches the tip noise.
+    capture_radius: float = 0.08
     handle_kp: float = 3000.0
     handle_kd: float = 120.0
 
@@ -769,23 +771,28 @@ class WorldSim:
         # gripper meets the topmost object under it first (a lid before the pieces in the box);
         # elsewhere the nearest one.
         walls = {ent_id for ent_id, _, _, _, wall in candidates if wall}
-        best, best_rank = None, None
+        best, best_rank, best_d = None, None, None
         for ent_id, obb, d, centred, _ in candidates:
-            if container.get(ent_id) in walls:
+            # Skip contents only when the fingers are not centred on them: a centred piece in a
+            # pourable box must still beat the box wall (flip-in-air picks were attaching w:box).
+            if container.get(ent_id) in walls and not centred:
                 continue
             over = _under(obb, grip)
             top = obb.center[2] + obb.size[2] / 2 if over else -math.inf
             rank = (centred and (over or not walls), top, -d)
             if best_rank is None or rank > best_rank:
-                best, best_rank = ent_id, rank
+                best, best_rank, best_d = ent_id, rank, d
+        # Prefer a drawer handle when it is at least as near as the best free object: closing on a
+        # pulled drawer after placing something inside otherwise attaches the contents and leaves
+        # ``holdingHandle`` false while the tip report still looks on the handle.
+        handle = self._nearest_handle(grip)
+        if handle is not None and (best is None or handle["d"] <= best_d):
+            handle["gripper"] = gripper_link
+            g.handle = handle
+            self.events.append({"t": self.time, "type": "grasp/handle", "robot": rs.entity_id,
+                                "entity": handle["entity"], "link": handle["link"]})
+            return
         if best is None:
-            handle = self._nearest_handle(grip)
-            if handle is not None:
-                handle["gripper"] = gripper_link
-                g.handle = handle
-                self.events.append({"t": self.time, "type": "grasp/handle", "robot": rs.entity_id,
-                                    "entity": handle["entity"], "link": handle["link"]})
-                return
             self.events.append({"t": self.time, "type": "grasp/miss", "robot": rs.entity_id})
             return
         body = self._root_body(best)
@@ -835,7 +842,7 @@ class WorldSim:
                 best = {"entity": ent.id, "link": link.id, "dof": int(self.model.jnt_dofadr[jid]),
                         "qadr": int(self.model.jnt_qposadr[jid]), "axis": (rot @ np.asarray(joint.axis.value)).tolist(),
                         "q0": float(self.data.qpos[self.model.jnt_qposadr[jid]]), "grip0": grip.tolist(),
-                        "lo": float(lo), "hi": float(hi)}
+                        "lo": float(lo), "hi": float(hi), "d": d}
         return best
 
     @staticmethod

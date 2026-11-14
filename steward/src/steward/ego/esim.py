@@ -895,11 +895,11 @@ class Esim:
             carry_box=(lambda xy: self._carried_box(carry, xy, yaw)) if carry is not None else None,
             turn_radius=radius, margin=self.config.nav_margin+grid.res,
             max_distance=self.config.carry_retreat_max)
-        if exit_point is None:
-            return None
-        tail = astar(grid, tuple(exit_point[:2]), goal, start_clear=0.)
+        tail = astar(grid, tuple(exit_point[:2]), goal, start_clear=0.) if exit_point is not None else None
         if tail is None:
-            return None
+            # No fixed-heading escape, e.g. the carried load still overhangs the table it was lifted
+            # from by more than the shallow-overlap bound. Plan as before: free the cells at the start.
+            return astar(grid, (rx, ry), goal)
         # A third value specifies fixed yaw for this translation only. It survives
         # receipt serialization; the executor must not turn before this waypoint.
         return [[rx, ry], exit_point] + tail[1:]

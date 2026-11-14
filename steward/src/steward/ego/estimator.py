@@ -3867,9 +3867,12 @@ class EgoEstimator:
                             and float(max(size[0], size[1])) < 0.32)
             # A bottle a little taller than its prior, because the mask took the drawer floor,
             # stays that bottle. Replacing the name with unknown lets the next merge swallow it.
-            keep_named = (track.category in _CONTENT and top in (
+            # A few voxels of a bottle whose base no view has shown fit the screw prior. With no
+            # segmenter view behind the track, that shape alone does not rename the bottle a kit part.
+            shape_only_part = (top in ASSEMBLY_PARTS and not mean and track.category != "toy_airplane")
+            keep_named = (track.category in _CONTENT and (shape_only_part or top in (
                               "unknown", "bottle", "cup", "box", "", "chair", "table", "sideboard",
-                              "cabinet", "wall", "wine_glass", "bowl", "mug", "plate")
+                              "cabinet", "wall", "wine_glass", "bowl", "mug", "plate"))
                           and float(max(size[0], size[1])) < 0.25 and float(size[2]) < 0.25)
             # An open drawer reads as a box. Renaming it drops the close: the handle plan
             # requires a drawer.

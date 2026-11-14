@@ -100,6 +100,10 @@ def _color_score(rule: str | None, color: np.ndarray, invalid_frac: float,
         return 0.0 if (g > r and g > b and saturation > 0.25) else -3.0
     if rule == "yellow":
         return 0.0 if (r > 0.45 and g > 0.35 and r >= g > b and g / r >= 0.65 and saturation > 0.45) else -3.0
+    if rule == "airplane_yellow":
+        # Content naming in a drawer: the toy airplane's body reads orange-yellow under warm light.
+        # The kit-part "yellow" above is narrower so that it stays apart from "orange".
+        return 0.0 if (r > 0.45 and g > 0.35 and r >= g > b and saturation > 0.45) else -3.0
     if rule == "orange":
         return 0.0 if (r > 0.45 and 0.25 < g / r < 0.65 and g > b and saturation > 0.45) else -3.0
     if rule == "red":
@@ -145,7 +149,7 @@ def content_color_name(size: np.ndarray, color: np.ndarray | None, invalid_frac:
     if (_color_score("white", color, invalid_frac) >= 0 and category in ("bottle", "unknown", "cup")
             and short < 0.08 and long < 0.16 and 0.05 < height < 0.15):
         return "pill_bottle"
-    if (_color_score("yellow", color, invalid_frac) >= 0 and category in ("bowl", "plate", "box", "cup")
+    if (_color_score("airplane_yellow", color, invalid_frac) >= 0 and category in ("bowl", "plate", "box", "cup")
             and long >= 0.12 and short >= 0.07 and height < 0.14):
         return "toy_airplane"
     if (_color_score("brown", color, invalid_frac) >= 0 and category in ("drawer", "box", "unknown")

@@ -1,4 +1,4 @@
-"""Headless MuJoCo integration tests for K2. Do not run on the development host."""
+"""Headless MuJoCo integration tests for screw fastening."""
 from __future__ import annotations
 
 import copy

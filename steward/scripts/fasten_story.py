@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Illustrate the upstream airplane manual; no robot controller or GL at import.
 
-Run on K2 with its GL environment already selected. --no-render never constructs
+Run on a machine with its GL environment already selected. --no-render never constructs
 Renderer. Direct placements and an invisible support during belly-up assembly are
 story fixtures, not robot capabilities or measurements of grasp/flip control.
 """

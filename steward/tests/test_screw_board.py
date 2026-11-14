@@ -38,13 +38,14 @@ def _hole_ids(entity) -> set[str]:
 
 
 def test_screw_board_and_screw_carry_the_holes_the_task_describes():
+    board_screw = toy_screw(length=0.066, shaft=0.012, head=0.024, mass=0.04)
     assert _hole_ids(screw_board()) == {"hole_0", "hole_1", "hole_2", "hole_3"}
-    assert _hole_ids(toy_screw()) == {"tip"}
+    assert _hole_ids(board_screw) == {"tip"}
     assert {h["id"] for h in screw_holes("screw_board")} == {"hole_0", "hole_1", "hole_2", "hole_3"}
     assert screw_holes("toy_screw")[0]["id"] == "tip"
     assert any(a.value == "screwdriver" for a in electric_screwdriver().rigid.links[0].affordances)
-    # Easy-mode geometry: ~3× shaft/head and board hole radius vs the original tiny parts.
-    screw_geoms = [g for g in toy_screw().rigid.links[0].geometry["collision"] if g.get("shape") == "cylinder"]
+    # Easy-mode geometry: ~3× shaft/head and board hole radius vs the airplane fasteners.
+    screw_geoms = [g for g in board_screw.rigid.links[0].geometry["collision"] if g.get("shape") == "cylinder"]
     radii = sorted(g["size"][0] for g in screw_geoms)
     assert abs(radii[0] - 0.012) < 1e-6 and abs(radii[1] - 0.024) < 1e-6
     hole = next(g for g in screw_board().rigid.links[0].geometry["collision"] if g.get("shape") == "cylinder")

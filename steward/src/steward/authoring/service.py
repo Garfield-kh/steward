@@ -1081,7 +1081,8 @@ SCREW_BOARD_ASSETS = {
     "dining-table": ("dining_table", {}),
     "steward-bot": ("steward_bot", {}),
     "screw-board": ("screw_board", {}),
-    "toy-screw": ("toy_screw", {}),
+    # Oversized vs airplane fasteners so tip-down insert is easy to see and seat.
+    "toy-screw": ("toy_screw", {"length": 0.066, "shaft": 0.012, "head": 0.024, "mass": 0.04}),
     "electric-screwdriver": ("electric_screwdriver", {}),
 }
 

@@ -406,6 +406,9 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
       description: 'Execute the plan of a receipt from ego_predict. Waits for the skill to finish unless wait is '
         + 'false. Staged assembly skills can take tens of minutes: a wait timeout leaves the job running. '
         + 'Poll its status; keep each run_code wait at most 240 seconds and do not body_stop just because a poll times out. '
+        + 'While such a skill runs the robot may leave the table, change viewpoints and fetch parts on its own; a status that stays running or docked for many minutes is normal. '
+        + 'Interrupting a running assembly skill usually leaves the part placed but not fastened. When it ends, confirm with ego_state that the part is on its body before the next step. '
+        + 'If one sub-goal shows no real progress after three high-level attempts, switch to another sub-goal and return to it later. '
         + 'The robot refuses receipts that are infeasible, expired, already used, or above the risk limit.',
       parameters: {
         receipt: { type: 'string', required: true, description: 'Receipt id returned by ego_predict.' },

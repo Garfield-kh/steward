@@ -36,6 +36,7 @@ CATEGORY_PRIORS: dict[str, dict] = {
     "car_body": {"role": "object", "root": {"free": 1.0}, "affordances": ["graspable"], "fragility": 0.1},
     "car_wheel": {"role": "object", "root": {"free": 1.0}, "affordances": ["graspable"], "fragility": 0.05},
     "toy_screw": {"role": "object", "root": {"free": 1.0}, "affordances": ["graspable"], "fragility": 0.0},
+    "screw_board": {"role": "object", "root": {"free": 1.0}, "affordances": ["graspable", "flat"], "fragility": 0.05},
     "electric_screwdriver": {"role": "object", "root": {"free": 1.0}, "affordances": ["graspable", "screwdriver"],
                              "fragility": 0.05},
     "manual": {"role": "object", "root": {"free": 1.0}, "affordances": ["graspable", "flat"], "fragility": 0.1},
@@ -58,27 +59,34 @@ UNKNOWN_PRIOR = {"role": "object", "root": {"free": 0.5, "fixed": 0.5}, "afforda
 # metadata leaves geometric matching available; explicit selectors override it.
 SCREW_HOLES: dict[str, list[dict]] = {
     "airplane_fuselage": [
-        {"id": "wing_0", "p": [0.02, 0.012, 0.038], "group": "fuselage.wing", "mates": ('wing.mount',)},
-        {"id": "wing_1", "p": [0.02, -0.012, 0.038], "group": "fuselage.wing", "mates": ('wing.mount',)},
-        {"id": "gear_0", "p": [0.0, 0.012, 0.002], "group": "fuselage.gear", "mates": ('gear.mount',)},
-        {"id": "gear_1", "p": [0.0, -0.012, 0.002], "group": "fuselage.gear", "mates": ('gear.mount',)},
+        {"id": "wing_0", "p": [0.02, 0.012, 0.038], "n": [0.0, 0.0, 1.0], "group": "fuselage.wing", "mates": ('wing.mount',)},
+        {"id": "wing_1", "p": [0.02, -0.012, 0.038], "n": [0.0, 0.0, 1.0], "group": "fuselage.wing", "mates": ('wing.mount',)},
+        {"id": "gear_0", "p": [0.0, 0.012, 0.002], "n": [0.0, 0.0, -1.0], "group": "fuselage.gear", "mates": ('gear.mount',)},
+        {"id": "gear_1", "p": [0.0, -0.012, 0.002], "n": [0.0, 0.0, -1.0], "group": "fuselage.gear", "mates": ('gear.mount',)},
     ],
     "airplane_wing": [
-        {"id": "mount_0", "p": [0.0, 0.012, 0.008], "group": "wing.mount", "mates": ('fuselage.wing',)},
-        {"id": "mount_1", "p": [0.0, -0.012, 0.008], "group": "wing.mount", "mates": ('fuselage.wing',)},
+        {"id": "mount_0", "p": [0.0, 0.012, 0.008], "n": [0.0, 0.0, -1.0], "group": "wing.mount", "mates": ('fuselage.wing',)},
+        {"id": "mount_1", "p": [0.0, -0.012, 0.008], "n": [0.0, 0.0, -1.0], "group": "wing.mount", "mates": ('fuselage.wing',)},
     ],
-    "airplane_propeller": [{"id": "hub", "p": [0.0, 0.0, 0.004]}],
+    "airplane_propeller": [{"id": "hub", "p": [0.0, 0.0, 0.004], "n": [0.0, 0.0, -1.0]}],
     "airplane_landing_gear": [
-        {"id": "mount_0", "p": [0.0, 0.012, 0.006], "group": "gear.mount", "mates": ('fuselage.gear',)},
-        {"id": "mount_1", "p": [0.0, -0.012, 0.006], "group": "gear.mount", "mates": ('fuselage.gear',)},
+        {"id": "mount_0", "p": [0.0, 0.012, 0.006], "n": [0.0, 0.0, 1.0], "group": "gear.mount", "mates": ('fuselage.gear',)},
+        {"id": "mount_1", "p": [0.0, -0.012, 0.006], "n": [0.0, 0.0, 1.0], "group": "gear.mount", "mates": ('fuselage.gear',)},
     ],
     "car_body": [
-        {"id": "wheel_0", "p": [0.05, 0.048, 0.01575], "group": "body.wheel0", "mates": ('wheel.hub',)},
-        {"id": "wheel_1", "p": [0.05, -0.048, 0.01575], "group": "body.wheel1", "mates": ('wheel.hub',)},
-        {"id": "wheel_2", "p": [-0.05, 0.048, 0.01575], "group": "body.wheel2", "mates": ('wheel.hub',)},
-        {"id": "wheel_3", "p": [-0.05, -0.048, 0.01575], "group": "body.wheel3", "mates": ('wheel.hub',)},
+        {"id": "wheel_0", "p": [0.05, 0.048, 0.01575], "n": [0.0, 1.0, 0.0], "group": "body.wheel0", "mates": ('wheel.hub',)},
+        {"id": "wheel_1", "p": [0.05, -0.048, 0.01575], "n": [0.0, -1.0, 0.0], "group": "body.wheel1", "mates": ('wheel.hub',)},
+        {"id": "wheel_2", "p": [-0.05, 0.048, 0.01575], "n": [0.0, 1.0, 0.0], "group": "body.wheel2", "mates": ('wheel.hub',)},
+        {"id": "wheel_3", "p": [-0.05, -0.048, 0.01575], "n": [0.0, -1.0, 0.0], "group": "body.wheel3", "mates": ('wheel.hub',)},
     ],
-    "car_wheel": [{"id": "hub", "p": [0.0, 0.0, 0.008], "group": "wheel.hub", "mates": ('body.wheel0', 'body.wheel1', 'body.wheel2', 'body.wheel3')}],
+    "car_wheel": [{"id": "hub", "p": [0.0, 0.0, 0.008], "n": [0.0, 0.0, 1.0], "through": True, "group": "wheel.hub", "mates": ('body.wheel0', 'body.wheel1', 'body.wheel2', 'body.wheel3')}],
+    "toy_screw": [{"id": "tip", "p": [0.0, 0.0, 0.006], "n": [0.0, 0.0, -1.0]}],
+    "screw_board": [
+        {"id": "hole_0", "p": [0.07, 0.05, 0.009], "n": [0.0, 0.0, 1.0]},
+        {"id": "hole_1", "p": [0.07, -0.05, 0.009], "n": [0.0, 0.0, 1.0]},
+        {"id": "hole_2", "p": [-0.07, 0.05, 0.009], "n": [0.0, 0.0, 1.0]},
+        {"id": "hole_3", "p": [-0.07, -0.05, 0.009], "n": [0.0, 0.0, 1.0]},
+    ],
 }
 
 # Static template geometry, same catalogue provenance as SCREW_HOLES above and
@@ -93,6 +101,7 @@ SCREW_HOLE_FRAMES: dict[str, dict] = {
     "airplane_landing_gear": {"sizeXYM": [0.03, 0.08], "centerXYM": [0.0, 0.0]},
     "car_body": {"sizeXYM": [0.16, 0.101], "centerXYM": [0.0, 0.0]},
     "car_wheel": {"sizeXYM": [0.05, 0.05], "centerXYM": [0.0, 0.0]},
+    "screw_board": {"sizeXYM": [0.28, 0.20], "centerXYM": [0.0, 0.0]},
 }
 
 # Words that name a listed category in other terms ("desk" for a table).

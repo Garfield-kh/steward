@@ -62,8 +62,7 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
         + 'axes may be ambiguous. screwHoles includes source and frame. Outline-compatible priors retain source=prior; '
         + 'positionsByRegistration lists alternative entity-frame positions (one shared index for all holes on an object). '
         + 'orientation.holeRegistration explains compatibility and unresolved half turns. Unregistered templates cannot '
-        + 'drive alignment: reobserve dimensions/features or use ordinary placement. A label alone is not registration. '
-        + 'appearance says what you remember of an object\'s top face: how long ago you '
+        + 'drive alignment: reobserve dimensions/features or use ordinary placement. A label alone is not registration. '        + 'appearance says what you remember of an object\'s top face: how long ago you '
         + 'saw it, the share seen, plain / interiorColors (plain true or interiorColors under about 20: a cardboard '
         + 'back; do not use spread alone — lighting makes a plain back look varied) and stale (put down since, look '
         + 'again); ego_match_face compares remembered faces.',
@@ -195,7 +194,7 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
         + 'candidate world yaw (radians) and offset in the on-surface frame, ranked against the pre-transport estimated heading when available. '
         + 'assemble_onto and place perform placement only. fasten_onto {part,body,hole?,heldHole?,drive?} adds deterministic screw seating, optional driving and perceptual verification. The default drive=false selects seating; request drive=true when powered driving is required; it does not read or change environment mode. Follow the task-required component order, tool orientation and body orientation. '
         + 'Attempt fixation and inspect independent evidence. Missing optional measurements produce warnings and catalogue/grasp estimates; continue feasible stages and report unverified attachment separately from action execution. '
-        + 'seat_screw {part,body,hole,method?} defaults to ordinary pick/place at the just-released component holes, propagated from grasp-relative geometry and release encoders, then checks independent screw geometry. fasten_onto batches the ordinary releases before a shared view. Failed or unknown landings share at most two replays per job; this posterior recovery is independent of correctOnce and wingRetry; method="contact" selects the previous endpoint controller; hole must be one exact body hole id. regrasp_upright {target,on?} stands any elongated tool on a perceived support and regrips it from above. drive_screw {screw} (or {body,hole}) grips a perceived powered driver, turns its estimated tip down, contacts the best screw-head estimate and holds. Missing endpoints use catalogue geometry transported from grasp with encoders. '
+        + 'seat_screw {part,body,hole,method?} defaults to ordinary pick/place at the just-released component holes, propagated from grasp-relative geometry and release encoders, then checks independent screw geometry. fasten_onto batches the ordinary releases before a shared view. Failed or unknown landings share at most two replays per job; this posterior recovery is independent of correctOnce and wingRetry; method="contact" selects the previous endpoint controller; hole must be one exact body hole id. regrasp_upright {target,on?} stands any elongated tool on a perceived support and regrips it from above. drive_screw {screw} (or {body,hole} / target: a seated toy_screw): tipSource must be observed — call ego_observe / ego_screw_holes first; grips a perceived powered driver, turns its estimated tip down, contacts the best screw-head estimate and holds. Missing endpoints use catalogue geometry transported from grasp with encoders. '
         + 'flip_assembly {body,turnOver?} lifts, checks independent following, places the load and registers its best estimated face. turnOver defaults to true; false performs a lift/set-down following check. Loose components without confirmed screw landings produce an advisory warning before flipping; the pinch targets the body outside their volumes. fasten_onto continues through the first screw attempts, but fails if any requested landing remains failed or unknown after recovery. Read postcondition.confirmedSeatedScrews and requestedScrews; a confirmed landing is independent visual placement evidence, not mechanical attachment. Each starts with an empty hand. '
         + 'hole/heldHole accept actual feature ids or shared id prefixes from screwHoles; the group metadata string is not itself a selector. '
         + 'For fitting a multi-hole interface use its complete group/prefix; only seat_screw subsequently selects a single aligned hole. Do not use a single pair to bypass a failed fit: one pair cannot constrain rotation. '
@@ -235,8 +234,7 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
         + 'offset). Ordinary planar placement of an interface part also restores its grasp heading when yaw is omitted; explicit yaw overrides it. '
         + 'Check the predicted spot against the intended feature: ordinary placement can move an occupied spot and provides no precision mating guarantee; '
         + 'optional roll in radians tips it about the arm before release, e.g. π/2 = 90° '
-        + 'to set a flat object down on its side; not together with flip), "pour" (the held object must be pourable; needs on: a surface; tips it over the '
-        + 'spot so its contents slide out there in a heap, then holds it upright again, still in the gripper; the spot '
+        + 'to set a flat object down on its side; not together with flip), "insert_screw_into_hole" (needs a held toy_screw and on: the part with screw holes; optional hole / maxAttempts; places the screw tip-down into the hole, senses that it stands head-up in the hole, and re-picks / retries if it falls or misses), "pour" (the held object must be pourable; needs on: a surface; tips it over the '        + 'spot so its contents slide out there in a heap, then holds it upright again, still in the gripper; the spot '
         + 'keeps the contents\' slide from every edge so nothing falls off; count the contents before pouring, since '
         + 'flat ones can land wholly hidden under one another), "open" / '
         + '"close" (needs target: a drawer; the robot pulls or pushes its handle and ends standing back so the inside '
@@ -256,7 +254,7 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
         + 'A correction proposal keeps the measured centre: re-identify the object, predict pick, then predict '
         + 'the supplied place parameters and reobserve. Confirm asymmetric features before accepting a directed orientation.',
       parameters: {
-        skill: { type: 'string', enum: ['regrasp_upright', 'assemble_onto', 'fasten_onto', 'seat_screw', 'drive_screw', 'flip_assembly', 'navigate', 'pick', 'place', 'pour', 'open', 'close'], required: true, description: 'Skill to predict.' },
+        skill: { type: 'string', enum: ['regrasp_upright', 'assemble_onto', 'fasten_onto', 'seat_screw', 'drive_screw', 'flip_assembly', 'insert_screw_into_hole', 'navigate', 'pick', 'place', 'pour', 'open', 'close'], required: true, description: 'Skill to predict.' },
         turnOver: { type: 'boolean', description: 'flip_assembly: turn the assembly over (default true); false lifts and sets down to inspect following.' },
         drive: { type: 'boolean', description: 'fasten_onto: false seats screws without using a powered driver; default false; explicitly set true to drive. Action choice only, independent of environment mode.' },
         correctOnce: { type: 'boolean', description: 'Simple seating: observe and compensate a fresh out-of-capture landing error (default true).' },
@@ -268,19 +266,19 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
         screw: { type: 'string', description: 'drive_screw: robot-perceived screw id returned by seat_screw.' },
         part: { type: 'string', description: 'assemble_onto/fasten_onto: perceived loose component id; seat_screw: the already aligned, released component id.' },
         body: { type: 'string', description: 'assembly/fastening/flip_assembly: supported body id; for a newly released body use releasedReference.entity and inspect its low-confidence frame.' },
-        target: { type: 'string', description: 'pick: id of the object to grasp; open/close: id of the drawer.' },
-        on: { type: 'string', description: 'place: id of the surface, screw-hole part, open drawer or larger bowl to put the held object on or in; pour: id of the surface.' },
+        target: { type: 'string', description: 'pick: id of the object to grasp; open/close: id of the drawer; drive_screw: id of the seated toy_screw to tighten.' },
+        on: { type: 'string', description: 'place / insert_screw_into_hole: id of the surface, screw-hole part, open drawer or larger bowl to put the held object on or in; pour: id of the surface.' },
         offset: { type: 'array', items: { type: 'number' }, description: 'place, pour: [dx, dy] of the spot from the surface centre in the surface frame, metres; without it the free spot nearest you. If something already lies at the requested spot, the free spot nearest it is used instead and the issues say where (the receipt plan.spot holds the spot used). During hole alignment, selects a fitted candidate offset within sensor tolerance; incompatible offsets are rejected, never substituted for the hole fit.' },
         alignTo: { type: 'string', description: 'place: id of the part whose screw holes the held part should seat on. Use when on is a table or other surface and the mate is another object on it; omit when on itself is the mate.' },
         hole: { type: 'string', description: 'place/assemble_onto/fasten_onto: mate hole id or complete prefix; seat_screw/drive_screw: one exact body hole id. Overrides catalogue interface pairing; ambiguous geometry still returns a default plan and alternatives for post-release verification.' },
-        heldHole: { type: 'string', description: 'place/assemble_onto: observed or registered prior held-object hole id or prefix to use; with no selectors, catalogue-compatible complete groups are tried; without group data all held holes must fit. Explicit selection overrides catalogue pairing.' },
-        alignHoles: { type: 'boolean', description: 'place: seat screw holes when both parts have them (default true when on is the mate or alignTo is set). Set false to keep a manual offset.' },
+        heldHole: { type: 'string', description: 'place/assemble_onto: observed or registered prior held-object hole id or prefix to use; with no selectors, catalogue-compatible complete groups are tried; without group data all held holes must fit. Explicit selection overrides catalogue pairing.' },        alignHoles: { type: 'boolean', description: 'place: seat screw holes when both parts have them (default true when on is the mate or alignTo is set). Set false to keep a manual offset.' },
+        maxAttempts: { type: 'number', description: 'insert_screw_into_hole: how many place+verify cycles to try if the screw falls or misses (default 3, max 8).' },
         at: { type: 'array', items: { type: 'number' }, description: 'place on the floor: [x, y] in metres.' },
         x: { type: 'number', description: 'navigate: goal x in metres.' },
         y: { type: 'number', description: 'navigate: goal y in metres.' },
         yaw: { type: 'number', description: 'navigate: goal heading; place: optional absolute world yaw of the held object\'s estimated frame (as ego_state yawDeg reports it), in radians, not a relative wrist turn. A single hole does not constrain yaw: omitting it restores the estimated world heading recorded at grasp, cancelling transport rotation (falls back to the current held heading if no grasp snapshot exists). This preserves initial orientation uncertainty; supply a visually grounded yaw to change orientation. For circular or near-square objects the frame may have no observable physical direction, so this command cannot certify a semantic front. Verify asymmetric features after release. If template holes are unregistered, yaw alone does not register them; use observed features or explicit ordinary placement with alignHoles=false and offset.' },
         flip: { type: 'boolean', description: 'place: turn the held object upside down before setting it down. pick: take it so that it can be turned over later; some arms take it tilted for that, and a place with flip says when the object must be picked again with flip.' },
-        roll: { type: 'number', description: 'place: tip the held object about the arm before setting it down, radians (π/2 = 90° onto its side). Not together with flip.' },
+        roll: { type: 'number', description: 'place: tip the held object about the arm before setting it down, radians (π/2 = 90° onto its side). Not together with flip. drive_screw: optional stand angle (default ±π/2, bit down).' },
         clearance: { type: 'number', description: 'place, pour: least gap in metres kept to objects already on the surface (default 0.015). With an offset, 0 allows contact or overlap (interlocking pieces, stacking): the spot is used exactly as requested, never shifted aside. Screw-hole alignment always uses 0.' },
       },
       output: { schema: JSON_OUTPUT, render: (_a, v) => text(v) },
@@ -288,10 +286,24 @@ export function egoTools(ego: EgoService): ToolDefinition[] {
         const params: JsonObject = {}
         // Tool default is seating; powered driving is an explicit action choice.
         if (args.skill === 'fasten_onto' && args.drive === undefined) params.drive = false
-        for (const key of ['drive', 'correctOnce', 'method', 'stageScrews', 'closeRelease', 'recoverDropped', 'wingRetry', 'part', 'screw', 'body', 'turnOver', 'target', 'on', 'offset', 'alignTo', 'hole', 'heldHole', 'alignHoles', 'at', 'x', 'y', 'yaw', 'flip', 'roll', 'clearance'] as const) {
-          if (args[key] !== undefined) params[key] = args[key]
+        for (const key of ['drive', 'correctOnce', 'method', 'stageScrews', 'closeRelease', 'recoverDropped', 'wingRetry', 'part', 'screw', 'body', 'turnOver', 'target', 'on', 'offset', 'alignTo', 'hole', 'heldHole', 'alignHoles', 'maxAttempts', 'at', 'x', 'y', 'yaw', 'flip', 'roll', 'clearance'] as const) {          if (args[key] !== undefined) params[key] = args[key]
         }
         return json(receiptView(await ego.predict(args.skill, params, exec.signal)))
+      },
+    }),
+    defineTool({
+      name: 'ego_screw_holes',
+      description: 'Locate the screw holes on a part in the world frame and report whether each faces up. Pulls a fresh '
+        + 'camera frame first. Returns tipSource (only "observed" is trustworthy — never trust a place wristRoll '
+        + 'alone), tipRollDeg, each hole\'s bodyP/worldP/worldN/upDot/facing, and holesFaceUp. holesFaceUp is true '
+        + 'only when tipSource is observed and a mount faces up. If false or tipSource is unknown, tip with place '
+        + 'roll=±π/2, wait for the cameras, and call again before picking a wheel.',
+      parameters: {
+        entity: { type: 'string', required: true, description: 'Id of the part whose screw holes to locate.' },
+      },
+      output: { schema: JSON_OUTPUT, render: (_a, v) => text(v) },
+      async execute(args, exec) {
+        return json(await ego.screwHoles(args.entity, exec.signal))
       },
     }),
     defineTool({

@@ -41,7 +41,9 @@ SHAPES: dict[str, dict] = {
     "car_wheel": {"dims": (0.05, 0.05, 0.016), "floor": False, "color": "dark"},
     # At this scale two depth-voxel boundaries can double the measured diameter.
     # Tolerate that error in scoring only; completion still uses the physical prior.
-    "toy_screw": {"dims": (0.016, 0.016, 0.022), "extent_slack": 0.020, "floor": False},
+    # extent_slack also covers the larger screw-board toy_screw (~5 cm).
+    "toy_screw": {"dims": (0.016, 0.016, 0.022), "extent_slack": 0.040, "floor": False},
+    "screw_board": {"dims": (0.28, 0.20, 0.018), "floor": False, "color": "light"},
     "electric_screwdriver": {"dims": (0.16, 0.035, 0.04), "extent_slack": 0.015, "floor": False, "color": "orange"},
     "manual": {"dims": (0.24, 0.24, 0.004), "plan_scale": (0.25, 1.3), "floor": False},
     "picture": {"dims": (0.24, 0.24, 0.004), "plan_scale": (0.25, 1.3), "floor": False},

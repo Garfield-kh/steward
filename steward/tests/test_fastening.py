@@ -70,8 +70,9 @@ def test_tighten_seats_two_screws_and_publishes_only_world_truth(sim):
         idx = demo.SCREWS.index(screw)
         h = demo.feature_world(sim, 'screw-hole', demo.WING, f'mount_{idx}')
         assert np.linalg.norm(f['seat'] - h['entry']) < .001
-    # Existing perception payload stays just the old id/p markers.
-    assert all(set(h) == {'id', 'p'} for h in sim._screw_holes(sim.template.entity(demo.WING), None))
+    # Perception exposes id/p and optional outward normal ``n`` (master); not fastening axis/entry.
+    assert all({'id', 'p'} <= set(h) <= {'id', 'p', 'n'}
+               for h in sim._screw_holes(sim.template.entity(demo.WING), None))
     world = SceneState.from_dict(sim.world_state())
     world.mode = 'ego'
     assert not build_mjcf(world, fasteners=True).fastener_welds

@@ -6,9 +6,11 @@ floor; this is a geometric estimate, not a measured real-robot calibration. USD
 joint-frame rotations are converted to child-link frames, with sub-micrometre
 mount residuals rounded away. The lift reads metres above its lowest position.
 
-The planar chassis, fixed two-camera head, masses, servo gains and simplified
-collision geometry are simulation approximations. Fingers remain visual-only;
-grasping uses ideal attachment and an operational, uncalibrated TCP.
+The planar chassis, fixed two-camera head (Cobot Magic top/main view stand-in),
+wrist RGB-D on each Piper ``link6`` (official ``hand_camera_joint``), masses,
+servo gains and simplified collision geometry are simulation approximations.
+Fingers remain visual-only; grasping uses ideal attachment and an operational,
+uncalibrated TCP.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ import math
 import numpy as np
 
 from steward.assets.generators import HEAD_HEIGHT_M, ROBOT_ARM, ROBOT_BODY, STEEL, TEMPLATE_ID, _fixed, head_link
-from steward.math3d import quat_from_axis_angle, quat_normalize
+from steward.math3d import quat_from_axis_angle, quat_mul, quat_normalize
 from steward.scene.schema import Entity, Joint, Link, RigidTree, exact, pose, primitive
 
 GRIPPER_RGBA = [0.10, 0.10, 0.10, 1.0]
@@ -65,6 +67,33 @@ ARM_SEPARATION = 2 * ARM_MOUNT_OFFSET[1]
 TCP_OFFSET = list(_PIPER_FINGERS[0]["xyz"])  # operational TCP, not a manufacturer calibration
 FINGER_OPEN = 0.05               # per finger, metres from closed
 FINGER_CLOSED = 0.0
+
+# Official AgileX ``hand_camera_joint`` (piper_description_v100_camera.urdf): fixed on link6.
+# Cobot Magic / Mobile ALOHA mounts one wrist depth camera per follower arm (Orbbec DaBai class).
+HAND_CAMERA_XYZ = [0.0, 0.075, 0.03]
+HAND_CAMERA_RPY = (0.0, -0.3, 1.57)  # URDF fixed-axis roll-pitch-yaw, radians
+# DaBai depth FOV ≈ H 67.9° / V 45.3°; use the vertical FOV for the pinhole ``fovy``.
+WRIST_CAMERA_INTRINSICS = {"width": 640, "height": 400, "fovy": 45.3}
+
+
+def _quat_from_rpy(roll: float, pitch: float, yaw: float) -> list[float]:
+    """URDF RPY → MuJoCo wxyz (extrinsic fixed XYZ ≡ intrinsic ZYX)."""
+    return quat_mul(
+        quat_from_axis_angle([0.0, 0.0, 1.0], yaw),
+        quat_mul(quat_from_axis_angle([0.0, 1.0, 0.0], pitch),
+                 quat_from_axis_angle([1.0, 0.0, 0.0], roll)))
+
+
+def _wrist_camera_sensor(arm: str) -> dict:
+    """RGB-D sensor on Piper ``link6`` for arm ``L`` or ``R`` (eye-in-hand)."""
+    return {
+        "id": f"{arm}_wrist_camera",
+        "kind": "rgbd",
+        "mount": pose(HAND_CAMERA_XYZ, _quat_from_rpy(*HAND_CAMERA_RPY)),
+        "intrinsics": dict(WRIST_CAMERA_INTRINSICS),
+        "rateHz": 10,
+    }
+
 
 # A working posture (joint1..joint6): the arm folds forward and slightly up, clear of the table.
 # The all-zero URDF posture is a folded singularity where IK has no useful gradient, so solves
@@ -180,8 +209,10 @@ def _piper_arm(prefix: str, mount_p: list[float]) -> tuple[list[Link], list[Join
             if name == "link6" else None
         # The gripper is visual-only; grasping uses the link6 TCP and ideal attachment.
         geometry = _palm_geometry() if name == "link6" else _link_geometry(spec, ROBOT_ARM)
+        sensors = [_wrist_camera_sensor(prefix)] if name == "link6" else []
         link = Link(id=lid, name=f"{prefix} {name}", geometry=geometry,
-                    inertial=exact({"mass": spec[2]}), affordances=affordances or [])
+                    inertial=exact({"mass": spec[2]}), affordances=affordances or [],
+                    sensors=sensors)
         links.append(link)
         if name == "arm_base":
             joints.append(Joint(id=f"{prefix}_mount", parent="frame", child=lid, type=exact("fixed"),
@@ -212,10 +243,13 @@ def _piper_arm(prefix: str, mount_p: list[float]) -> tuple[list[Link], list[Join
 
 
 def cobot_magic(separation: float = ARM_SEPARATION, mount_height: float = ARM_MOUNT_HEIGHT) -> Entity:
-    """Cobot Magic twin: mobile chassis, lifting torso, two Piper arms, and the mobile kitchen
-    robot's head (:func:`~steward.assets.generators.head_link`: a survey camera and a
-    short-focal-length work camera) on a mast fixed to the chassis.
-    Both arms start with joint1–joint6 at zero radians and their fingers open.
+    """Cobot Magic twin: mobile chassis, lifting torso, two Piper arms with wrist cameras, and a
+    fixed mast head (:func:`~steward.assets.generators.head_link`) standing in for the factory
+    top/main view between the follower arms.
+
+    Public Cobot Magic / Mobile ALOHA layout: one top camera plus one wrist depth camera per
+    follower Piper (eye-in-hand on ``link6``, ``hand_camera_joint``). Both arms start with
+    joint1–joint6 at zero radians and their fingers open.
 
     ``separation`` is the arm-root spacing; ``mount_height`` is their height above the floor
     at ``LIFT_HOME``. Both are metres and override the USD-derived defaults. The lift reads

@@ -64,6 +64,8 @@ def console_state(host) -> dict:
                               h.get("phase")]
                              for h in host.observer.history.get(rid, []) if h.get("meanPositionErrorM") is not None][-300:],
             "camera": f"robot:{rid}",
+            # Sensor ids in model order (head + wide; Cobot Magic also exposes L/R wrist cameras).
+            "cameras": [c["id"] for c in sim.robot_cameras(rid)],
             "embodiment": host.embodiments.get(rid),
         }
     floor = next((g for g in ground_truth if g["category"] == "floor"), None)

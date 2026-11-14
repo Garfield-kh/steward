@@ -232,10 +232,16 @@
   <div class="grid3">
     <section class="card">
       <h2 id="robotCamLabel">机器人相机</h2>
-      <div class="cam"><p class="caption" id="camCaption-head_camera">头部相机 · 看前方（垂直视野 60°，俯 30°）</p>
-        <img id="camRobot-head_camera" alt="头部相机"></div>
-      <div class="cam"><p class="caption" id="camCaption-wide_camera">广角相机 · 短焦，看身前台面与夹爪（垂直视野 100°，俯 45°）</p>
-        <img id="camRobot-wide_camera" alt="广角相机"></div>
+      <div id="robotCamList">
+        <div class="cam" data-sensor="head_camera"><p class="caption" id="camCaption-head_camera">头部相机 · 顶部/前方主视角（垂直视野 60°，俯 30°）</p>
+          <img id="camRobot-head_camera" alt="头部相机"></div>
+        <div class="cam" data-sensor="wide_camera"><p class="caption" id="camCaption-wide_camera">广角相机 · 短焦，看身前台面与夹爪（垂直视野 100°，俯 45°）</p>
+          <img id="camRobot-wide_camera" alt="广角相机"></div>
+        <div class="cam" data-sensor="L_wrist_camera" hidden><p class="caption" id="camCaption-L_wrist_camera">左腕相机 · Piper 末端 eye-in-hand（垂直视野 ≈45°）</p>
+          <img id="camRobot-L_wrist_camera" alt="左腕相机"></div>
+        <div class="cam" data-sensor="R_wrist_camera" hidden><p class="caption" id="camCaption-R_wrist_camera">右腕相机 · Piper 末端 eye-in-hand（垂直视野 ≈45°）</p>
+          <img id="camRobot-R_wrist_camera" alt="右腕相机"></div>
+      </div>
     </section>
     <section class="card">
       <h2>俯视地图（蓝：真实状态　橙：自我态）</h2>
@@ -1072,25 +1078,60 @@ $('chatStop').onclick = async () => { try { await api('POST', '/console/chat/sto
 $('chatReset').onclick = async () => { try { await api('POST', '/console/chat/reset', { agent: chatTarget }); refreshChat(); } catch (e) { showError(e); } };
 renderTarget();
 
-const ROBOT_CAMERAS = ['head_camera', 'wide_camera'];
+const ROBOT_CAMERA_ORDER = ['head_camera', 'wide_camera', 'L_wrist_camera', 'R_wrist_camera'];
 const cameraMeter = rateMeter();
 const cameraShown = {};
-const cameraCaption = Object.fromEntries(ROBOT_CAMERAS.map(c => [c, $('camCaption-' + c).textContent]));
+const cameraCaption = Object.fromEntries(
+  ROBOT_CAMERA_ORDER.map(c => [c, $('camCaption-' + c) ? $('camCaption-' + c).textContent : c]));
+function activeRobotCameras() {
+  const listed = state && state.robots && state.robots[robotId] && state.robots[robotId].cameras;
+  if (Array.isArray(listed) && listed.length) {
+    return ROBOT_CAMERA_ORDER.filter(id => listed.includes(id))
+      .concat(listed.filter(id => !ROBOT_CAMERA_ORDER.includes(id)));
+  }
+  return ['head_camera', 'wide_camera'];
+}
+function syncRobotCameraPanes(sensors) {
+  const want = new Set(sensors);
+  document.querySelectorAll('#robotCamList .cam[data-sensor]').forEach(el => {
+    const id = el.dataset.sensor;
+    const show = want.has(id);
+    el.hidden = !show;
+    if (!show) {
+      const img = $('camRobot-' + id);
+      if (img) img.removeAttribute('src');
+    }
+  });
+  for (const id of sensors) {
+    if ($('camRobot-' + id)) continue;
+    const wrap = document.createElement('div');
+    wrap.className = 'cam';
+    wrap.dataset.sensor = id;
+    wrap.innerHTML = `<p class="caption" id="camCaption-${id}">${esc(id)}</p><img id="camRobot-${id}" alt="${esc(id)}">`;
+    $('robotCamList').appendChild(wrap);
+    cameraCaption[id] = id;
+  }
+}
 async function refreshCameraImage(sensor) {
+  const caption = $('camCaption-' + sensor);
+  const img = $('camRobot-' + sensor);
+  if (!caption || !img) return;
   const res = await fetch(`/wca/render?camera=${encodeURIComponent('robot:' + robotId)}&sensor=${sensor}&width=480&height=360&format=jpeg`,
     { cache: 'no-store' });
   if (res.status === 404) {
-    setText($('camCaption-' + sensor), `${cameraCaption[sensor]} · ${robotId} 没有这台相机（场景按旧的机器人模型构建，运行 steward build-kitchen 重建）`);
-    $('camRobot-' + sensor).removeAttribute('src');
+    setText(caption, `${cameraCaption[sensor] || sensor} · ${robotId} 没有这台相机（场景按旧模型构建，请重建场景）`);
+    img.removeAttribute('src');
     return;
   }
   if (!res.ok) return;
-  cameraShown[sensor] = await showBlob($('camRobot-' + sensor), res, cameraShown[sensor]);
-  setText($('camCaption-' + sensor), cameraCaption[sensor]);
+  cameraShown[sensor] = await showBlob(img, res, cameraShown[sensor]);
+  setText(caption, cameraCaption[sensor] || sensor);
 }
 async function refreshRobotCamera() {
   if (!robotId) return;
-  await Promise.all(ROBOT_CAMERAS.map(refreshCameraImage));
+  const sensors = activeRobotCameras();
+  syncRobotCameraPanes(sensors);
+  await Promise.all(sensors.map(refreshCameraImage));
   setText($('robotCamLabel'), `机器人相机 · ${robotId} · ${cameraMeter().toFixed(1)} fps`);
 }
 

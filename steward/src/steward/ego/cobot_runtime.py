@@ -27,7 +27,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from steward.assets.cobot import cobot_magic
-from steward.ego.cobot_mission import bowl_onto_plate, carry_to_station, nest_bowls, perceive
+from steward.ego.cobot_mission import bowl_onto_plate, carry_to_station, drive_screws, nest_bowls, perceive
 from steward.ego.cobot_skills import CobotSkills, MotionConfig
 from steward.ego.estimator import EgoEstimator
 from steward.ego.perception import decode_rgbd
@@ -37,8 +37,9 @@ MISSIONS: dict[str, Callable] = {
     "bowl-on-plate": bowl_onto_plate,
     "nest-bowls": nest_bowls,
     "carry-to-counter": carry_to_station,
+    "drive-screws": drive_screws,
 }
-# The short-focal-length head camera sees both arms' workspace on the table in front.
+# Wide head camera for survey; wrist cameras refine insert/drive aim (see drive_screws).
 SURVEY_CAMERA = "wide_camera"
 IDLE_LOOK_S = 2.0
 RESET_POLL_S = 0.5

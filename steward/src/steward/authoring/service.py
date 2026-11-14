@@ -1086,6 +1086,77 @@ SCREW_BOARD_ASSETS = {
 }
 
 
+COBOT_SCREW_BOARD_TASK = (
+    "你是 Cobot Magic 双手机器人。桌上有螺丝板、四根螺丝和一把电动螺丝刀。"
+    "一次只拧一颗：左臂（L）拿螺丝（保持轴线竖直、尖头朝下）并用 L_wrist_camera 对准空孔后 "
+    "insert_screw_into_hole（插入时工具必须近竖直 tip-down，不可横放）；"
+    "右臂（R）拿电动螺丝刀并用 R_wrist_camera 对准已入孔的螺丝帽后 drive_screw（刀留在右手）。"
+    "确认螺丝竖直入孔、帽朝上后再拧紧；确认拧紧后再处理下一颗，直到四个孔都装好。"
+)
+
+
+def cobot_screw_board_spec() -> dict:
+    """Screw-board workcell sized for Cobot Magic dual Piper reach (table ahead of the mounts).
+
+    Board sits in the shared strip (world x ≈ 0.53). Screws stand on the left arm's side (+y),
+    clear of the board's ±0.10 depth; the driver rests on the right arm's side (−y).
+    """
+    # Board on the midline so both arms can work the holes; screws on +y (L), driver on −y (R).
+    # Board footprint at (−0.32, 0): x ∈ [−0.46, −0.18], y ∈ [−0.10, 0.10]. Screw head radius
+    # 0.012 needs y ≥ 0.12; column starts at 0.20 with 0.07 spacing on the 0.9 m table.
+    screws = [{"id": f"w:screw-{i}", "asset": "toy-screw", "on": "w:table-1",
+               "offset": [-0.38, 0.20 + 0.07 * i]} for i in range(4)]
+    return {
+        "name": "cobot-screw-board",
+        "entities": [
+            {"id": "w:room", "asset": "cobot-room", "at": {"x": 0.0, "y": 0.0}},
+            {"id": "w:table-1", "asset": "cobot-table", "at": {"x": 0.85, "y": 0.0}},
+            {"id": "w:cobot-1", "asset": "cobot-magic", "at": {"x": -ARM_MOUNT_X, "y": 0.0}},
+            {"id": "w:board", "asset": "screw-board", "on": "w:table-1", "offset": [-0.32, 0.0]},
+            {"id": "w:screwdriver", "asset": "electric-screwdriver", "on": "w:table-1",
+             "offset": [-0.35, -0.32], "yaw": 0.0},
+            *screws,
+        ],
+        "regions": [{"id": "workcell", "label": "workcell", "polygon": [[-2, -2], [2, -2], [2, 2], [-2, 2]]}],
+    }
+
+
+def build_cobot_screw_board(service: AuthoringService) -> dict:
+    """Publish Cobot Magic + screw-board parts and save the ``cobot-screw-board`` scenario."""
+    from steward.assets.cobot import cobot_magic
+
+    GENERATORS.setdefault("cobot_magic", cobot_magic)
+    assets = {
+        "cobot-room": ("building", {"width": 4.0, "depth": 4.0, "height": 2.6}),
+        "cobot-table": ("dining_table", {"width": 1.0, "depth": 0.9}),
+        "cobot-magic": ("cobot_magic", {}),
+        "screw-board": ("screw_board", {}),
+        "toy-screw": ("toy_screw", {}),
+        "electric-screwdriver": ("electric_screwdriver", {}),
+    }
+    published = {}
+    for name, (generator, params) in assets.items():
+        created = service.create_asset(generator=generator, params=params)
+        if not created["validation"]["ok"]:
+            raise AuthoringError(f"generated asset {name} failed validation: {created['validation']['errors']}")
+        published[name] = service.publish_asset(name, created["template"],
+                                                meta={"generator": generator, "params": params})
+    scene = service.compose_scene(cobot_screw_board_spec())
+    scenario = service.save_scenario({
+        "name": "cobot-screw-board",
+        "scene": "cobot-screw-board",
+        "robots": ["w:cobot-1"],
+        "task": COBOT_SCREW_BOARD_TASK,
+        "goal": screw_board_goal(),
+        "phase": "phase0",
+        "mission": "drive-screws",
+        # Prefer the two holes nearest +y first so L inserts where it reaches; R still drives each.
+        "missionConfig": {"max_screws": 2, "retries": 2},
+        "view": {"lookat": [0.55, 0.0, 0.85], "distance": 2.4, "azimuth": 90.0, "elevation": -35.0},
+    })
+    return {"assets": {k: v["version"][:12] for k, v in published.items()}, "scene": scene, "scenario": scenario}
+
+
 def build_screw_board(service: AuthoringService) -> dict:
     """Publish the screw-board parts and save the ``screw-board`` scenario."""
     published = {}
@@ -1123,4 +1194,6 @@ BUILTIN_SCENARIOS: dict[str, dict] = {
                       "mission": "nest-bowls"},
     "cobot-errand": {"build": build_cobot_errand, "spec": cobot_errand_spec, "task": COBOT_ERRAND_TASK,
                      "mission": "carry-to-counter"},
+    "cobot-screw-board": {"build": build_cobot_screw_board, "spec": cobot_screw_board_spec,
+                          "task": COBOT_SCREW_BOARD_TASK, "mission": "drive-screws"},
 }

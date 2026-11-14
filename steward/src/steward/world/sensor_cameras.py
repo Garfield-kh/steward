@@ -23,25 +23,33 @@ def _intrinsics(sensor):
 
 
 def _sensor_kinematics(sim, robot):
-    """Read encoders and fixed camera-to-head mounts under the simulation lock."""
+    """Read encoders and fixed camera-to-``head_camera`` mounts under the simulation lock.
+
+    Only cameras welded to the same rigid body as ``head_camera`` enter the packet: wrist
+    cameras ride moving links and need FK, so they stay out of this fixed-rig calibration.
+    """
     names = sim.build.names[robot]
-    transforms, bodies = {}, set()
+    transforms, bodies = {}, {}
     for sensor in sim.robot_cameras(robot):
         key = sensor["id"]
         cid = mujoco.mj_name2id(sim.model, mujoco.mjtObj.mjOBJ_CAMERA, names.cameras[key])
-        bodies.add(int(sim.model.cam_bodyid[cid]))
+        bodies[key] = int(sim.model.cam_bodyid[cid])
         transform = np.eye(4)
         transform[:3, :3] = matrix_from_quat(sim.model.cam_quat[cid]) @ np.diag([1, -1, -1])
         transform[:3, 3] = sim.model.cam_pos[cid]
         transforms[key] = transform
-    if len(bodies) != 1:
-        raise ValueError("Camera calibration requires a shared rigid mount")
-    inverse = np.linalg.inv(transforms["head_camera"])
+    if "head_camera" not in transforms:
+        raise ValueError("Camera calibration requires head_camera")
+    ref_body = bodies["head_camera"]
+    shared = {key: value for key, value in transforms.items() if bodies[key] == ref_body}
+    if not shared:
+        raise ValueError("Camera calibration requires a shared rigid mount with head_camera")
+    inverse = np.linalg.inv(shared["head_camera"])
     return {"stamp": sim.time, "reference_camera": "head_camera", "calibration_source": "rig_calibration",
             "camera_axes": "opencv_x_right_y_down_z_forward",
             "joint_encoders": {key: sim._joint_q(name) for key, name in names.joints.items()},
             "views": {key: {"camera_to_reference": np.round(inverse @ value, 12).tolist()}
-                      for key, value in transforms.items()}}
+                      for key, value in shared.items()}}
 
 
 class CameraRenderer:
@@ -58,8 +66,10 @@ class CameraRenderer:
                 self.model = copy.deepcopy(sim.model)
                 self.data = mujoco.MjData(self.model)
             mujoco.mj_copyData(self.data, self.model, sim.data)
-            calibration = {s["id"]: dict(s["intrinsics"]) for s in sim.robot_cameras(robot)}
             packet = _sensor_kinematics(sim, robot)
+            # Match the fixed-rig packet: skip wrist (and any other non-head-body) cameras.
+            calibration = {s["id"]: dict(s["intrinsics"]) for s in sim.robot_cameras(robot)
+                           if s["id"] in packet["views"]}
         return {**packet, "images": self.render_data(robot, tuple(calibration), calibration)["views"]}
 
     def render_data(self, robot, ids, calibration, epoch=None):

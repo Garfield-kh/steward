@@ -45,9 +45,11 @@ EMBODIMENT_BRIEFS: dict[str, str] = {
         "不要只导航观察而不动手；同一只手串行处理的多个步骤写进同一个程序循环里做完。\n"
     ),
     "cobot-magic": (
-        "本体：你是 AgileX Cobot Magic 双手机器人——差速底盘、升降柱、左右两只 Piper 6-DoF 臂，各带一个平行爪（臂标识 L / R）。"
-        "规划动作、写 run_code 和调用技能时必须充分利用双手：能双手并行的就双手一起做（一手持物一手操作、"
-        "一手固定一手拧螺丝、双手同时搬运或整理），不要只用单臂而让另一只手闲着；需要指定手臂时用 arm: \"L\" 或 \"R\"。\n"
+        "本体：你是 AgileX Cobot Magic 双手机器人——差速底盘、升降柱、左右两只 Piper 6-DoF 臂，各带一个平行爪（臂标识 L / R），"
+        "以及桅杆头相机和左右腕部 RGB-D（L_wrist_camera / R_wrist_camera，装在 Piper link6）。"
+        "规划动作、写 run_code 和调用技能时必须充分利用双手与腕部相机：拧螺丝时优先 "
+        "L 臂 insert_screw_into_hole（腕相机对准孔）、R 臂 drive_screw（腕相机对准螺丝帽）；"
+        "能双手并行的就双手一起做，不要只用单臂而让另一只手闲着；需要指定手臂时用 arm: \"L\" 或 \"R\"。\n"
     ),
 }
 

@@ -28,7 +28,7 @@ EMBODIMENTS: dict[str, dict] = {
     },
     "cobot-magic": {
         "label": "AgileX Cobot Magic 双 Piper",
-        "description": "TRACER 差速底盘 + 升降柱 + 双 Piper 6-DoF 臂 + 平行爪；与 Steward 相同的头部双相机（标准焦距巡视 + 短焦工作视野）",
+        "description": "TRACER 差速底盘 + 升降柱 + 双 Piper 6-DoF 臂 + 平行爪；桅杆头相机（巡视+短焦）+ 左右腕部 RGB-D（link6 eye-in-hand）",
         "profile": "cobot-magic.yaml",
         # The same Ego Runtime as the kitchen robot (`steward ego --body cobot-magic`): one Piper arm
         # and the torso act as its planar arm (steward.ego.cobot_arm), so ESim, the skills and the

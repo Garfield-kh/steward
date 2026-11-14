@@ -59,8 +59,13 @@ def perceive(est: EgoEstimator, frame: Callable[[], dict], frames: int = 8,
 def sightings(est: EgoEstimator, frame: Callable[[], dict], frames: int = 8,
               pause_s: float = 0.02, min_existence: float = 0.4,
               rgbd: bool = False) -> list[Sighting]:
-    """Like :func:`perceive`, but one entry per object: a table with three bowls needs all three."""
-    before = {track_id: track.last_seen for track_id, track in est.tracks.items()}
+    """Like :func:`perceive`, but one entry per object: a table with three bowls needs all three.
+
+    Freshness uses ``observations`` (not ``last_seen``): with ``freeze_idle`` the world stamp can
+    stay flat across frames, so a last_seen gate would drop every track that an earlier look()
+    already fused at the same stamp.
+    """
+    before = {track_id: track.observations for track_id, track in est.tracks.items()}
     for _ in range(frames):
         payload = frame()
         if rgbd:
@@ -74,7 +79,7 @@ def sightings(est: EgoEstimator, frame: Callable[[], dict], frames: int = 8,
     for track in est.tracks.values():
         if not track.category_counts or track.existence < min_existence:
             continue
-        if before.get(track.id) == track.last_seen:
+        if before.get(track.id, 0) == track.observations:
             continue
         seen.append(Sighting(track_id=track.id, category=max(track.category_counts, key=track.category_counts.get),
                              pos=np.array(track.pos, dtype=float), size=np.array(track.size, dtype=float),
@@ -319,3 +324,166 @@ def _holding(skills: CobotSkills, grip: str) -> bool:
 
 def _fmt(p) -> str:
     return "(" + ", ".join(f"{float(v):.3f}" for v in p) + ")"
+
+
+# Board body-frame hole centres (same layout as screw_board / screw_board_goal).
+# +y first: left arm inserts more reliably on that side; right arm still reaches y≈±0.05 to drive.
+_BOARD_HOLES = ((0.07, 0.05), (-0.07, 0.05), (0.07, -0.05), (-0.07, -0.05))
+
+
+def _free_screws(board: Sighting, screws: list[Sighting], driven: list[str]) -> list[Sighting]:
+    """Screws still beside the board (outside its footprint), not already driven.
+
+    Table screws rest near table height — below the board top — so a z > board_top filter
+    wrongly drops every free screw. Lateral clearance from the board AABB is the gate.
+    """
+    half_w = 0.5 * _extent(board.size, 0, 0.28) + 0.03
+    half_d = 0.5 * _extent(board.size, 1, 0.20) + 0.03
+    bx, by = float(board.pos[0]), float(board.pos[1])
+    done = set(driven)
+    free: list[Sighting] = []
+    for s in screws:
+        if s.track_id in done:
+            continue
+        if abs(float(s.pos[0]) - bx) <= half_w and abs(float(s.pos[1]) - by) <= half_d:
+            continue  # on / over the board → seated or in a hole
+        free.append(s)
+    return free
+
+
+def drive_screws(est: EgoEstimator, skills: CobotSkills, frame: Callable[[], dict],
+                 retries: int = 2, rgbd: bool = False, max_screws: int = 4) -> dict:
+    """Dual-arm screw-board mission: L inserts each screw, R drives it, both use wrist cameras.
+
+    Left arm picks a free screw, refines the empty hole with ``L_wrist_camera``, then
+    ``insert_screw_into_hole``. Right arm picks the electric screwdriver once, refines the seated
+    screw head with ``R_wrist_camera``, then ``drive_screw`` (driver stays in the right hand).
+    Perception supplies positions; wrist refine nudges planar aim from a closer look.
+    """
+    log: list[str] = []
+    driven: list[str] = []
+    driver_grip = "R_link6"
+    screw_grip = "L_link6"
+    holding_driver = False
+
+    def look() -> dict[str, Sighting]:
+        return perceive(est, frame, frames=8 if not rgbd else 10, rgbd=rgbd)
+
+    def hole_world(board: Sighting, index: int) -> list[float]:
+        ox, oy = _BOARD_HOLES[index]
+        # Board yaw is not on Sighting; treat as axis-aligned for the twin's table layout.
+        return [float(board.pos[0]) + ox, float(board.pos[1]) + oy,
+                float(board.pos[2]) + 0.5 * _extent(board.size, 2, 0.018)]
+
+    for attempt in range(1, retries + 1):
+        try:
+            seen = look()
+            if "screw_board" not in seen:
+                log.append(f"attempt {attempt}: no screw_board in view")
+                _park_both(skills, log)
+                continue
+            board = seen["screw_board"]
+            screws = [s for s in sightings(est, frame, frames=4, rgbd=rgbd)
+                      if s.category == "toy_screw"]
+            free = _free_screws(board, screws, driven)
+            if not free and len(driven) >= max_screws:
+                return {"ok": True, "driven": driven, "log": log}
+            if not free:
+                if not screws:
+                    log.append(f"attempt {attempt}: no toy_screw in view")
+                else:
+                    log.append(f"attempt {attempt}: no free screws beside the board "
+                               f"({len(screws)} seen, {len(driven)} driven)")
+                break
+
+            for hole_i in range(min(max_screws, len(_BOARD_HOLES))):
+                if len(driven) >= max_screws:
+                    break
+                seen = look()
+                board = seen.get("screw_board") or board
+                screws = [s for s in sightings(est, frame, frames=4, rgbd=rgbd)
+                          if s.category == "toy_screw"]
+                free = _free_screws(board, screws, driven)
+                if not free:
+                    break
+                screw = min(free, key=lambda s: float(s.range_m))
+                hole_at = hole_world(board, hole_i)
+                seat_z = hole_at[2] + 0.02
+                seat = [hole_at[0], hole_at[1], seat_z]
+
+                # --- L: pick screw and insert with left wrist refine ---
+                _run(skills, "pick", {"arm": "L", "gripper": screw_grip,
+                                      "at": [float(v) for v in screw.pos]}, log)
+                est.mark_held(screw.track_id, gripper=screw_grip, at=screw.pos)
+                # Prefer holes on L's side of the board (positive local y) when still free.
+                look()
+                board2 = perceive(est, frame, frames=4, rgbd=rgbd).get("screw_board", board)
+                refine_hole = hole_world(board2, hole_i)
+                refine_seat = [refine_hole[0], refine_hole[1], seat_z]
+                # Tip-down + near-vertical tool: a tilted insert lays the shaft in the hole and
+                # the screw falls over on release (goal upright=False).
+                _run(skills, "insert_screw_into_hole", {
+                    "arm": "L", "gripper": screw_grip, "at": refine_seat,
+                    "refine": True, "wristCamera": "L_wrist_camera", "refineAt": refine_seat,
+                    "releaseLingerS": 0.4,
+                }, log)
+                est.release_held(at=refine_seat)
+                log.append(f"hole_{hole_i}: inserted tip-down {screw.track_id}")
+
+                # --- R: pick driver once, refine on screw head, drive ---
+                if not holding_driver:
+                    drivers = [s for s in sightings(est, frame, frames=4, rgbd=rgbd)
+                               if s.category == "electric_screwdriver"]
+                    if not drivers and "electric_screwdriver" in (seen := look()):
+                        drivers = [seen["electric_screwdriver"]]
+                    if not drivers:
+                        raise SkillFailed("no electric_screwdriver in view to drive with")
+                    driver = min(drivers, key=lambda s: float(s.range_m))
+                    _run(skills, "pick", {"arm": "R", "gripper": driver_grip,
+                                          "at": [float(v) for v in driver.pos]}, log)
+                    est.mark_held(driver.track_id, gripper=driver_grip, at=driver.pos)
+                    holding_driver = True
+                    log.append(f"holding driver {driver.track_id} in R")
+
+                # Keep R's hover low: high tool-down poses over the midline exceed Piper reach.
+                head_z = refine_seat[2] + 0.03
+                head = [refine_seat[0], refine_seat[1], head_z]
+                look()
+                # Closest screw near the hole is the one just seated.
+                seated = [s for s in sightings(est, frame, frames=4, rgbd=rgbd)
+                          if s.category == "toy_screw"
+                          and math.hypot(float(s.pos[0]) - head[0], float(s.pos[1]) - head[1]) < 0.06]
+                if seated:
+                    s0 = min(seated, key=lambda s: math.hypot(float(s.pos[0]) - head[0],
+                                                              float(s.pos[1]) - head[1]))
+                    refine_head = [float(s0.pos[0]), float(s0.pos[1]), head_z]
+                else:
+                    refine_head = head
+                press = [refine_head[0], refine_head[1], refine_seat[2] + 0.008]
+                _run(skills, "drive_screw", {
+                    "arm": "R", "gripper": driver_grip, "at": head, "pressAt": press,
+                    "refine": True, "wristCamera": "R_wrist_camera", "refineAt": refine_head,
+                    "driveS": 1.5,
+                }, log)
+                driven.append(screw.track_id)
+                log.append(f"hole_{hole_i}: drove {screw.track_id}")
+                # Park L between screws; keep R holding the driver out of the way.
+                _park(skills, screw_grip, log)
+
+            _park_both(skills, log)
+            return {"ok": len(driven) > 0, "driven": driven, "log": log,
+                    "holdingDriver": holding_driver}
+        except SkillStopped:
+            raise
+        except SkillFailed as exc:
+            log.append(f"attempt {attempt} failed: {exc}")
+            for grip in (screw_grip, driver_grip):
+                if _holding(skills, grip):
+                    _run(skills, "open", {"gripper": grip}, log)
+                    if grip == screw_grip:
+                        est.release_held()
+                    if grip == driver_grip:
+                        holding_driver = False
+                        est.release_held()
+            _park_both(skills, log)
+    return {"ok": False, "driven": driven, "log": log}

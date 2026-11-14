@@ -91,6 +91,7 @@ def test_the_twin_picks_a_bowl_and_puts_it_down_elsewhere_on_the_table_through_r
 def test_the_twins_cameras_are_captured_with_the_pose_of_the_gripper_its_arm_works_with(cobot):
     _, api = cobot
     packet = call("POST", f"{api}/ego/cameras/capture", {})
+    # Capture is the fixed head rig only; wrist cameras need FK and use rgbd / camera_pose.
     assert set(packet["views"]) == {"head_camera", "wide_camera"}
     pose = call("GET", f"{api}/ego/gripper/pose")
     for reported in (packet["gripper_pose"], pose):

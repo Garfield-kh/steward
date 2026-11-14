@@ -148,10 +148,12 @@ class Job:
     started: float = 0.0
     finished: float | None = None
     log: list[str] = field(default_factory=list)
+    posterior: dict | None = None  # what a look after the skill found (observed z / settled state)
 
     def to_dict(self) -> dict:
         return {"id": self.id, "skill": self.skill, "receipt": self.receipt, "state": self.state,
-                "message": self.message, "started": self.started, "finished": self.finished, "log": self.log[-20:]}
+                "message": self.message, "started": self.started, "finished": self.finished,
+                "log": self.log[-20:], **({"posterior": self.posterior} if self.posterior else {})}
 
 
 class _Stall:
@@ -183,6 +185,8 @@ class SkillExecutor:
                  on_error: Callable[[str], None] | None = None, on_finish: Callable[[Job], None] | None = None,
                  on_begin: Callable[[str, dict], None] | None = None,
                  on_release: Callable[[str, list[float]], None] | None = None,
+                 posterior: Callable[[str, dict], dict] | None = None,
+                 fastened: Callable[[str, str, str | None], None] | None = None,
                  clock: RobotLink | None = None,
                  closed_drawers: Callable[[], list[str]] | None = None,
                  drawer_plan: Callable[..., tuple[dict | None, str]] | None = None,
@@ -207,7 +211,10 @@ class SkillExecutor:
         leaves arms as-is.
 
         ``deploy_working``, when provided, joint-space unfolds a resting arm through HOME before the
-        first planar dock (PARK/zero has no safe one-shot IK swing)."""
+        first planar dock (PARK/zero has no safe one-shot IK swing).
+
+        ``posterior`` re-perceives an object after a place or tighten and returns what is now
+        believed about it; ``fastened`` records a screw the tighten just drove into its part."""
         self._on_error = on_error
         self._clock = clock
         self._now = 0.0
@@ -215,6 +222,8 @@ class SkillExecutor:
         self._on_finish = on_finish
         self._on_begin = on_begin
         self._on_release = on_release
+        self._posterior = posterior
+        self._fastened = fastened
         self._home_empty = home_empty
         self._deploy_working = deploy_working
         self._command = command
@@ -338,6 +347,8 @@ class SkillExecutor:
                 self._close(job, plan)
             elif skill == "pour":
                 self._pour(job, plan)
+            elif skill == "tighten":
+                self._tighten(job, plan)
             else:
                 raise SkillFailed(f"unknown skill {skill}")
             if self._home_empty is not None:
@@ -371,6 +382,20 @@ class SkillExecutor:
     def _released(self, object_id: str, spot: list[float]) -> None:
         if self._on_release is not None:
             self._on_release(object_id, list(spot))
+
+    def _report_posterior(self, job: Job, object_id: str, plan: dict) -> None:
+        """Look at ``object_id`` once more after the skill moved it, and carry what is now believed
+        on the job record: the receipt succeeded kinematically, and its spot is the plan's until a
+        look says otherwise."""
+        if self._posterior is None:
+            return
+        try:
+            job.posterior = self._posterior(object_id, plan)
+        except Exception as exc:  # noqa: BLE001 - a failed posterior look must not fail a finished skill
+            job.log.append(f"posterior look failed: {type(exc).__name__}: {exc}")
+            return
+        post = job.posterior or {}
+        job.log.append("posterior: " + ", ".join(f"{k}={v}" for k, v in post.items() if k != "p"))
 
     def _release_clock(self, hold: str) -> None:
         try:
@@ -1500,6 +1525,33 @@ class SkillExecutor:
             except (SkillFailed, OutOfReach):
                 pass
         job.message = f"placed {plan['object']} on {plan['support']}"
+        self._report_posterior(job, plan["object"], plan)
+
+    def _tighten(self, job: Job, plan: dict) -> None:
+        """Stand the held screwdriver over the screw and turn it in: the wrist rolls a full turn at
+        a time (wrapping at its stop, where the two ends are the same heading), and the belief is
+        told the screw is fastened when the turns are done."""
+        self._dock(job, plan)
+        grip = plan.get("gripSpot", plan["spot"])
+        self._align_lateral(grip)
+        self._restore_planned_reach(plan, grip)
+        self._set_joint("lift", plan["lift"])
+        self._reach_out(grip, plan.get("wristPitch"))
+        roll0 = float(self._state()["joints"].get("wrist_roll", 0.0))
+        span = math.pi - abs(roll0)  # stay inside the wrist's +-pi stops (full turn at roll 0)
+        for _ in range(int(plan.get("turns", 2))):
+            self._ramp_joint("wrist_roll", roll0 + span, self.config.wrist_turn_s)
+            # +pi and -pi are the same heading: continue the turn from the other side of the wrap.
+            self._command({"wrist_roll": roll0 - span})
+        self._set_joint("wrist_roll", roll0)
+        if self._fastened is not None:
+            self._fastened(plan["target"], plan["part"], plan.get("hole"))
+        job.log.append(f"tightened {plan['target']} into {plan['part']}")
+        self._exit_long_reach(plan)
+        self._set_joint("lift", max(plan["lift"], self.config.stow_lift))
+        self._backoff(plan)
+        job.message = f"tightened {plan['target']} into {plan['part']}"
+        self._report_posterior(job, plan["part"], plan)
 
     def _pour(self, job: Job, plan: dict) -> None:
         """Hold the container low over the spot, tip it slowly about the arm, wait for the contents
@@ -1828,3 +1880,4 @@ class SkillExecutor:
         self._backoff(plan)
         self._set_joint("lift", self.config.stow_lift)
         job.message = f"placed {plan['object']} on the floor"
+        self._report_posterior(job, plan["object"], plan)

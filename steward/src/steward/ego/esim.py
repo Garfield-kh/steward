@@ -109,6 +109,14 @@ class EsimConfig:
     # incomplete, and the mission layer's risk limit (0.35) decides whether to look closer first.
     blind_support_risk: float = 0.15  # no known surface under the target; the gripper checks the grasp
     phantom_pick_cost: float = 0.5  # share of a target's non-existence that counts as pick risk
+    # A target (or a place's support) the estimator doubts this much is refused outright and must
+    # be re-observed: acting on a phantom costs a dock, a retreat and a wrong belief.
+    min_target_existence: float = 0.4
+    # Tighten: a screw within this distance of a part's screw hole counts as seated in it; the
+    # driver stands this far above the screw head; this many full turns drive it in.
+    tighten_seat_radius: float = 0.03
+    tighten_clearance: float = 0.02
+    tighten_turns: int = 2
     nesting_risk_each: float = 0.15  # pick risk per thing the estimator reads as inside the target
     nesting_risk_cap: float = 0.35
     graspable_max_m: float = 0.35  # a raised thing this small is tableware whatever the classifier says
@@ -784,7 +792,9 @@ class Esim:
                 return self._predict_drawer(es, skill, params)
             if skill == "pour":
                 return self._predict_pour(es, params)
-            raise PredictionError(f"unknown skill {skill!r}; known: navigate, pick, place, pour, open, close")
+            if skill == "tighten":
+                return self._predict_tighten(es, params)
+            raise PredictionError(f"unknown skill {skill!r}; known: navigate, pick, place, pour, open, close, tighten")
         except PredictionError as exc:
             blockers = self._describe_blockers(es)
             issues = [str(exc)] + [
@@ -834,6 +844,12 @@ class Esim:
         miscategorised = not self._affords(target, "graspable")
         if miscategorised and not tableware_sized:
             raise PredictionError(f"{target.id} ({target.category.value}) is not graspable")
+        if target.existence < self.config.min_target_existence:
+            # A grasp verifies its position, not its existence: closing on a phantom costs a dock,
+            # a retreat and a belief that is now wrong about holding something. Re-observe first.
+            raise PredictionError(f"{target.existence:.2f} existence probability is too low to pick {target.id} "
+                                  f"(under {self.config.min_target_existence:.2f}); observe it again first, "
+                                  "then predict the pick anew")
         support = self._support_of(es, target)
         # Upstream's floor rules: a small object off the floor is lifted clear of the base and
         # carried like one off a table; a large one (a chair) stays low in front of the robot.
@@ -997,8 +1013,9 @@ class Esim:
         if p_miss > 0.05:
             issues.append(f"target position uncertainty {sigma * 100:.1f} cm gives {p_miss:.0%} miss probability; "
                           "observe the target more closely first")
-        # A grasp verifies itself: closing on nothing costs one retreat, nothing is damaged, and
-        # the miss is reported. So a doubtful target is only half the risk its doubt suggests.
+        # A grasp verifies its position: closing on nothing costs one retreat, nothing is damaged,
+        # and the miss is reported. Existence under ``min_target_existence`` was refused above;
+        # what remains of a doubtful target is only half the risk its doubt suggests.
         existence_risk = self.config.phantom_pick_cost * (1.0 - target.existence)
         if 1.0 - target.existence > 0.2:
             issues.append(f"target existence probability is only {target.existence:.2f}")
@@ -1058,6 +1075,11 @@ class Esim:
             return self._predict_floor_place(es, held, params)
         if support is None:
             raise PredictionError(f"unknown support {params.get('on')!r}")
+        if support.existence < self.config.min_target_existence:
+            # Releasing onto a phantom support drops the load somewhere unplanned; re-observe first.
+            raise PredictionError(f"{support.existence:.2f} existence probability is too low to place on {support.id} "
+                                  f"(under {self.config.min_target_existence:.2f}); observe it again first, "
+                                  "then predict the place anew")
         mate, aligned_offset, aligned_yaw, align_issues = self._place_hole_align(es, held, support, params)
         place_params = dict(params)
         mating_on = False
@@ -1506,6 +1528,65 @@ class Esim:
         if abs(pitch) >= 1e-3:
             plan["wristPitch"] = float(pitch)
         return self._receipt(es, "pour", params, 0.1, issues, plan)
+
+    def _predict_tighten(self, es: SceneState, params: dict) -> dict:
+        """Stand the held screwdriver over a screw seated in a screw hole and turn it in.
+
+        The screw must already sit on a part's screw hole (place seats it there); the motion is
+        belief level — no thread is simulated, the estimator marks the screw fastened afterwards.
+
+        ``params``: ``target`` (the screw), optional ``turns``."""
+        held = self._held(es)
+        if held is None:
+            raise PredictionError("the gripper is not holding anything")
+        if not self._affords(held, "screwdriver"):
+            raise PredictionError(f"{held.id} ({held.category.value}) is not a screwdriver; pick the electric "
+                                  "screwdriver up first, standing it upright")
+        screw = es.find(params.get("target", ""))
+        if screw is None:
+            raise PredictionError(f"unknown target {params.get('target')!r}")
+        if screw.id == held.id:
+            raise PredictionError(f"{screw.id} is the held screwdriver, not a screw to tighten")
+        if screw.existence < self.config.min_target_existence:
+            raise PredictionError(f"{screw.existence:.2f} existence probability is too low to tighten {screw.id} "
+                                  f"(under {self.config.min_target_existence:.2f}); observe it again first, "
+                                  "then predict the tighten anew")
+        part, hole, gap = self._screw_seat(es, screw)
+        if part is None:
+            raise PredictionError(f"{screw.id} is not seated on any screw hole; place it onto the part's hole first")
+        issues = [f"{screw.id} sits {gap * 100:.1f} cm from {part.id}'s hole {hole['id']}"] \
+            if gap > self.config.tighten_seat_radius / 2 else []
+        _, _, head_top = entity_box(screw)
+        held_box, hb, ht = entity_box(held)
+        height = head_top + (ht - hb) / 2 + self.config.tighten_clearance + self._hold_dz(es, held)
+        spot = (float(screw.pose.value["p"][0]), float(screw.pose.value["p"][1]))
+        existence_risk = self.config.phantom_pick_cost * (1.0 - screw.existence)
+        risk = 1.0 - (1.0 - 0.05) * (1.0 - existence_risk)
+        approach, grip = self._grip_approach(es, self._anchor(es, part), held, spot, height, lambda _: 0.0, False)
+        plan = {**approach, "object": held.id, "support": part.id, "target": screw.id, "part": part.id,
+                "hole": hole["id"], "spot": list(spot), "gripSpot": list(grip), "lift": height,
+                "turns": max(1, int(params.get("turns", self.config.tighten_turns)))}
+        return self._receipt(es, "tighten", params, risk, issues, plan)
+
+    def _screw_seat(self, es: SceneState, screw: Entity) -> tuple[Entity | None, dict | None, float]:
+        """The screw hole ``screw`` sits at: the hole of some other part nearest it, within
+        ``tighten_seat_radius`` of its centre and 5 cm of its height, else ``(None, None, inf)``."""
+        px, py, pz = (float(v) for v in screw.pose.value["p"][:3])
+        best: tuple[Entity | None, dict | None, float] = (None, None, math.inf)
+        for ent in es.entities:
+            if ent.id in (screw.id, es.self_id) or not self._screw_holes(ent):
+                continue
+            p = ent.pose.value["p"]
+            yaw = yaw_from_quat(ent.pose.value["q"])
+            c, s = math.cos(yaw), math.sin(yaw)
+            for hole in self._screw_holes(ent):
+                hx = float(p[0]) + c * float(hole["p"][0]) - s * float(hole["p"][1])
+                hy = float(p[1]) + s * float(hole["p"][0]) + c * float(hole["p"][1])
+                if math.hypot(hx - px, hy - py) < best[2] and abs(float(p[2]) + float(hole["p"][2]) - pz) <= 0.05:
+                    best = (ent, hole, math.hypot(hx - px, hy - py))
+        if best[2] > self.config.tighten_seat_radius:
+            return None, None, math.inf
+        return best
 
     def _predict_floor_place(self, es: SceneState, held: Entity, params: dict) -> dict:
         """Put the held object down on the floor with its centre at ``at``: stand behind the spot

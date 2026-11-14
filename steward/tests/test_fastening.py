@@ -121,7 +121,7 @@ def test_rebuild_snapshot_restore_and_reset(sim):
     assert records(sim.template) == before
     assert sum(sim.data.eq_active) == 3
     sim.edit_remove('w:extra')
-    restored = WorldSim(sim.world_state())
+    restored = WorldSim(sim.world_state(), fasten=FastenConfig())
     try:
         assert records(restored.template) == before
         assert sum(restored.data.eq_active) == 3
@@ -204,7 +204,7 @@ def test_one_base_can_join_two_distinct_parts_without_category_matching():
                 inertial=exact({'mass': .02}), affordances=[exact({'screw-hole': {
                     'id': 'mount', 'p': [0, 0, .01], 'axis': [0, 0, 1], 'entry': [0, 0, .01], 'depth': .01}})])]))
         scene.entities.append(plate)
-    sim = WorldSim(scene.to_dict())
+    sim = WorldSim(scene.to_dict(), fasten=FastenConfig())
     try:
         sim.step_seconds(.5)
         for i, screw in enumerate(demo.SCREWS):

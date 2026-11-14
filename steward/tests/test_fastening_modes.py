@@ -17,7 +17,7 @@ from steward.scene.schema import pose
 
 class FasteningModeTests(unittest.TestCase):
     def test_config_environment_and_validation(self):
-        self.assertEqual(FastenConfig.from_env({}), FastenConfig())
+        self.assertEqual(FastenConfig.from_env({}), FastenConfig(mode="off"))
         for mode in ('driver', 'seat', 'off'):
             cfg = FastenConfig.from_env({'STEWARD_FASTEN_MODE': mode,
                 'STEWARD_FASTEN_RADIAL': '.012', 'STEWARD_FASTEN_DWELL': '.3',

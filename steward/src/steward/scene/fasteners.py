@@ -50,7 +50,7 @@ class FastenConfig:
         Distances/speeds/time use SI; *_ANGLE_DEG uses degrees. No environment mutation.
         """
         env = os.environ if environ is None else environ
-        values = {"mode": env.get("STEWARD_FASTEN_MODE", "driver")}
+        values = {"mode": env.get("STEWARD_FASTEN_MODE", "off")}
         for name in ("radial", "gap", "tip_distance", "dwell", "engagement",
                      "seat_linear_speed", "seat_angular_speed"):
             key = "STEWARD_FASTEN_" + name.upper()

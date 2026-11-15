@@ -283,6 +283,33 @@ class EstimatorConfig:
     points are the robot itself; world masks leave the robot out, robot-side segmentation does not."""
     body_share: float = 0.5
     """Share of a region's points on the robot's own links that makes the whole region the robot."""
+    var_growth_rate: float = 1e-4
+    """Variance growth per second of not being seen (m²/s: a ~1 cm/s RMS drift of a static
+    object's believed position — nudged, slid, or re-seen from other geometry). The predict step
+    that loosens an unseen track's hold on where it was last seen, so it is recognized when met
+    again instead of opening a fresh id beside itself. Only tracks unseen longer than
+    ``var_growth_delay_s`` grow: a matched one keeps the tight variance its evidence earned."""
+    var_growth_delay_s: float = 1.0
+    """How much silence starts the growth; continuous at the threshold."""
+    ownership_var_cap: float = 0.15 ** 2
+    """The growth's ceiling (m²): an unseen track never loosens past a 15 cm sigma — the held
+    track's own gate scale — so a long absence widens the association gate to 0.45 m and no
+    farther. Matched tracks contract through :meth:`_fuse` and sit far below this."""
+    held_echo_radius_m: float = 0.25
+    """While the gripper holds something, detections this close to it are its own echo (the grasp
+    partly hides it, and the load hangs where it was just taken from): they fuse into the held
+    track — one per camera, ahead of the nearest-first race — and never open a second track beside
+    it. Nothing else can legitimately appear there: the gripper is busy holding."""
+    birth_lineage_s: float = 600.0
+    """How long a spot where a same-kind track was dropped keeps claiming births: a detection
+    standing there reconciles with the dropped track's survivor (``merged_into``) instead of
+    opening a fresh id. Recent only — a spot long vacant is free for a genuinely new object."""
+    birth_lineage_radius_m: float = 0.20
+    """How close to a dropped track's last position a birth must stand to count as its return."""
+    floor_suspect_existence: float = 0.25
+    """A birth resting on the floor of a kind whose shape prior says it never stands there (a car
+    wheel, a screw) starts doubted: further views raise its existence, silence lets it fade. A
+    fallen part is re-confirmed in a look or two; a ripple that borrowed the prior dies here."""
 
 
 @dataclass
@@ -533,6 +560,18 @@ class EgoEstimator:
         # turning robot does not see its own load as a new object.
         self._follow_held()
         self._follow_handle()
+        # Predict step: there is no motion model, but an object missed for a while loosens its
+        # hold on where it was last seen, so meeting it again re-associates instead of opening a
+        # fresh id beside itself (the frozen-covariance hole: a tight variance kept the gate at
+        # its 0.30 m floor forever). Held and carried loads sit where the gripper says.
+        now = float(frame["stamp"])
+        for track in self.tracks.values():
+            if track.held or track.carried:
+                continue
+            dt = now - track.last_seen - self.config.var_growth_delay_s
+            if dt > 0:
+                track.var = np.minimum(track.var + self.config.var_growth_rate * dt,
+                                       self.config.ownership_var_cap)
         cameras = [c["id"] for c in frame.get("cameras", []) if c["id"] in self.cameras] or [self.primary_camera]
         cams = {c: self.camera_pose(camera=c) for c in cameras}
         measurements = []
@@ -554,11 +593,30 @@ class EgoEstimator:
         camera_of = [det.get("camera", self.primary_camera) for det, _p, _y, _s in measurements]
         seen_by: dict[str, set[str]] = {c: set() for c in cams}
         assigned: dict[int, str] = {}
+        held = self.tracks.get(self.held_id) if self.held_id else None
+        if held is not None:
+            # The grasp partly hides its own load, and the load's detections reach the belief from
+            # just around where it hangs — often exactly where it was taken from. They belong to
+            # the held track, one per camera, ahead of the nearest-first race: letting a free
+            # track win them keeps a phantom alive beside the load (a held car body fed one at its
+            # old dock spot for minutes, and the ids changed hands every pick+align cycle).
+            for k, (det, pos, _yaw, _sigma) in enumerate(measurements):
+                cam = camera_of[k]
+                if held.id in seen_by[cam] or not compatible(det["category"], held.perceived_category):
+                    continue
+                if any(t.carried and float(np.linalg.norm(t.pos - pos)) <= self.config.held_echo_radius_m
+                       for t in self.tracks.values()):
+                    continue  # a view of what lies in the load belongs to that content, not to it
+                if _inside(held, pos, self.config.content_margin_m) \
+                        and held.bottom() - self.config.content_margin_m <= pos[2] <= held.top() + self.config.content_margin_m:
+                    assigned[k] = held.id
+                    seen_by[cam].add(held.id)
         for _d, k, tid in sorted(pairs):
             if k not in assigned and tid not in seen_by[camera_of[k]]:
                 assigned[k] = tid
                 seen_by[camera_of[k]].add(tid)
         boxes = [(pos, np.asarray(det["size"], float), yaw) for det, pos, yaw, _sigma in measurements]
+        pinch = np.asarray(self.gripper_position(), float) if self.gripper.get("holding") else None
         for k, (det, pos, yaw, sigma) in sorted(enumerate(measurements), key=lambda item: item[1][3]):
             if k in assigned:
                 self._fuse(self.tracks[assigned[k]], det, pos, yaw, sigma)
@@ -571,6 +629,20 @@ class EgoEstimator:
                 twin = min(born, key=lambda t: float(np.linalg.norm(t.pos - pos)))
                 self._fuse(twin, det, pos, yaw, sigma)
                 seen_by[camera_of[k]].add(twin.id)
+                continue
+            lineage = self._birth_lineage(pos, det["category"])
+            if lineage is not None and lineage.id not in seen_by[camera_of[k]]:
+                # A detection standing where a same-kind track was just dropped belongs to that
+                # track's survivor, not to a fresh id: one physical object must not become a crowd
+                # of ids over an assembly, and the association gates above may miss what the
+                # lineage knows (the survivor absorbed other views and reads as another kind).
+                self._fuse(lineage, det, pos, yaw, sigma)
+                seen_by[camera_of[k]].add(lineage.id)
+                continue
+            if pinch is not None and self.held_id is None \
+                    and float(np.linalg.norm(pinch - pos)) <= self.config.held_echo_radius_m:
+                # The grasp is physically closed but not yet marked held (close -> mark_held): a
+                # detection at the pinch is the load's echo inside that window, not a new object.
                 continue
             entry = self._newcomer(pos, np.asarray(det["size"], float), sigma, boxes[:k] + boxes[k + 1:])
             if entry == "skip":
@@ -585,7 +657,10 @@ class EgoEstimator:
                     self._fuse(nearest, det, pos, yaw, sigma)
                     seen_by[camera_of[k]].add(nearest.id)
                     continue
-            track = self._new_track(det, pos, yaw, sigma)
+            shape = SHAPES.get(det["category"])
+            on_floor = float(pos[2] - det["size"][2] / 2) <= self.config.rest_gap_m + 2 * sigma
+            track = self._new_track(det, pos, yaw, sigma,
+                                    suspect=on_floor and shape is not None and shape.get("floor") is False)
             if entry == "carried":
                 track.carried_offset = self.gripper_rotation(self.held_gripper).T @ (track.pos - self.tracks[self.held_id].pos)
             seen_by[camera_of[k]].add(track.id)
@@ -3381,9 +3456,17 @@ class EgoEstimator:
                 self._drop(drop, "merged: same object", into=keep)
 
     def _new_cloud_track(self, m: dict, cam_p: np.ndarray) -> Track:
+        probs = m["probs"]
+        perceived = max(probs, key=probs.get) if probs else "unknown"
+        shape = SHAPES.get(perceived)
+        suspect = shape is not None and shape.get("floor") is False \
+            and float(m["centre"][2] - m["size"][2] / 2) <= self.config.rest_gap_m + 2 * 0.05
         track = Track(id=f"e:{next(self._ids)}", category_counts=dict(m["probs"]), pos=m["centre"].copy(),
                       var=np.full(3, 0.05**2), yaw=m["yaw"], yaw_var=0.1**2, size=m["size"].copy(), observations=0,
-                      first_seen=self.stamp, last_seen=self.stamp)
+                      first_seen=self.stamp, last_seen=self.stamp,
+                      # The depth-fill chain reads floor ripples with the smallest shape prior it
+                      # has; a birth of a never-on-the-floor kind lying on the floor starts doubted.
+                      existence=self.config.floor_suspect_existence if suspect else 0.5)
         self.tracks[track.id] = track
         self._fuse_cloud(track, m, cam_p)
         return track
@@ -4140,7 +4223,7 @@ class EgoEstimator:
                 keep.last_seen = max(keep.last_seen, drop.last_seen)
                 self._drop(drop, "merged: duplicate", into=keep)
 
-    def _new_track(self, det: dict, pos: np.ndarray, yaw: float, sigma: float) -> Track:
+    def _new_track(self, det: dict, pos: np.ndarray, yaw: float, sigma: float, suspect: bool = False) -> Track:
         track = Track(
             id=f"e:{next(self._ids)}",
             category_counts={det["category"]: 1.0},
@@ -4153,10 +4236,36 @@ class EgoEstimator:
             first_seen=self.stamp,
             last_seen=self.stamp,
             color_counts={det["color"]: 1.0} if det.get("color") else {},
+            # A part lying where its kind never stands (a wheel on the floor) is most likely a
+            # ripple that borrowed the prior: born doubted, it takes further views to pick, and
+            # silence fades it. A genuinely fallen part is re-confirmed in a look or two.
+            existence=self.config.floor_suspect_existence if suspect else 0.5,
         )
         self._remember_screw_holes(track, det)
         self.tracks[track.id] = track
         return track
+
+    def _birth_lineage(self, pos: np.ndarray, category: str) -> Track | None:
+        """The living track a birth at ``pos`` must reconcile with, or None.
+
+        A detection standing where a same-kind track was recently dropped belongs to that track's
+        survivor — ``merged_into`` names it — instead of to a fresh id. Recent only: a spot whose
+        track went long since is free for a genuinely new object, and a birth the gates cannot
+        reconcile still goes to :meth:`_newcomer` as before."""
+        cutoff = self.stamp - self.config.birth_lineage_s
+        best, best_d = None, self.config.birth_lineage_radius_m
+        for record in reversed(self.dropped):
+            if float(record["t"]) < cutoff:
+                break
+            if not compatible(category, record["category"]):
+                continue
+            canonical = self.tracks.get(self.canonical_id(record["id"]))
+            if canonical is None:
+                continue
+            d = float(np.linalg.norm(np.asarray(record["position"], float) - pos))
+            if d < best_d:
+                best, best_d = canonical, d
+        return best
 
     @staticmethod
     def _remember_screw_holes(track: Track, det: dict) -> None:

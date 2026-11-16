@@ -14,6 +14,9 @@ Steward is an embodied robotics system built on DeepSeek Harness. See [steward.m
 
 ## Quick start
 
+The shared robot Harness session belongs to the scenario’s first robot; thinking previews and full-text reads use that robot’s actual ID. Other robots do not inherit its session.
+
+
 Face matching captures copied robot observations at one recorded world instant, then releases input scheduling and the world-clock hold before correlation. State queries can run during correlation. Closing the HTTP connection cancels calculation between pieces and quarter turns; acquiring the observation snapshot still completes. Results retain the snapshot timestamp and reference pose, so observe again if objects moved. `/ego/inputs` records snapshot acquisition, including requests later cancelled, and is not a completion log.
 
 To diagnose puzzle face matching on a running Ego API, spread the pieces and let the robot observe them and the lid, then stop other agent/tool requests and run `python3 steward/scripts/diagnose_match.py --api http://127.0.0.1:7420 --output /tmp/match-diagnosis.json` from the repository root. The standard-library script discovers `puzzle_piece` IDs and a unique `lid`, measures three state-query baselines, then tests a 15-second match deadline and a separate disconnect after 2 seconds. `--px 32` increases matching resolution; `--reference ID` and `--entities ID ...` override discovery. It does not move the robot. JSON includes responses, concurrent and post-disconnect state latency, and applied input counts; failed recovery, unconfirmed settlement after disconnect, or invalid returned matches exit with status 2 and stop further matching. A false observation does not establish a fix, and HTTP evidence cannot establish continuous CPU computation. The API must be a direct HTTP origin, without a path prefix; each recovery probe waits up to `--recovery-timeout` seconds (default 120), so total runtime can exceed that limit.

@@ -9,7 +9,7 @@ import pytest
 import zstandard
 
 from steward.net import HttpError
-from steward.world.console import console_thinking_text
+from steward.world.console import _thinking, _thinking_homes, console_thinking_text
 from steward.world.thinking import session_files, thinking_state, thinking_text
 
 
@@ -82,26 +82,30 @@ def test_preview_marks_only_truncated_text_and_full_read_retains_the_start(tmp_p
         thinking_text(homes, "robot-1", "../../arbitrary-file")
 
 
-def test_full_text_route_rejects_missing_ids_and_excluded_sessions(tmp_path):
+@pytest.mark.parametrize("robot", ["w:robot-1", "w:cobot-1"])
+def test_full_text_route_rejects_missing_ids_and_excluded_sessions(tmp_path, robot):
     session = tmp_path / "sessions/workspace/session-1"
     session.mkdir(parents=True)
     path = session / "session.v4.jsonl.zstd"
     message = {"content": [{"type": "reasoning", "text": "完整思考"}]}
     path.write_bytes(zstandard.ZstdCompressor().compress(_row("assistant/message", 1, {"step": 1, "message": message})))
-    host = SimpleNamespace(chat=SimpleNamespace(config=SimpleNamespace(robot_home=tmp_path)), stale_sessions=frozenset())
-    entry = thinking_state({"w:robot-1": str(tmp_path)})["w:robot-1"]["entries"][0]
-    assert console_thinking_text(host, "w:robot-1", entry["id"])["text"] == "完整思考"
+    host = SimpleNamespace(chat=SimpleNamespace(config=SimpleNamespace(robot_home=tmp_path)), stale_sessions=frozenset(),
+                           scenario={"robots": [robot, "w:other"]})
+    state = _thinking(host)
+    assert list(state) == [robot]
+    entry = state[robot]["entries"][0]
+    assert console_thinking_text(host, robot, entry["id"])["text"] == "完整思考"
     with pytest.raises(HttpError) as missing:
         console_thinking_text(host, "", "")
     assert missing.value.status == 400
     host.stale_sessions = frozenset({str(path)})
     with pytest.raises(HttpError) as excluded:
-        console_thinking_text(host, "w:robot-1", entry["id"])
+        console_thinking_text(host, robot, entry["id"])
     assert excluded.value.status == 404
     host.stale_sessions = frozenset()
     path.write_bytes(b"invalid compressed session")
     with pytest.raises(HttpError) as unreadable:
-        console_thinking_text(host, "w:robot-1", entry["id"])
+        console_thinking_text(host, robot, entry["id"])
     assert unreadable.value.status == 503
 
 
@@ -125,3 +129,9 @@ def test_entry_ids_survive_appends_but_do_not_alias_other_sessions(tmp_path):
         stream.write(zstandard.ZstdCompressor().compress(_row("step/start", 2, {"step": 2})))
     assert thinking_state(homes)["first"]["entries"][0]["id"] == first_id
     assert thinking_text(homes, "first", first_id)["text"] == "first"
+
+
+@pytest.mark.parametrize("scenario", [None, {"robots": []}])
+def test_thinking_without_a_loaded_robot_does_not_assign_a_session(tmp_path, scenario):
+    host = SimpleNamespace(chat=SimpleNamespace(config=SimpleNamespace(robot_home=tmp_path)), scenario=scenario)
+    assert _thinking_homes(host) == {}

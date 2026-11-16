@@ -36,7 +36,8 @@ jobs:
           || vars.DSH_CI_FAILOVER_WINDOWS == 'selfhosted'
           && github.event.pull_request.user.login != 'dependabot[bot]'
           && fromJSON('["self-hosted", "dsh-win-ci", "windows"]')
-          || 'dsh-windows-2025-16core' }}
+          || github.repository == 'deepseek-harness/deepseek-harness' && 'dsh-windows-2025-16core'
+          || 'windows-2025' }}
     name: windows node 24 / build & observational
     timeout-minutes: 60
     env:
@@ -113,13 +114,14 @@ jobs:
           $message | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
 
   windows-coverage:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.repository == 'deepseek-harness/deepseek-harness'
     runs-on: >-
       ${{ vars.DSH_CI_FAILOVER_WINDOWS == 'blacksmith' && 'blacksmith-16vcpu-windows-2025'
           || vars.DSH_CI_FAILOVER_WINDOWS == 'selfhosted'
           && github.event.pull_request.user.login != 'dependabot[bot]'
           && fromJSON('["self-hosted", "dsh-win-ci", "windows"]')
-          || 'dsh-windows-2025-16core' }}
+          || github.repository == 'deepseek-harness/deepseek-harness' && 'dsh-windows-2025-16core'
+          || 'windows-2025' }}
     name: windows node 24 / coverage
     timeout-minutes: 120
     env:
@@ -197,7 +199,8 @@ jobs:
           || vars.DSH_CI_FAILOVER_WINDOWS == 'selfhosted'
           && github.event.pull_request.user.login != 'dependabot[bot]'
           && fromJSON('["self-hosted", "dsh-win-ci", "windows"]')
-          || 'dsh-windows-2025-16core' }}
+          || github.repository == 'deepseek-harness/deepseek-harness' && 'dsh-windows-2025-16core'
+          || 'windows-2025' }}
     name: windows node 24 / native tests
     timeout-minutes: 60
     steps:

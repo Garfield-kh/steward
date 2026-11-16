@@ -3,11 +3,13 @@
 The virtual joints place the pinch point in the robot's own frame -- ``tool_offset + reach``
 ahead of the base centre on the arm's own line (``lateral`` = the arm mount's y), ``lift`` above
 the floor -- with the tool pointing down, tilted ``wrist_pitch`` forward, turned ``wrist_yaw``
-about the vertical and tipped ``wrist_roll`` about the forward axis. IK solves in the base frame
-with the torso lift, subject to the model's joint limits, including joint6's finite +-180 deg
-travel. If the current posture misses a target, the solver tries continuation and working seeds.
-Endpoint checks (``reachable``, ``pitch_for``) solve from the target alone; ``reachable_path``
-also checks branch continuity and can start from specified physical encoders.
+about the vertical and tipped ``wrist_roll`` in the tool frame: drive tips near ±π/2 with the
+tool vertical roll about tool +x (kitchen-robot sign: that stands a laterally held screwdriver
+bit-down); larger pour / turn-over rolls, and pitched tools, roll about tool +z. IK solves in the
+base frame with the torso lift, subject to the model's joint limits, including joint6's finite
++-180 deg travel. If the current posture misses a target, the solver tries continuation and
+working seeds. Endpoint checks (``reachable``, ``pitch_for``) solve from the target alone;
+``reachable_path`` also checks branch continuity and can start from specified physical encoders.
 
 Encoder readings are turned back into virtual joints by forward kinematics, except that an arm
 standing within servo tolerance of the joints solved for the last command reports that command:
@@ -71,6 +73,15 @@ class PiperArmConfig:
     # the tool pointing down: planning accepts no backward tilt, so a reading of -0.002 rad would
     # make every motion from the current posture unreachable.
     pitch_read_slack: float = 0.02
+    # Drive tips (|roll| ≤ π/2 + slack) with the tool near vertical roll about tool +x so a
+    # laterally held bit stands onto −z. Larger rolls (pour / turn-over) and pitched tools roll
+    # about tool +z — including ``_approached`` steps that still hold a pour roll while pitch
+    # climbs from zero (those must not switch to +x mid-ramp).
+    roll_about_x_pitch: float = 0.35
+    roll_about_x_max: float = math.pi / 2 + 0.12
+    # Piper IK often misses a full ±π/2 tip about tool +x; a slightly smaller tip already stands
+    # the bit (world-up · bit < −0.7). Soften |wrist_roll| toward this floor before OutOfReach.
+    drive_tip_roll_floor: float = 1.05
     # Holding something, a small step of the grasp point (a ramp, a tip) that the solver can only
     # follow by turning the wrist over to another posture -- a joint moving this far, or the pinch
     # point leaving the step by this much halfway between the two postures -- is refused: the arm
@@ -79,6 +90,7 @@ class PiperArmConfig:
     # arm joints keep the pinch point on the step (measured: retracting 5 cm with the tool tilted,
     # the redundant torso sinks 0.12 m).
     max_joint_step: float = 0.6
+
     max_swing_m: float = 0.03
     # Turning what it holds over (a half roll, tool tilted forward) the arm goes straight from its
     # posture to the turned-over one in joint space: the wrist joints turn half a turn about the
@@ -254,8 +266,8 @@ class PiperArm(Arm):
     def _fk(self, torso: float, arm: list[float]) -> dict:
         self.ik.set_base(0.0, 0.0, 0.0, torso)
         tcp = pose_compose(self.ik.fk(self.config.arm, arm), {"p": TCP_OFFSET, "q": [1.0, 0.0, 0.0, 0.0]})
-        # Inverse of :meth:`_solve_from`: R_tcp = Rz(yaw) Ry(-pitch) R_down Rz(roll). Pitch near a
-        # quarter turn hides in the matrix; reuse the last commanded pitch then.
+        # Inverse of :meth:`_solve_from`. Pitch near a quarter turn hides in the matrix; reuse the
+        # last commanded pitch then.
         down = matrix_from_quat(TOOL_DOWN)
         r_tcp = matrix_from_quat(tcp["q"])
         m = r_tcp @ down.T
@@ -269,11 +281,16 @@ class PiperArm(Arm):
                 pitch = 0.0
         m_yaw = m @ matrix_from_quat(quat_from_axis_angle([0.0, 1.0, 0.0], pitch))
         yaw = math.atan2(m_yaw[1, 0], m_yaw[0, 0])
-        rolled = (down.T @ matrix_from_quat(quat_from_axis_angle([0.0, 1.0, 0.0], pitch))
-                  @ matrix_from_quat(quat_from_axis_angle([0.0, 0.0, 1.0], -yaw)) @ r_tcp)
+        unyawed = (down.T @ matrix_from_quat(quat_from_axis_angle([0.0, 1.0, 0.0], pitch))
+                   @ matrix_from_quat(quat_from_axis_angle([0.0, 0.0, 1.0], -yaw)) @ r_tcp)
+        # Match :meth:`_solve_from` / :meth:`_roll_about_tool_x`.
+        if self._roll_about_tool_x(pitch, self._target["wrist_roll"] if self._target is not None else 0.0):
+            roll = -math.atan2(unyawed[2, 1], unyawed[1, 1])
+        else:
+            roll = math.atan2(unyawed[1, 0], unyawed[0, 0])
         return {"lift": float(tcp["p"][2]), "reach": float(tcp["p"][0]) - self.geometry.tool_offset,
-                "wrist_yaw": yaw, "wrist_roll": math.atan2(rolled[1, 0], rolled[0, 0]),
-                "wrist_pitch": pitch}
+                "wrist_yaw": yaw, "wrist_roll": roll, "wrist_pitch": pitch}
+
 
     # ----------------------------------------------------------- commanding
     def command(self, cmd: dict) -> dict:
@@ -314,8 +331,7 @@ class PiperArm(Arm):
             target.update(wanted)
             holding = ((self._last.get("grippers") or {}).get(self.geometry.gripper) or {}).get("holding")
             continuous = bool(holding and prior is not None and not turn_over and self._step(previous, target))
-            solved, last = (self._ik(target, {}) if turn_over else
-                            self._ik(target, joints, prior, continuous=continuous))
+            solved, last = self._solve_tip(target, joints, prior, turn_over=turn_over, continuous=continuous)
             if solved is not None and continuous and self._jumps(prior, solved):
                 raise SkillFailed(f"the {self.config.arm} arm would have to turn its wrist over to follow its gripper "
                                   f"{target['reach']:.2f} m ahead at {target['lift']:.2f} m (yaw {target['wrist_yaw']:.2f}, "
@@ -327,6 +343,41 @@ class PiperArm(Arm):
         raise OutOfReach(f"the {self.config.arm} arm cannot put its gripper {target['reach']:.2f} m ahead at "
                           f"{target['lift']:.2f} m height (wrist yaw {target['wrist_yaw']:.2f}, roll "
                           f"{target['wrist_roll']:.2f}, pitch {target['wrist_pitch']:.2f}) at any torso height: {last}")
+
+    def _solve_tip(self, target: dict, joints: dict, prior: tuple[float, list[float]] | None, *,
+                   turn_over: bool, continuous: bool
+                   ) -> tuple[tuple[float, list[float]] | None, IkError | None]:
+        """IK for ``target``, softening a near-vertical drive tip if full ±π/2 is out of reach.
+
+        Mutates ``target['wrist_roll']`` to the softened value when a lesser tip succeeds, so the
+        stored command matches the posture the arm actually holds.
+        """
+        solved, last = (self._ik(target, {}) if turn_over else
+                        self._ik(target, joints, prior, continuous=continuous))
+        if solved is not None:
+            return solved, last
+        pitch = float(target.get("wrist_pitch", 0.0))
+        roll = float(target.get("wrist_roll", 0.0))
+        floor = self.config.drive_tip_roll_floor
+        if not self._roll_about_tool_x(pitch, roll) or abs(roll) <= floor + 1e-9:
+            return None, last
+        sign = math.copysign(1.0, roll if abs(roll) > 1e-9 else -1.0)
+        for mag in (1.45, 1.35, 1.25, 1.15, floor):
+            if mag >= abs(roll) - 1e-9:
+                continue
+            softened = {**target, "wrist_roll": sign * mag}
+            solved, err = (self._ik(softened, {}) if turn_over else
+                           self._ik(softened, joints, prior, continuous=continuous))
+            if err is not None:
+                last = err
+            if solved is not None:
+                target["wrist_roll"] = sign * mag
+                return solved, None
+        return None, last
+
+    def _roll_about_tool_x(self, pitch: float, roll: float) -> bool:
+        """Whether ``wrist_roll`` tips about tool +x (drive bit-down) rather than tool +z."""
+        return abs(pitch) < self.config.roll_about_x_pitch and abs(roll) <= self.config.roll_about_x_max
 
     def _step(self, a: dict, b: dict) -> bool:
         """Whether virtual-joint targets ``b`` lie a small step from ``a``."""
@@ -430,12 +481,18 @@ class PiperArm(Arm):
                     ) -> tuple[tuple[float, list[float]] | None, IkError | None]:
         """``target`` solved from the first of ``seeds`` (torso, arm joints) that reaches it."""
         tcp = [self.geometry.tool_offset + target["reach"], self.geometry.lateral, target["lift"]]
-        # Yaw about world z, then pitch the tool down about world y, then roll about the tool's own
-        # +z (through the pinch). Rolling about world x before the pitch (the pre-USD composition)
-        # asked for poses the manufacturer wrist cannot hold once the joint frames match the USD.
+        # Yaw about world z, pitch about world y, then roll in the tool frame. Near tool-down
+        # (drive_screw), roll about tool +x so ±π/2 stands a laterally held bit onto world −z —
+        # rolling about tool +z only spun the flat driver in the horizontal plane. When the tool
+        # is pitched forward (pour / turn-over), roll about tool +z instead: that is the twist
+        # that tips a cup or turns a box over about the approach. Rx uses the flipped sign so the
+        # same ±π/2 values as the kitchen robot still map gripper +y → world −z.
         pitched = quat_mul(quat_from_axis_angle([0.0, 1.0, 0.0], -target["wrist_pitch"]), TOOL_DOWN)
-        tool = quat_mul(quat_from_axis_angle([0.0, 0.0, 1.0], target["wrist_yaw"]),
-                        quat_mul(pitched, quat_from_axis_angle([0.0, 0.0, 1.0], target["wrist_roll"])))
+        if self._roll_about_tool_x(target["wrist_pitch"], target["wrist_roll"]):
+            rolled = quat_mul(pitched, quat_from_axis_angle([1.0, 0.0, 0.0], -target["wrist_roll"]))
+        else:
+            rolled = quat_mul(pitched, quat_from_axis_angle([0.0, 0.0, 1.0], target["wrist_roll"]))
+        tool = quat_mul(quat_from_axis_angle([0.0, 0.0, 1.0], target["wrist_yaw"]), rolled)
         last: IkError | None = None
         for lift, q in seeds:
             try:
@@ -443,6 +500,11 @@ class PiperArm(Arm):
             except IkError as exc:
                 last = exc
         return None, last
+
+    def tool_rotation(self, yaw: float, roll: float, pitch: float = 0.0):
+        pitched = quat_mul(quat_from_axis_angle([0., 1., 0.], -pitch), TOOL_DOWN)
+        return matrix_from_quat(quat_mul(quat_from_axis_angle([0., 0., 1.], yaw),
+            quat_mul(pitched, quat_from_axis_angle([0., 0., 1.], roll))))
 
     def reachable(self, lift: float, reach: float, wrist_yaw: float = 0.0, wrist_roll: float = 0.0,
                   wrist_pitch: float = 0.0) -> bool:

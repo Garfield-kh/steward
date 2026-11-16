@@ -7,7 +7,7 @@ import { describe, expect, it } from 'vitest'
 import { gatesForMode } from '../run-gates.ts'
 
 const root = resolve(import.meta.dirname, '../..')
-const masterPush = "github.event_name == 'push' && github.ref == 'refs/heads/master'"
+const masterPush = "github.repository == 'deepseek-harness/deepseek-harness' && (github.event_name == 'push' && github.ref == 'refs/heads/master')"
 const runtimeBuilder = './.github/workflows/build-exe-for-python-sdk.yml'
 
 interface Job {
@@ -135,7 +135,7 @@ describe('master-only platform scheduling', () => {
     const master = workflow('ci-master.yml')
     const wine = master.jobs.windows!
     expect(wine).toMatchObject({
-      if: "(github.event_name == 'push' && github.ref == 'refs/heads/master') || (github.event_name == 'workflow_dispatch' && inputs.suite == 'wine')",
+      if: "github.repository == 'deepseek-harness/deepseek-harness' && ((github.event_name == 'push' && github.ref == 'refs/heads/master') || (github.event_name == 'workflow_dispatch' && inputs.suite == 'wine'))",
       'runs-on': 'ubuntu-latest',
     })
     expect(wine.needs).toBeUndefined()

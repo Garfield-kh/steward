@@ -12,6 +12,8 @@ See the [perception model skills guide](docs/novel-view-generation/README.md) fo
 
 Steward is an embodied robotics system built on DeepSeek Harness. See [steward.md](../steward.md) for the design, its “13. Implementation Progress” section for progress and launch commands, and [13.7](../steward.md#137-phase-1-感知方法与泛化) for Phase 1 RGB-D geometry, classification and generalization.
 
+Cobot object loads are tracked per physical gripper. An explicit `arm` selects the working hand without releasing the other hand; `self.holdingByGripper` reports both attachments, while `self.holding` reports the working hand. Opening one gripper releases only its load and carried contents. Drawer-handle following remains limited to one working hand; release a held handle before switching arms.
+
 ## Quick start
 
 The shared robot Harness session belongs to the scenario’s first robot; thinking previews and full-text reads use that robot’s actual ID. Other robots do not inherit its session.
@@ -36,7 +38,7 @@ The console's current-thinking panel labels each block with its model step, sepa
 
 The robot has two head RGB-D cameras: `head_camera` looks ahead; the short-focal-length `wide_camera` sees the nearby worktop and gripper. Both contribute to perception; see [steward.md 13.8](../steward.md#138-机器人本体的双相机).
 
-`ego_predict` accepts `arm: "L"` or `arm: "R"` for `cobot-magic`. Prediction uses that arm’s geometry, and executing the receipt selects the same physical arm and gripper. Omitting `arm` retains the working arm, initially L. Predictions do not switch a running skill. The shared estimator supports one held load: release an object or handle in the other gripper before switching arms; simultaneous loads are refused. Single-arm bodies reject an explicit arm selection.
+`ego_predict` accepts `arm: "L"` or `arm: "R"` for `cobot-magic`. Prediction uses that arm’s geometry, and executing the receipt selects the same physical arm and gripper. Omitting `arm` retains the working arm, initially L. Predictions do not switch a running skill. Each gripper retains its own object load; release a drawer handle before switching arms. Single-arm bodies reject an explicit arm selection.
 
 The Cobot head camera origins sit 0.33 m ahead of the base centre, beyond the lift carriage’s forward collision extent. Their base-fixed calibration keeps tabletop detections available while the carriage crosses camera height. Rebuild saved Cobot scenes to use the updated mount; previously captured camera evidence keeps its recorded calibration.
 

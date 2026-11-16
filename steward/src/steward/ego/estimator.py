@@ -112,6 +112,9 @@ class Track:
     last_seen: float
     existence: float = 0.5
     held: bool = False
+    held_by: str | None = None
+    held_since: float = 0.0
+    carried_by: str | None = None
     held_offset: np.ndarray | None = None  # while held: its centre from the pinch point, in the gripper's frame
     color_counts: dict[str, float] = field(default_factory=dict)
     voxels: np.ndarray | None = None  # 1 cm voxels of every surface seen of this object (RGB-D mode)
@@ -366,6 +369,7 @@ class EgoEstimator:
         self.grippers: dict[str, dict] = {}
         self.held_id: str | None = None
         self.held_gripper: str | None = None
+        self._rigid_carries: dict[str | None, dict] = {}
         self._rng = np.random.default_rng(0)
         self._self_template = self._make_self_template()
         self.cameras = self._camera_models()
@@ -478,10 +482,11 @@ class EgoEstimator:
         """Which of ``points`` (N×3, map frame) lie on the robot's own links (within
         ``body_margin_m``); while the gripper holds something, none near the gripper, which are the load."""
         inside = _in_boxes(points, self.body_boxes(), self.config.body_margin_m)
-        if self.gripper.get("holding"):
-            held = self.tracks.get(self.held_id) if self.held_id else None
-            reach = max(HELD_FALLBACK_M, held.footprint if held is not None else 0.0)
-            inside &= np.linalg.norm(points - self.gripper_position(self.held_gripper), axis=1) > reach
+        for link, report in (self.grippers or {None: self.gripper}).items():
+            if report.get("holding"):
+                held = self.holding_for(link)
+                reach = max(HELD_FALLBACK_M, held.footprint if held is not None else 0.0)
+                inside &= np.linalg.norm(points - self.gripper_position(link), axis=1) > reach
         return inside
 
     def on_body_at(self, points: np.ndarray, header: dict) -> np.ndarray:
@@ -572,8 +577,7 @@ class EgoEstimator:
         self.odometry = frame["odometry"]
         self.joints = frame["joints"]
         self._read_grippers(frame)
-        if not self.gripper.get("holding"):
-            self._clear_held()
+        self._clear_held()
         # A held object moves with this frame's body pose; update it before association so a
         # turning robot does not see its own load as a new object.
         self._follow_held()
@@ -633,6 +637,7 @@ class EgoEstimator:
             track = self._new_track(det, pos, yaw, sigma, quat=quat)
             if entry == "carried":
                 track.carried_offset = self.gripper_rotation(self.held_gripper).T @ (track.pos - self.tracks[self.held_id].pos)
+                track.carried_by = self.held_id
             seen_by[camera_of[k]].add(track.id)
         matched = set().union(*seen_by.values())
         self._decay_unseen(cams, matched)
@@ -645,12 +650,9 @@ class EgoEstimator:
         """What was in the carried container but has not been seen in it for ``lost_content_s``
         while the container itself is in view has fallen out on the way: it is forgotten, and
         perceived afresh where it lies."""
-        container = self.tracks.get(self.held_id) if self.held_id else None
-        if container is None or container.id not in matched:
-            return
         for track in [t for t in self.tracks.values() if t.carried]:
-            if self.stamp - track.last_seen > self.config.lost_content_s:
-                self._drop(track, f"no longer seen in {container.id}: fell out while it was carried")
+            if track.carried_by in matched and self.stamp - track.last_seen > self.config.lost_content_s:
+                self._drop(track, f"no longer seen in {track.carried_by}: fell out while it was carried")
 
     def update_body(self, header: dict) -> None:
         """Follow the robot's own state (stamp, odometry, joints, gripper) from a sensor header
@@ -659,9 +661,8 @@ class EgoEstimator:
         self.posed = True
         self.odometry = header["odometry"]
         self.joints = header["joints"]
-        self.gripper = header["gripper"]
-        if not self.gripper.get("holding"):
-            self._clear_held()
+        self._read_grippers(header)
+        self._clear_held()
         self._follow_held()
         self._follow_handle()
         self.version += 1
@@ -709,8 +710,7 @@ class EgoEstimator:
         self.odometry = header["odometry"]
         self.joints = header["joints"]
         self._read_grippers(header)
-        if not self.gripper.get("holding"):
-            self._clear_held()
+        self._clear_held()
         self._follow_held()
         self._follow_handle()
         cam = self.camera_pose(camera=frame.get("camera"))
@@ -4215,8 +4215,8 @@ class EgoEstimator:
         container: it slides about in there while the container is carried."""
         gate = max(self.config.gate_m, 3.0 * math.sqrt(float(np.mean(track.var)) + sigma**2),
                    self.config.size_gate_ratio * float(max(track.size[0], track.size[1])))
-        if track.carried and self.held_id in self.tracks:
-            container = self.tracks[self.held_id]
+        if track.carried and track.carried_by in self.tracks:
+            container = self.tracks[track.carried_by]
             gate = max(gate, 0.5 * float(max(container.size[0], container.size[1])))
         return max(gate, 0.45) if track.held else gate
 
@@ -4270,7 +4270,7 @@ class EgoEstimator:
     def _forget(self, track_id: str) -> None:
         """Delete a track, and never silently amputate what the gripper is holding: when the load
         is the track that would go, the pair is not merged after all."""
-        if track_id == self.held_id:
+        if track_id in self.tracks and self.tracks[track_id].held:
             return
         track = self.tracks.get(track_id)
         if track is not None:
@@ -4465,7 +4465,7 @@ class EgoEstimator:
         lay in it has slid out. ``rot``: the gripper rotation to judge by (default: the belief's)."""
         if track.held_up is None:
             return False
-        up = (self.gripper_rotation(self.held_gripper) if rot is None else rot) @ track.held_up
+        up = (self.gripper_rotation(track.held_by) if rot is None else rot) @ track.held_up
         return math.acos(min(1.0, max(-1.0, float(up[2])))) > self.config.poured_roll
 
     def _fuse(self, track: Track, det: dict, pos: np.ndarray, yaw: float, sigma: float,
@@ -4488,10 +4488,10 @@ class EgoEstimator:
         if track.carried:
             # Inside the carried container it may have slid: it follows the view, and keeps its
             # new place in the container (in the gripper's frame, as the container moves).
-            container = self.tracks.get(self.held_id) if self.held_id else None
+            container = self.tracks.get(track.carried_by)
             if container is not None:
                 track.pos = track.pos + 0.5 * (pos - track.pos)
-                track.carried_offset = self.gripper_rotation(self.held_gripper).T @ (track.pos - container.pos)
+                track.carried_offset = self.gripper_rotation(container.held_by).T @ (track.pos - container.pos)
             return
         r = sigma**2
         prior_var = track.var + self.config.process_noise
@@ -4524,7 +4524,7 @@ class EgoEstimator:
         ``held_view_gate_m`` of the load, or one as near another track (a neighbour the load is
         lowered beside) corrects nothing."""
         gate = self.config.held_view_gate_m
-        if self.stamp < self.held_since - 1e-6 or track.held_offset is None or np.linalg.norm(pos - track.pos) > gate:
+        if self.stamp < track.held_since - 1e-6 or track.held_offset is None or np.linalg.norm(pos - track.pos) > gate:
             return
         if any(other is not track and not other.carried and np.linalg.norm(other.pos - pos) <= gate
                for other in self.tracks.values()):
@@ -4532,7 +4532,7 @@ class EgoEstimator:
         gain = track.var / (track.var + sigma**2)
         track.pos = track.pos + gain * (pos - track.pos)
         track.var = (1.0 - gain) * track.var
-        track.held_offset = self.gripper_rotation(self.held_gripper).T @ (track.pos - self.gripper_position(self.held_gripper))
+        track.held_offset = self.gripper_rotation(track.held_by).T @ (track.pos - self.gripper_position(track.held_by))
 
     def _decay_unseen(self, cams: dict[str, dict], matched: set[str]) -> None:
         """Fade every unmatched track that lies well inside the view of at least one of ``cams``
@@ -4565,10 +4565,9 @@ class EgoEstimator:
                 self._drop(track, "faded: not detected where it should be visible")
 
     def forget_objects(self) -> None:
-        """Drop every perceived object except the one in the gripper (used when the kind of sensor
+        """Drop every perceived object except loads in the grippers and their contents (used when the kind of sensor
         data changes and objects must be perceived afresh)."""
-        held = self.tracks.get(self.held_id) if self.held_id else None
-        self.tracks = {held.id: held} if held is not None else {}
+        self.tracks = {t.id: t for t in self.tracks.values() if t.held or t.carried}
         self.assembly_memory = AssemblyMemory()
         self.stationary_assemblies = StationaryAssemblies()
         self.manipulation_envelopes = {}
@@ -4604,9 +4603,25 @@ class EgoEstimator:
         self.grippers = {}
         self.held_id = None
         self.held_gripper = None
+        self._rigid_carries = {}
         self.version += 1
 
     # ---------------------------------------------------------------- holding
+    def holding_for(self, gripper: str | None) -> Track | None:
+        """Return the load attached to this physical gripper, or None for an empty hand."""
+        return next((t for t in self.tracks.values() if t.held and t.held_by == gripper), None)
+
+    def select_gripper(self, gripper: str | None) -> None:
+        """Select the working hand without releasing or reassigning another hand's load."""
+        self._rigid_carries[self.held_gripper] = self.rigid_carry
+        self.held_gripper = gripper
+        track = self.holding_for(gripper)
+        self.held_id = track.id if track else None
+        self.held_since = track.held_since if track else 0.0
+        self.rigid_carry = self._rigid_carries.setdefault(gripper, {})
+        if gripper in self.grippers:
+            self.gripper = self.grippers[gripper]
+
     def mark_held(self, track_id: str, since: float | None = None, gripper: str | None = None,
                   at: list[float] | None = None, body: dict | None = None) -> str:
         """Record the grasp, and carry its load with the arm, together with what lies in it.
@@ -4625,7 +4640,7 @@ class EgoEstimator:
         rather than at the last perception update, which a slow segmenter leaves seconds behind,
         from before the base docked and the arm reached down.
 
-        A previous mark still standing when a new grasp is recorded cannot still be true (the
+        A previous mark on the same hand when a new grasp is recorded cannot still be true (the
         gripper opened to take this load), and no frame may ever arrive to clear it when skills run
         without looks, so it is dropped here. If the tracked object was merged away during the
         approach, the track nearest the gripper takes the load instead.
@@ -4633,6 +4648,7 @@ class EgoEstimator:
         :returns: the id of the held track.
         :raises KeyError: no track is near the gripper."""
         requested_id = track_id
+        self.select_gripper(gripper)
         self.rigid_carry.clear()
         if track_id != self.held_id:
             self._unmark_held(self.tracks.get(self.held_id))
@@ -4644,11 +4660,13 @@ class EgoEstimator:
         closed_at = self.gripper_position(gripper, joints, odometry) if at is None else np.asarray(at, dtype=float)
         if track_id not in self.tracks:
             grip = closed_at
-            near = min(self.tracks.values(), key=lambda t: float(np.linalg.norm(t.pos - grip)), default=None)
+            near = min((t for t in self.tracks.values() if not t.held), key=lambda t: float(np.linalg.norm(t.pos - grip)), default=None)
             if near is None or float(np.linalg.norm(near.pos - grip)) > HELD_FALLBACK_M:
                 raise KeyError(f"{track_id} is no longer in the ego state and nothing else is in the gripper")
             track_id = near.id
         track = self.tracks[track_id]
+        if track.held and track.held_by != gripper:
+            raise ValueError(f"{track_id} is already held by {track.held_by}")
         from steward.ego.fasten_release import grasp_frame
         track.held_interface = grasp_frame(self._track_entity(track), closed_at,
             self.gripper_rotation(gripper, joints, odometry))
@@ -4681,11 +4699,14 @@ class EgoEstimator:
         for other in self.tracks.values():
             if other is not track and not other.held and (self.support_of(other) is track or self._within(track, other)):
                 other.carried_offset = rot.T @ (other.pos - track.pos)
+                other.carried_by = track.id
                 other.voxels = None
                 other.span = None
         self.held_since = max(self.stamp, float(since) if since is not None else self.stamp)
         self.held_gripper = gripper
         track.held = True
+        track.held_by = gripper
+        track.held_since = self.held_since
         track.held_offset = rot.T @ (track.pos - closed_at)
         track.var = np.maximum(track.var, self.config.grasp_shift_m**2)
         track.held_yaw = wrap_angle(track.yaw - math.atan2(rot[1, 0], rot[0, 0]))
@@ -4720,10 +4741,11 @@ class EgoEstimator:
         self._unmark_held(track)
 
     def _unmark_held(self, track) -> None:
-        self.held_id = None
-        self.held_gripper = None
+        if track is None or track.id == self.held_id:
+            self.held_id = None
         for other in self.tracks.values():
-            if other.carried:
+            if other.carried and (other.carried_by == (track.id if track else None)):
+                other.carried_by = None
                 other.carried_offset = None  # it lies in the container where that was put down
                 other.settled = False
                 other.var = np.maximum(other.var, 0.02**2)
@@ -4732,6 +4754,7 @@ class EgoEstimator:
         if track.appearance is not None:
             track.appearance.stale = True  # it may have been put down turned over
         track.held = False
+        track.held_by = None
         track.held_offset = None
         track.grasp_world_yaw = None
         track.grasp_association = None
@@ -4789,15 +4812,18 @@ class EgoEstimator:
             self.gripper = {"state": "open", "holding": False, "holdingHandle": False}
 
     def _clear_held(self) -> None:
-        if self.stamp < self.held_since - 1e-6:
-            return  # this frame was rendered while the gripper was still open
-        track = self.tracks.get(self.held_id) if self.held_id else None
-        # It is where the hand let go of it, not where it was picked up: the arm carried it
-        # across the table, and a look taken after the release must recognise it there rather
-        # than find a second bowl at the old place.
-        if track is not None and track.held_offset is not None:
-            track.pos = self.gripper_position(self.held_gripper) + self.gripper_rotation(self.held_gripper) @ track.held_offset
-        self._unmark_held(track)
+        for track in list(self.tracks.values()):
+            if not track.held or self.stamp < track.held_since - 1e-6:
+                continue
+            report = self.grippers.get(track.held_by, self.gripper if not self.grippers else {})
+            if report.get("holding", True):
+                continue
+            if track.held_offset is not None:
+                track.pos = (self.gripper_position(track.held_by)
+                             + self.gripper_rotation(track.held_by) @ track.held_offset)
+            self._unmark_held(track)
+        if not self.held_id and not self.grippers:
+            self.held_gripper = None
 
     @staticmethod
     def _track_quat(track: Track) -> list[float]:
@@ -4823,18 +4849,18 @@ class EgoEstimator:
         track.tip_roll_source = "observed"
 
     def _follow_held(self) -> None:
-        if not (self.held_id and self.held_id in self.tracks):
-            return
-        track = self.tracks[self.held_id]
-        rot = self.gripper_rotation(self.held_gripper)
-        track.pos = self.gripper_position(self.held_gripper) + rot @ track.held_offset
-        self._apply_held_orient(track, rot)
-        poured = self._tipped(track)
-        for content in [t for t in self.tracks.values() if t.carried]:
-            if poured:
-                self._drop(content, f"poured out of {track.id}: perceived afresh where it lands")
-            else:
-                content.pos = track.pos + rot @ content.carried_offset
+        for track in list(self.tracks.values()):
+            if not track.held or track.held_offset is None:
+                continue
+            rot = self.gripper_rotation(track.held_by)
+            track.pos = self.gripper_position(track.held_by) + rot @ track.held_offset
+            self._apply_held_orient(track, rot)
+            poured = self._tipped(track, rot)
+            for content in [t for t in self.tracks.values() if t.carried and t.carried_by == track.id]:
+                if poured:
+                    self._drop(content, f"poured out of {track.id}: perceived afresh where it lands")
+                else:
+                    content.pos = track.pos + rot @ content.carried_offset
 
     def _follow_handle(self) -> None:
         """A drawer whose handle the gripper holds moves with the gripper, and what lies in it
@@ -5095,20 +5121,17 @@ class EgoEstimator:
         when nothing is held or the load has no grasp offset. Carried contents use
         ``(position, None)``.
         """
-        if not self.held_id or self.held_id not in self.tracks:
-            return {}
-        track = self.tracks[self.held_id]
-        if track.held_offset is None:
-            return {}
-        rot = self.gripper_rotation(self.held_gripper, joints, odometry)
-        pos = self.gripper_position(self.held_gripper, joints, odometry) + rot @ track.held_offset
-        out = {track.id: (pos, self._held_world_quat(track, rot))}
-        # Tipped or not by the same body: an upright belief with a live wrist rolled over has
-        # poured, and its contents are no longer carried along (to_scene drops their relation).
-        if not self._tipped(track, rot):
-            for content in self.tracks.values():
-                if content.carried and content.id != track.id:
-                    out[content.id] = (pos + rot @ content.carried_offset, None)
+        out = {}
+        for track in self.tracks.values():
+            if not track.held or track.held_offset is None:
+                continue
+            rot = self.gripper_rotation(track.held_by, joints, odometry)
+            pos = self.gripper_position(track.held_by, joints, odometry) + rot @ track.held_offset
+            out[track.id] = (pos, self._held_world_quat(track, rot))
+            if not self._tipped(track, rot):
+                for content in self.tracks.values():
+                    if content.carried and content.carried_by == track.id:
+                        out[content.id] = (pos + rot @ content.carried_offset, None)
         return out
 
     def held_position(self, joints: dict | None = None, odometry: dict | None = None):
@@ -5126,8 +5149,8 @@ class EgoEstimator:
         """What holds a track: the held container for its contents, else the innermost receptacle
         (drawer, larger bowl, a box its contents can be poured from) whose floor it rests on, else
         the highest support surface whose top it rests on."""
-        if track.carried and self.held_id in self.tracks:
-            return self.tracks[self.held_id]
+        if track.carried and track.carried_by in self.tracks:
+            return self.tracks[track.carried_by]
         inside, best = None, None
         for other in self.tracks.values():
             if other.id == track.id or other.held:
@@ -5305,6 +5328,7 @@ class EgoEstimator:
         track.interface_estimate_at = None
         track.settled = False  # it drops the last few millimetres when the grip opens
         track.held = False
+        track.held_by = None
         track.held_offset = None
         # Do not copy place wristRoll into tip_roll: arm roll is not body tip about +x. Tip stays
         # unknown until detections snap it; pick/mate gates wait for tip_roll_source == "observed".
@@ -5818,7 +5842,7 @@ class EgoEstimator:
             if poured_live:
                 continue
             if track.held:
-                relations.append(Relation(type="attached", a={"entity": track.id}, b={"entity": SELF_ID, "link": "gripper"},
+                relations.append(Relation(type="attached", a={"entity": track.id}, b={"entity": SELF_ID, "link": track.held_by or "gripper"},
                                           mode="rigid", derived=False, confidence=1.0))
             elif prior(track.category)["root"].get("fixed", 0.0) < 0.9:
                 support = self.support_of(track)
@@ -5833,19 +5857,23 @@ class EgoEstimator:
                     relations.append(Relation(type="supported-by", a={"entity": track.id}, b={"entity": support.id},
                                               derived=True, confidence=round(min(track.existence, support.existence), 3)))
         self.stationary_assemblies.overlay(entities, relations, self.tracks, self.stamp)
+        carries = {**self._rigid_carries, self.held_gripper: self.rigid_carry}
         for ent in entities:
-            if self.held_id and ent.id in self.rigid_carry:
+            for gripper, members in carries.items():
+                anchor = self.holding_for(gripper)
+                if anchor is None or ent.id not in members:
+                    continue
                 from steward.math3d import quat_from_matrix
-                member = self.rigid_carry[ent.id]
-                rotation = self.gripper_rotation(self.held_gripper,
+                member = members[ent.id]
+                rotation = self.gripper_rotation(gripper,
                     (self_frame or {}).get('joints'), (self_frame or {}).get('odometry'))
-                pinch = self.gripper_position(self.held_gripper,
+                pinch = self.gripper_position(gripper,
                     (self_frame or {}).get('joints'), (self_frame or {}).get('odometry'))
                 ent.pose.value = {'p':(pinch+rotation @ member['offset']).tolist(),
                                   'q':quat_from_matrix(rotation @ member['rotation'])}
                 ent.pose.src = 'inferred'
                 ent.state_vars['rigidFollowEvidence'] = Est(value={
-                    'source':'observed_follow_then_encoder_prediction', 'anchor':self.held_id,
+                    'source':'observed_follow_then_encoder_prediction', 'anchor':anchor.id,
                     'observedAt':member['observedAt']}, src='inferred')
             track = self.tracks.get(ent.id)
             if track is not None:
@@ -5853,10 +5881,10 @@ class EgoEstimator:
                 if track.held and track.held_tool_feature:
                     from steward.ego.fasten_geometry import transform_feature
                     feature = transform_feature(track.held_tool_feature,
-                        self.gripper_rotation(self.held_gripper, (self_frame or {}).get('joints'), (self_frame or {}).get('odometry')),
-                        self.gripper_position(self.held_gripper, (self_frame or {}).get('joints'), (self_frame or {}).get('odometry')))
+                        self.gripper_rotation(track.held_by, (self_frame or {}).get('joints'), (self_frame or {}).get('odometry')),
+                        self.gripper_position(track.held_by, (self_frame or {}).get('joints'), (self_frame or {}).get('odometry')))
                     feature['source'] = 'grasp_relative_plus_encoders'
-                    feature['grip'] = self.gripper_position(self.held_gripper,
+                    feature['grip'] = self.gripper_position(track.held_by,
                         (self_frame or {}).get('joints'), (self_frame or {}).get('odometry')).tolist()
                 if feature and track.held:
                     centre = np.asarray(ent.pose.value['p'])

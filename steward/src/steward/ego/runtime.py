@@ -1036,7 +1036,9 @@ class EgoRuntime:
         es = self.ego_state()
         me = es.entity(SELF_ID)
         p = me.pose.value
-        held = next((r.a["entity"] for r in es.relations if r.type == "attached"), None)
+        holding_by_gripper = {r.b.get("link", "gripper"): r.a["entity"]
+                              for r in es.relations if r.type == "attached"}
+        held = holding_by_gripper.get(self.arm.geometry.gripper, holding_by_gripper.get("gripper"))
         supports = {r.a["entity"]: r.b["entity"] for r in es.relations if r.type == "supported-by"}
         objects = []
         for ent in es.entities:
@@ -1094,7 +1096,7 @@ class EgoRuntime:
             "t": round(es.stamp, 3),
             "self": {"x": round(p["p"][0], 3), "y": round(p["p"][1], 3),
                      "yawDeg": round(math.degrees(yaw_from_quat(p["q"])), 1),
-                     "holding": held, "joints": {k: round(v, 3) for k, v in self.arm.joints_of(
+                     "holding": held, "holdingByGripper": holding_by_gripper, "joints": {k: round(v, 3) for k, v in self.arm.joints_of(
                          {j.id: j.q.value[0] for j in me.rigid.joints if j.q.value},
                          {"x": p["p"][0], "y": p["p"][1], "yaw": yaw_from_quat(p["q"])}).items()}},
             "objects": objects,
@@ -1243,7 +1245,7 @@ class EgoRuntime:
                 "insert_screw_into_hole (or place tip-down) into the hole with head up, then observe again")
         return None
 
-    def _insert_screw_tip_gate(self, screw_id: object | None = None) -> str | None:
+    def _insert_screw_tip_gate(self, screw_id: object | None = None, gripper: str | None = None) -> str | None:
         """Refuse insert until the held screw's tip end is camera-confirmed.
 
         Without ``tipSource=observed``, ES treats an unknown tip as upright and skips the stand
@@ -1253,7 +1255,8 @@ class EgoRuntime:
         :returns: refusal message, or None when the held screw tip is observed.
         """
         with self._lock:
-            held_id = self.estimator.held_id
+            load = self.estimator.holding_for(None if gripper == "gripper" else gripper) if gripper else None
+            held_id = load.id if load else (self.estimator.held_id if gripper is None else None)
             if not held_id:
                 return "insert_screw_into_hole needs a toy_screw in the gripper"
             track = self.estimator.tracks.get(held_id)
@@ -1721,17 +1724,13 @@ class EgoRuntime:
         return self._arm_esims[side]
 
     def _arm_load_issue(self, planner: Esim) -> str | None:
-        """The shared estimator tracks one load; changing its owning gripper is refused."""
+        """Drawer-handle following is shared; object loads belong to individual hands."""
         gripper = planner.arm.geometry.gripper
         with self._lock:
-            held = self.estimator.held_gripper
-            reports = self.estimator.grippers
-            other = next((g for g, report in reports.items() if g != gripper and
-                          (report.get("holding") or report.get("holdingHandle"))), None)
-            if held is not None and held != gripper:
-                other = held
+            other = next((g for g, report in self.estimator.grippers.items()
+                          if g != gripper and report.get("holdingHandle")), None)
         if other is not None:
-            return f"{other} holds a load or handle; release it before selecting {gripper}; simultaneous arm loads are unsupported"
+            return f"{other} holds a drawer handle; release it before selecting {gripper}"
         return None
 
     def predict(self, skill: str, params: dict) -> dict:
@@ -1770,7 +1769,7 @@ class EgoRuntime:
                     self._receipt_generation[receipt["id"]] = self._generation
                 return receipt
         if skill == "insert_screw_into_hole":
-            gate = self._insert_screw_tip_gate(params.get("object") or params.get("target"))
+            gate = self._insert_screw_tip_gate(params.get("object") or params.get("target"), planner.arm.geometry.gripper)
             if gate is not None:
                 receipt = planner._receipt(
                     es, "insert_screw_into_hole", params, 1.0, [gate], {}, feasible=False)
@@ -2184,6 +2183,8 @@ class EgoRuntime:
             if planner.arm is not self.arm and isinstance(planner.arm, PiperArm):
                 planner.arm.invalidate_target()
             self.esim, self.arm = planner, planner.arm
+            with self._lock:
+                self.estimator.select_gripper(self.arm.geometry.gripper)
             job = self.executor.start(receipt["skill"], receipt).to_dict()
         params = receipt.get("params") or {}
         target = params.get("target") or params.get("on") or (f"({params['x']:.2f}, {params['y']:.2f})" if "x" in params else "")

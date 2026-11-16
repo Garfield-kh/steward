@@ -3,11 +3,11 @@
 # After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write steward/README.md
 /steward:
-  en: f67fb97a23830628
-  zh: 58fe6d85e60d1b57
+  en: c3fa5e7d5b2093ec
+  zh: 057d80b94fffde04
 /steward/quick-start:
-  en: 03933fd7a0af55ea
-  zh: 18578f2c1caa4d4a
+  en: 19703da3cddf42e2
+  zh: e1958b03ac3c47b2
 /steward/run-with-deepseek-harness:
   en: c238e824d9bfb527
   zh: 90c8fa0b9bdcec0c

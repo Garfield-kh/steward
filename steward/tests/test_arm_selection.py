@@ -44,13 +44,14 @@ def test_arm_prediction_does_not_switch_a_running_executor(runtime):
     assert not runtime.receipts[receipt["id"]].get("used")
 
 
-def test_other_loaded_arm_is_refused_instead_of_reassigning_its_load(runtime):
-    runtime.estimator.held_id = "e:driver"
-    runtime.estimator.held_gripper = "L_link6"
-    receipt = runtime.predict("pick", {"target": "e:screw", "arm": "R"})
-    assert not receipt["feasible"]
-    assert "L_link6" in " ".join(receipt["issues"])
-    assert runtime.estimator.held_id == "e:driver"
+def test_other_object_load_does_not_block_an_arm_selection(runtime, monkeypatch):
+    runtime.estimator.grippers = {"L_link6": {"holding": True}}
+    receipt = runtime.predict("navigate", {"x": 0, "y": 0, "arm": "R"})
+    assert receipt["feasible"]
+    monkeypatch.setattr(runtime.executor, "start", lambda *_: SimpleNamespace(to_dict=lambda: {"state": "succeeded"}))
+    runtime.run(receipt["id"])
+    assert runtime.arm.geometry.gripper == "R_link6"
+    assert runtime.estimator.grippers["L_link6"]["holding"]
 
 
 @pytest.mark.parametrize("arm", ["r", "other", 1, None])
@@ -59,9 +60,9 @@ def test_invalid_arm_is_rejected(runtime, arm):
         runtime.predict("navigate", {"x": 0, "y": 0, "arm": arm})
 
 
-def test_run_rechecks_a_load_acquired_after_prediction(runtime, monkeypatch):
+def test_run_rechecks_a_drawer_handle_acquired_after_prediction(runtime, monkeypatch):
     receipt = runtime.predict("navigate", {"x": 0, "y": 0, "arm": "R"})
-    runtime.estimator.grippers = {"L_link6": {"holding": True}}
+    runtime.estimator.grippers = {"L_link6": {"holdingHandle": True}}
     commands = []
     monkeypatch.setattr(runtime.link, "command", commands.append)
     with pytest.raises(PermissionError, match="L_link6"):

@@ -198,7 +198,8 @@ class Esim:
 
     def _held(self, es: SceneState) -> Entity | None:
         for rel in es.relations:
-            if rel.type == "attached" and rel.b.get("entity") == es.self_id:
+            if (rel.type == "attached" and rel.b.get("entity") == es.self_id
+                    and rel.b.get("link", "gripper") in (self.arm.geometry.gripper, "gripper")):
                 return es.find(rel.a["entity"])
         return None
 

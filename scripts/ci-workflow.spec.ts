@@ -463,8 +463,7 @@ describe('CI workflow', () => {
         expect(evaluateRunsOn(job['runs-on'], { vars: {}, github: { repository } }),
           `${jobName} must use a standard Windows runner in ${repository}`).toBe('windows-2025')
       }
-      expect(job.if).toBe("github.event_name == 'pull_request'"
-        + (jobName === 'windows-coverage' ? " && github.repository == 'deepseek-harness/deepseek-harness'" : ''))
+      expect(job.if).toBe("github.event_name == 'pull_request' && github.repository == 'deepseek-harness/deepseek-harness'")
     }
 
     // windows-build runs the blocking build/site pair.
@@ -558,7 +557,7 @@ describe('CI workflow', () => {
     expect(report?.run).toContain('Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append')
 
     // serial-windows: master-only standby, self-hosted, non-blocking, lives in ci-master.
-    expect(serialWindows.if).toBe("github.event_name == 'push' && github.ref == 'refs/heads/master'")
+    expect(serialWindows.if).toBe("github.repository == 'deepseek-harness/deepseek-harness' && (github.event_name == 'push' && github.ref == 'refs/heads/master')")
     expect(serialWindows['runs-on']).toEqual(['self-hosted', 'dsh-win-ci', 'windows'])
     expect(serialWindows.name).toBe('serial / windows (self-hosted standby)')
     // Its store must share the ReFS workspace volume for clone; the install
@@ -597,7 +596,7 @@ describe('CI workflow', () => {
     expect(windowsAggregate.needs).toEqual(['windows-build', 'windows-native-tests'])
     expect(windowsAggregate.name).toBe('windows checks passed')
     expect(windowsAggregate['runs-on']).toBe(aggregate['runs-on'])
-    expect(windowsAggregate.if).toBe("${{ !cancelled() && github.event_name == 'pull_request' }}")
+    expect(windowsAggregate.if).toBe("${{ !cancelled() && github.event_name == 'pull_request' && github.repository == 'deepseek-harness/deepseek-harness' }}")
     expect(aggregate.if).toBe("${{ !cancelled() && github.event_name == 'pull_request' && github.repository == 'deepseek-harness/deepseek-harness' }}")
     // The benchmark lane is a required verdict input and runs alone so its
     // wall-clock budgets never share a runner with a concurrent aggregate.
@@ -867,13 +866,13 @@ describe('CI workflow', () => {
       ['workflow_dispatch', 'refs/heads/topic', 'larger-runner-benchmark', false],
       ['workflow_dispatch', 'refs/heads/topic', 'consolidated-runner-benchmark', false],
     ] as const) {
-      expect(runInNewContext(wine.if, { github: { event_name: event, ref }, inputs: { suite } }, { timeout: 1000 })).toBe(expected)
+      expect(runInNewContext(wine.if, { github: { repository: 'deepseek-harness/deepseek-harness', event_name: event, ref }, inputs: { suite } }, { timeout: 1000 })).toBe(expected)
     }
     const enabled = Object.entries(master.jobs).filter(([, job]) => {
       if (!isRecord(job)) throw new TypeError('CI master jobs must be objects')
       if (typeof job.if === 'boolean') return job.if
       if (typeof job.if !== 'string') throw new TypeError('CI master jobs must define trigger conditions')
-      return runInNewContext(job.if, { github: { event_name: 'workflow_dispatch', ref: 'refs/heads/topic' }, inputs: { suite: 'wine' } }, { timeout: 1000 }) === true
+      return runInNewContext(job.if, { github: { repository: 'deepseek-harness/deepseek-harness', event_name: 'workflow_dispatch', ref: 'refs/heads/topic' }, inputs: { suite: 'wine' } }, { timeout: 1000 }) === true
     }).map(([name]) => name)
     expect(enabled).toEqual(['windows'])
   })
@@ -922,7 +921,7 @@ describe('CI workflow', () => {
       if (!isRecord(job)) throw new TypeError(`${name} must be defined`)
       expect(job.concurrency).toBeUndefined()
       // Standby drills remain post-merge work, but share run cancellation.
-      expect(job.if).toBe("github.event_name == 'push' && github.ref == 'refs/heads/master'")
+      expect(job.if).toBe("github.repository == 'deepseek-harness/deepseek-harness' && (github.event_name == 'push' && github.ref == 'refs/heads/master')")
     }
 
     // Pin the post-merge runtime, Wine, and standby inventory.

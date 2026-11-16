@@ -14,6 +14,8 @@ Steward is an embodied robotics system built on DeepSeek Harness. See [steward.m
 
 Cobot object loads are tracked per physical gripper. An explicit `arm` selects the working hand without releasing the other hand; `self.holdingByGripper` reports both attachments, while `self.holding` reports the working hand. Opening one gripper releases only its load and carried contents. Drawer-handle following remains limited to one working hand; release a held handle before switching arms.
 
+A held-driver `drive_screw` plans from the grasp-relative bit endpoint using the same tool rotation as Piper IK. It searches wrist yaw and bit-down roll within `EsimConfig.drive_yaw_offsets`, `drive_roll_candidates` and `drive_max_tilt`, checks the approach, press and reverse withdrawal from physical encoders, and executes the checked waypoints while retaining the driver. A feasible receipt checks kinematic continuity; task success still requires an independent observation of the screw.
+
 ## Quick start
 
 The shared robot Harness session belongs to the scenario’s first robot; thinking previews and full-text reads use that robot’s actual ID. Other robots do not inherit its session.

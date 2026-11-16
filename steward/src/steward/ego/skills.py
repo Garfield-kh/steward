@@ -1750,6 +1750,9 @@ class SkillExecutor:
         Predict refuses an end-on grasp (shaft on the wrist-roll axis). Re-assert wrist roll after
         reaching out (dock/reach can clear the wrist).
         """
+        if plan.get('armApproach'):
+            self._drive_checked_screw(job, plan)
+            return
         self._dock(job, plan)
         grip = plan.get("gripSpot", plan["spot"])
         self._align_lateral(grip)
@@ -1776,6 +1779,23 @@ class SkillExecutor:
             self._exit_long_reach(plan)
         except (SkillFailed, OutOfReach) as exc:
             job.log.append(f"exit after drive_screw: {exc}")
+        self._backoff(plan)
+        job.message = f"drove {plan['target']} with {plan['object']}"
+
+    def _drive_checked_screw(self, job: Job, plan: dict) -> None:
+        """Execute the same loaded approach, press and reverse route checked by prediction."""
+        self._dock(job, plan, retract=False)
+        self._align_lateral(plan['gripSpot'])
+        self._restore_planned_reach(plan, plan['gripSpot'])
+        waypoints = plan['armApproach']
+        for target in waypoints[1:]:
+            self._ramp_joints(target, self.config.wrist_turn_s)
+        self._set_joint('lift', plan['pressLift'])
+        self._wait(float(plan.get('driveS', 1.5)))
+        job.log.append(f"drove {plan['target']} with {plan['object']} using checked bit-down approach")
+        self._set_joint('lift', plan['lift'])
+        for target in reversed(waypoints[:-1]):
+            self._ramp_joints(target, self.config.wrist_turn_s)
         self._backoff(plan)
         job.message = f"drove {plan['target']} with {plan['object']}"
 

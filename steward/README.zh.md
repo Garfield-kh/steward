@@ -14,6 +14,8 @@ Steward 是基于 DeepSeek Harness 的具身智能机器人系统。设计见仓
 
 Cobot 按物理夹爪分别跟踪持物。显式 `arm` 选择工作手，不会释放另一只手；`self.holdingByGripper` 列出两手的附着物，`self.holding` 表示工作手的持物。打开一个夹爪只释放该手的负载及其携带的内容物。抽屉把手跟踪仍限于一只工作手，换臂前需要释放已持有的把手。
 
+持刀执行 `drive_screw` 时，规划使用抓取坐标系中的刀尖端点，并与 Piper IK 共用工具旋转。搜索范围由 `EsimConfig.drive_yaw_offsets`、`drive_roll_candidates` 和 `drive_max_tilt` 指定；从物理编码器检查接近、下压和逆向回撤，再沿已检查的路点执行并保留螺丝刀。可行收据表示运动学连续性通过，任务是否成功仍需独立观察螺丝。
+
 ## 快速开始
 
 共享的机器人 Harness 会话归属于场景中的第一个机器人；思考预览与全文读取使用该机器人的实际 ID，其他机器人不会继承此会话。

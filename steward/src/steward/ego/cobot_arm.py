@@ -30,7 +30,7 @@ from steward.assets.cobot import HOME, LIFT_HOME, TCP_OFFSET
 from steward.ego.arm import VIRTUAL_JOINTS, Arm, ArmGeometry
 from steward.ego.ik import CobotIK, IkError
 from steward.ego.skills import OutOfReach, SkillFailed
-from steward.math3d import matrix_from_quat, pose_compose, quat_from_axis_angle, quat_mul
+from steward.math3d import matrix_from_quat, pose_compose, quat_from_axis_angle, quat_from_matrix, quat_mul
 
 TOOL_DOWN = [0.0, 1.0, 0.0, 0.0]  # link6 +z (through the pinch point) along world -z
 
@@ -486,18 +486,8 @@ class PiperArm(Arm):
                     ) -> tuple[tuple[float, list[float]] | None, IkError | None]:
         """``target`` solved from the first of ``seeds`` (torso, arm joints) that reaches it."""
         tcp = [self.geometry.tool_offset + target["reach"], self.geometry.lateral, target["lift"]]
-        # Yaw about world z, pitch about world y, then roll in the tool frame. Near tool-down
-        # (drive_screw), roll about tool +x so ±π/2 stands a laterally held bit onto world −z —
-        # rolling about tool +z only spun the flat driver in the horizontal plane. When the tool
-        # is pitched forward (pour / turn-over), roll about tool +z instead: that is the twist
-        # that tips a cup or turns a box over about the approach. Rx uses the flipped sign so the
-        # same ±π/2 values as the kitchen robot still map gripper +y → world −z.
-        pitched = quat_mul(quat_from_axis_angle([0.0, 1.0, 0.0], -target["wrist_pitch"]), TOOL_DOWN)
-        if self._roll_about_tool_x(target["wrist_pitch"], target["wrist_roll"]):
-            rolled = quat_mul(pitched, quat_from_axis_angle([1.0, 0.0, 0.0], -target["wrist_roll"]))
-        else:
-            rolled = quat_mul(pitched, quat_from_axis_angle([0.0, 0.0, 1.0], target["wrist_roll"]))
-        tool = quat_mul(quat_from_axis_angle([0.0, 0.0, 1.0], target["wrist_yaw"]), rolled)
+        tool = quat_from_matrix(self.tool_rotation(target["wrist_yaw"], target["wrist_roll"],
+                                                   target["wrist_pitch"]))
         last: IkError | None = None
         for lift, q in seeds:
             try:
@@ -507,9 +497,11 @@ class PiperArm(Arm):
         return None, last
 
     def tool_rotation(self, yaw: float, roll: float, pitch: float = 0.0):
+        """Tool rotation used by both IK and grasp-relative endpoint prediction."""
         pitched = quat_mul(quat_from_axis_angle([0., 1., 0.], -pitch), TOOL_DOWN)
-        return matrix_from_quat(quat_mul(quat_from_axis_angle([0., 0., 1.], yaw),
-            quat_mul(pitched, quat_from_axis_angle([0., 0., 1.], roll))))
+        turn = (quat_from_axis_angle([1., 0., 0.], -roll) if self._roll_about_tool_x(pitch, roll)
+                else quat_from_axis_angle([0., 0., 1.], roll))
+        return matrix_from_quat(quat_mul(quat_from_axis_angle([0., 0., 1.], yaw), quat_mul(pitched, turn)))
 
     def reachable(self, lift: float, reach: float, wrist_yaw: float = 0.0, wrist_roll: float = 0.0,
                   wrist_pitch: float = 0.0) -> bool:

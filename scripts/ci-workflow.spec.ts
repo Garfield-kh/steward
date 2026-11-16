@@ -16,6 +16,53 @@ const runnerPrivatePnpmDestination = /^\$\{\{ runner\.temp \}\}\/setup-pnpm-\$\{
 const nativeWindowsPnpmDestination = '${{ runner.temp }}/setup-pnpm-js-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}'
 
 describe('CI workflow', () => {
+  it('skips the inherited static, coverage, consumer and Linux verdict jobs in Steward forks', () => {
+    for (const [file, jobName] of [
+      ['ci.yml', 'node-24'], ['ci.yml', 'node-24-coverage'],
+      ['ci.yml', 'node-24-consumers'], ['ci.yml', 'all-checks-passed'],
+      ['ci-windows.yml', 'windows-coverage'],
+    ]) {
+      const job = workflowJob(loadWorkflow('.github/workflows/' + file), jobName!)
+      if (typeof job.if !== 'string') throw new TypeError(`${jobName} must define an admission guard`)
+      const expression = job.if.replace(/^\$\{\{\s*|\s*\}\}$/g, '')
+      for (const repository of ['deepseek-harness/deepseek-harness', 'Mrhonor/steward', 'hengliao1972/steward']) {
+        for (const event_name of ['pull_request', 'push']) {
+          expect(runInNewContext(expression, { github: { repository, event_name }, cancelled: () => false }, { timeout: 1000 }))
+            .toBe(repository === 'deepseek-harness/deepseek-harness' && event_name === 'pull_request')
+        }
+      }
+    }
+  })
+
+  it('runs every Steward test once with Python branch coverage and retains failure reports', () => {
+    const workflow = loadWorkflow('.github/workflows/ci-steward.yml')
+    expect(workflowEvent(workflow, 'pull_request').branches).toEqual(['master'])
+    expect(workflow.on).toHaveProperty('workflow_dispatch')
+    const job = workflowJob(workflow, 'steward-tests')
+    expect(job).toMatchObject({ name: 'steward checks passed', 'runs-on': 'ubuntu-24.04',
+      defaults: { run: { shell: 'bash', 'working-directory': 'steward' } },
+      env: { MUJOCO_GL: 'osmesa', LIBGL_ALWAYS_SOFTWARE: '1' } })
+    if (!Array.isArray(job.steps)) throw new TypeError('Steward needs pytest and report steps')
+    const steps = job.steps.filter(isRecord)
+    expect(steps).toContainEqual(expect.objectContaining({ run: 'uv sync --locked --group dev' }))
+    const tests = steps.filter(step => typeof step.run === 'string' && step.run.includes('python -m pytest'))
+    expect(tests).toHaveLength(1)
+    const test = tests[0]!
+    expect(test['continue-on-error']).toBeUndefined()
+    expect(test.env).toEqual({ COVERAGE_FILE: '${{ runner.temp }}/steward-test-results/.coverage' })
+    for (const fragment of ['python -m pytest tests', '--cov=steward --cov-branch', '--cov-report=term-missing',
+      '--cov-report=xml:"$report_dir/coverage.xml"', '--cov-report=html:"$report_dir/htmlcov"',
+      '--junitxml="$report_dir/pytest.xml"', '2>&1 | tee "$report_dir/pytest.log"']) {
+      expect(test.run).toContain(fragment)
+    }
+    expect(test.run).not.toMatch(/--cov-fail-under|--ignore|--deselect|\|\| true/)
+    expect(steps).toContainEqual(expect.objectContaining({ name: 'Upload Steward test reports',
+      if: '${{ always() }}', with: expect.objectContaining({ path: '${{ runner.temp }}/steward-test-results/' }) }))
+    expect(steps).toContainEqual(expect.objectContaining({ name: 'Summarize Steward coverage', if: '${{ always() }}', env: test.env,
+      run: expect.stringContaining('coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"') }))
+    expect(readFileSync(resolve(root, 'steward/pyproject.toml'), 'utf8')).toContain('"pytest-cov>=')
+  })
+
   it('keeps at most eleven worker jobs active across PR workflows while Python runtime targets follow the SDK suite', () => {
     const ci = loadWorkflow('.github/workflows/ci.yml')
     const ciWindows = loadWorkflow('.github/workflows/ci-windows.yml')
@@ -416,7 +463,8 @@ describe('CI workflow', () => {
         expect(evaluateRunsOn(job['runs-on'], { vars: {}, github: { repository } }),
           `${jobName} must use a standard Windows runner in ${repository}`).toBe('windows-2025')
       }
-      expect(job.if).toBe("github.event_name == 'pull_request'")
+      expect(job.if).toBe("github.event_name == 'pull_request'"
+        + (jobName === 'windows-coverage' ? " && github.repository == 'deepseek-harness/deepseek-harness'" : ''))
     }
 
     // windows-build runs the blocking build/site pair.
@@ -549,7 +597,8 @@ describe('CI workflow', () => {
     expect(windowsAggregate.needs).toEqual(['windows-build', 'windows-native-tests'])
     expect(windowsAggregate.name).toBe('windows checks passed')
     expect(windowsAggregate['runs-on']).toBe(aggregate['runs-on'])
-    expect(windowsAggregate.if).toBe(aggregate.if)
+    expect(windowsAggregate.if).toBe("${{ !cancelled() && github.event_name == 'pull_request' }}")
+    expect(aggregate.if).toBe("${{ !cancelled() && github.event_name == 'pull_request' && github.repository == 'deepseek-harness/deepseek-harness' }}")
     // The benchmark lane is a required verdict input and runs alone so its
     // wall-clock budgets never share a runner with a concurrent aggregate.
     expect(aggregate.needs).toContain('node-24-bench')

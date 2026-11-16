@@ -37,7 +37,7 @@ function commands(job: Job): string[] {
 
 // These boolean/string cases share Actions and JavaScript semantics. GitHub
 // supplies status functions; this probe is not a general Actions interpreter.
-function evaluateCondition(expression: string, cancelled: boolean, results: string[], event = 'pull_request'): boolean {
+function evaluateCondition(expression: string, cancelled: boolean, results: string[], event = 'pull_request', repository = 'deepseek-harness/deepseek-harness'): boolean {
   const source = expression.trim().replace(/^[$][{][{]|[}][}]$/g, '')
     .replaceAll('needs.*.result', 'results')
   return runInNewContext(source, {
@@ -45,7 +45,9 @@ function evaluateCondition(expression: string, cancelled: boolean, results: stri
     always: () => true,
     contains: (values: string[], value: string) => values.includes(value),
     results,
-    github: { event_name: event },
+    github: { event_name: event, repository },
+    needs: Object.fromEntries(['node-24', 'node-24-coverage', 'node-24-lint', 'node-24-bench', 'node-24-consumers', 'node-compat']
+      .map((name, index) => [name, { result: results[index] ?? 'success' }])),
   }, { timeout: 1000 }) as boolean
 }
 
@@ -63,11 +65,17 @@ describe('master-only platform scheduling', () => {
       expect(evaluateCondition(condition, false, results)).toBe(true)
       expect(evaluateCondition(condition, true, results)).toBe(false)
       expect(evaluateCondition(condition, false, results, 'push')).toBe(false)
-      const failureStep = aggregate.steps!.find(step => step.name === 'Fail if any needed job did not succeed')!
+      const failureStep = aggregate.steps!.find(step => step.name === 'Fail if any needed job did not succeed' || step.name === 'Reject failed or unexpectedly skipped Linux checks')!
       expect(evaluateCondition(failureStep.if!, false, results)).toBe(result !== 'success')
       expect(failureStep.run).toContain('exit 1')
     },
   )
+
+  it('does not publish Linux or Python aggregate verdicts in forks', () => {
+    for (const [file, job] of [verdicts[0], verdicts[2]]) {
+      expect(evaluateCondition(workflow(file).jobs[job]!.if as string, false, ['failure'], 'pull_request', 'Mrhonor/steward')).toBe(false)
+    }
+  })
 
   it('distinguishes the obsolete always verdict from the cancellable status guard', () => {
     expect(evaluateCondition("always() && github.event_name == 'pull_request'", true, ['success'])).toBe(true)
@@ -78,7 +86,7 @@ describe('master-only platform scheduling', () => {
     const pr = workflow('ci-python.yml')
     expect(Object.keys(pr.on)).toEqual(['pull_request'])
     expect(pr.jobs['python-runtime']).toMatchObject({
-      if: "github.event_name == 'pull_request'",
+      if: "github.event_name == 'pull_request' && github.repository == 'deepseek-harness/deepseek-harness'",
       uses: runtimeBuilder,
       with: { ci: true, targets: 'node24-linux-x64,node24-win-x64' },
     })
@@ -88,7 +96,7 @@ describe('master-only platform scheduling', () => {
     expect(aggregate.needs).toContain('python-runtime')
     expect(aggregate.needs).not.toContain('windows')
     expect(aggregate.needs!.every(id => id in pr.jobs)).toBe(true)
-    expect(aggregate.if).toBe("${{ !cancelled() && github.event_name == 'pull_request' }}")
+    expect(aggregate.if).toBe("${{ !cancelled() && github.event_name == 'pull_request' && github.repository == 'deepseek-harness/deepseek-harness' }}")
     expect(aggregate.steps).toContainEqual(expect.objectContaining({
       if: "contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')",
     }))

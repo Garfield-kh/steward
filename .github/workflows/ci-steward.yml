@@ -69,13 +69,27 @@ jobs:
               assert image.shape == (64, 64, 3), image.shape
           PY
 
-      - name: Run all Steward tests
+      - name: Run all Steward tests with coverage
+        env:
+          COVERAGE_FILE: ${{ runner.temp }}/steward-test-results/.coverage
         run: |
           report_dir="$RUNNER_TEMP/steward-test-results"
           mkdir -p "$report_dir"
           uv run --locked python -m pytest tests -ra --durations=25 \
+            --cov=steward --cov-branch --cov-report=term-missing \
+            --cov-report=xml:"$report_dir/coverage.xml" \
+            --cov-report=html:"$report_dir/htmlcov" \
             --junitxml="$report_dir/pytest.xml" \
             2>&1 | tee "$report_dir/pytest.log"
+
+      - name: Summarize Steward coverage
+        if: ${{ always() }}
+        env:
+          COVERAGE_FILE: ${{ runner.temp }}/steward-test-results/.coverage
+        run: |
+          if [ -f "$COVERAGE_FILE" ]; then
+            uv run --locked python -m coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Upload Steward test reports
         if: ${{ always() }}

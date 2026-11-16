@@ -342,6 +342,7 @@ class EgoRuntime:
         self._thread: threading.Thread | None = None
         self.receipts: dict[str, dict] = {}
         self.last_error: str | None = None
+        self._last_clock_alert: str | None = None
         self.control_owner: str | None = None
         self.perception_mode: str | None = None
         self.alerts: list[dict] = []
@@ -790,6 +791,15 @@ class EgoRuntime:
                 self.last_error = f"robot port unavailable: {exc}"
                 time.sleep(period)
                 continue
+            except SkillFailed as exc:
+                # A paused world (a perception fault waiting for the operator) or a slow clock must not
+                # kill perception for the rest of the episode: log it once, keep waiting, resume on ack.
+                self.last_error = f"robot clock: {exc}"
+                if self.last_error != self._last_clock_alert:
+                    self._last_clock_alert = self.last_error
+                    self.alert(f"感知循环等待世界时钟失败：{exc}", "runtime")
+                time.sleep(period)
+                continue
             try:
                 # The whole update runs under the hold, not only the remote request: a fill, peel
                 # or fusion longer than the lease would let the world step mid-update, and the
@@ -800,6 +810,7 @@ class EgoRuntime:
                 if k % telemetry_every == 0:
                     self.link.telemetry(self._telemetry_scene())
                 self.last_error = None
+                self._last_clock_alert = None
             except (HttpError, OSError) as exc:
                 self.last_error = f"robot port unavailable: {exc}"
             except Exception as exc:  # noqa: BLE001 - perception must keep running; the operator is alerted

@@ -28,6 +28,8 @@ env:
 
 jobs:
   pack:
+    # Do not run inherited Harness release checks on Steward pull requests.
+    if: github.event_name != 'pull_request' || github.repository == 'deepseek-harness/deepseek-harness'
     name: Pack npm tarballs
     # Persistent runners accept only trusted, credential-free rehearsals.
     runs-on: >-

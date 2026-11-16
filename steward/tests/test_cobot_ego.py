@@ -62,41 +62,43 @@ def _run(api: str, skill: str, params: dict) -> dict:
 
 def test_the_twin_picks_a_bowl_and_puts_it_down_elsewhere_on_the_table_through_receipts(cobot):
     host, api = cobot
-    deadline = time.monotonic() + 60
-    while time.monotonic() < deadline:
-        objects = call("GET", f"{api}/ego/summary")["objects"]
-        bowls = [o for o in objects if o["category"] == "bowl"]
-        tables = [o for o in objects if o["category"] == "table"]
-        if bowls and tables:
-            break
-        time.sleep(0.5)
-    assert bowls and tables, [o["category"] for o in objects]
-    summary = call("GET", f"{api}/ego/summary")
-    assert set(summary["self"]["joints"]) == {"lift", "reach", "wrist_yaw", "wrist_roll", "wrist_pitch"}, \
-        "the kitchen robot's planar arm, and the tool tilt its gripper lacks"
-    picked = _run(api, "pick", {"target": bowls[0]["id"]})
-    assert picked["state"] == "succeeded", (picked["message"], picked["log"])
-    table = tables[0]
-    placed = _run(api, "place", {"on": table["id"], "offset": [-0.30, -0.15]})
-    assert placed["state"] == "succeeded", (placed["message"], placed["log"])
-    bowl = host.sim._entity_pose("w:bowl-1")["p"]
-    real = host.sim._entity_pose("w:table-1")
-    w, _, _, z = real["q"]
-    yaw = 2 * math.atan2(z, w)
-    want = np.asarray(real["p"][:2]) + np.array([[math.cos(yaw), -math.sin(yaw)], [math.sin(yaw), math.cos(yaw)]]) @ [-0.30, -0.15]
-    assert np.linalg.norm(np.asarray(bowl[:2]) - want) < 0.06, (bowl, want)
-    assert bowl[2] > 0.74, "on the table, not on the floor"
-
+    def exercise_receipts():
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            objects = call("GET", f"{api}/ego/summary")["objects"]
+            bowls = [o for o in objects if o["category"] == "bowl"]
+            tables = [o for o in objects if o["category"] == "table"]
+            if bowls and tables:
+                break
+            time.sleep(0.5)
+        assert bowls and tables, [o["category"] for o in objects]
+        summary = call("GET", f"{api}/ego/summary")
+        assert set(summary["self"]["joints"]) == {"lift", "reach", "wrist_yaw", "wrist_roll", "wrist_pitch"}, \
+            "the kitchen robot's planar arm, and the tool tilt its gripper lacks"
+        picked = _run(api, "pick", {"target": bowls[0]["id"]})
+        assert picked["state"] == "succeeded", (picked["message"], picked["log"])
+        table = tables[0]
+        placed = _run(api, "place", {"on": table["id"], "offset": [-0.30, -0.15]})
+        assert placed["state"] == "succeeded", (placed["message"], placed["log"])
+        bowl = host.sim._entity_pose("w:bowl-1")["p"]
+        real = host.sim._entity_pose("w:table-1")
+        w, _, _, z = real["q"]
+        yaw = 2 * math.atan2(z, w)
+        want = np.asarray(real["p"][:2]) + np.array([[math.cos(yaw), -math.sin(yaw)], [math.sin(yaw), math.cos(yaw)]]) @ [-0.30, -0.15]
+        assert np.linalg.norm(np.asarray(bowl[:2]) - want) < 0.06, (bowl, want)
+        assert bowl[2] > 0.74, "on the table, not on the floor"
+    _pumped(host, exercise_receipts)
 
 def test_the_twins_cameras_are_captured_with_the_pose_of_the_gripper_its_arm_works_with(cobot):
-    _, api = cobot
-    packet = call("POST", f"{api}/ego/cameras/capture", {})
-    assert set(packet["views"]) == {"head_camera", "wide_camera"}
-    pose = call("GET", f"{api}/ego/gripper/pose")
-    for reported in (packet["gripper_pose"], pose):
-        assert (reported["gripper_frame"], reported["gripper_link"]) == ("gripper", "L_link6")
-    assert {"lift", "reach"} <= set(pose["joint_positions"]), "the arm's joints as the Ego Harness reads them"
-
+    host, api = cobot
+    def exercise_camera_capture():
+        packet = call("POST", f"{api}/ego/cameras/capture", {})
+        assert set(packet["views"]) == {"head_camera", "wide_camera"}
+        pose = call("GET", f"{api}/ego/gripper/pose")
+        for reported in (packet["gripper_pose"], pose):
+            assert (reported["gripper_frame"], reported["gripper_link"]) == ("gripper", "L_link6")
+        assert {"lift", "reach"} <= set(pose["joint_positions"]), "the arm's joints as the Ego Harness reads them"
+    _pumped(host, exercise_camera_capture)
 
 def _home_arm() -> PiperArm:
     from steward.assets.cobot import HOME, LIFT_HOME

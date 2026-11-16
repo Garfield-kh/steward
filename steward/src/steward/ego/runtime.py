@@ -21,7 +21,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from collections.abc import Callable
 from concurrent.futures import CancelledError
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -34,6 +34,7 @@ from steward.ego.perception import (PerceptionConfig, box_of, decimated, decode_
                                     world_up_face)
 from steward.ego.kinematics import gripper_pose
 from steward.ego.arm import Arm
+from steward.ego.cobot_arm import PiperArm
 from steward.ego.esim import Esim, EsimConfig, PredictionError
 from steward.ego.estimator import SELF_ID, EgoEstimator, _CONTENT
 from steward.ego import reflection
@@ -336,6 +337,15 @@ class EgoRuntime:
                              "lastError": None}
         self.esim = Esim(robot_model, self.config.esim, arm)
         self.arm = self.esim.arm
+        self._arm_esims: dict[str, Esim] = {}
+        if isinstance(self.arm, PiperArm):
+            for side in ("L", "R"):
+                planner = (self.esim if side == self.arm.config.arm else
+                           Esim(robot_model, self.config.esim,
+                                PiperArm(robot_model, replace(self.arm.config, arm=side))))
+                planner._ids = self.esim._ids
+                self._arm_esims[side] = planner
+        self._arm_selection_lock = threading.RLock()
         self.out_dir = out_dir
         self._lock = threading.RLock()
         self._running = False
@@ -1701,7 +1711,33 @@ class EgoRuntime:
                 out["imagePaths"][camera] = str(path)
         return out
 
+    def _planner_for(self, params: dict) -> Esim:
+        """Resolve an explicit arm or retain the working arm; unsupported selections fail."""
+        if "arm" not in params:
+            return self.esim
+        side = params["arm"]
+        if not isinstance(side, str) or side not in self._arm_esims:
+            raise ValueError("arm must be L or R on a dual-arm body; omit arm on a single-arm body")
+        return self._arm_esims[side]
+
+    def _arm_load_issue(self, planner: Esim) -> str | None:
+        """The shared estimator tracks one load; changing its owning gripper is refused."""
+        gripper = planner.arm.geometry.gripper
+        with self._lock:
+            held = self.estimator.held_gripper
+            reports = self.estimator.grippers
+            other = next((g for g, report in reports.items() if g != gripper and
+                          (report.get("holding") or report.get("holdingHandle"))), None)
+            if held is not None and held != gripper:
+                other = held
+        if other is not None:
+            return f"{other} holds a load or handle; release it before selecting {gripper}; simultaneous arm loads are unsupported"
+        return None
+
     def predict(self, skill: str, params: dict) -> dict:
+        planner = self._planner_for(params)
+        if isinstance(planner.arm, PiperArm):
+            params = {**params, "arm": planner.arm.config.arm}
         if skill in ("drive_screw", "insert_screw_into_hole"):
             # Refresh cameras before trusting screw tip / head-up (same as ego_screw_holes).
             try:
@@ -1709,6 +1745,14 @@ class EgoRuntime:
             except Exception:  # noqa: BLE001 - still predict from the last belief when sensors fail
                 pass
         es = self.ego_state()
+        issue = self._arm_load_issue(planner)
+        if issue is not None:
+            receipt = planner._receipt(es, skill, params, 1.0, [issue], {}, feasible=False)
+            receipt.update(withinRiskLimit=False, maxRisk=self.config.max_risk)
+            with self._lock:
+                self.receipts[receipt["id"]] = receipt
+                self._receipt_generation[receipt["id"]] = self._generation
+            return receipt
         if skill == "close":
             # The drawer the robot pulled open is closed by that pull (handle, axis, distance)
             # unless the caller names another: views of the open drawer box it deeper than it is.
@@ -1716,7 +1760,7 @@ class EgoRuntime:
         if skill == "drive_screw":
             gate = self._drive_screw_tip_gate(params.get("target"))
             if gate is not None:
-                receipt = self.esim._receipt(
+                receipt = planner._receipt(
                     es, "drive_screw", params, 1.0, [gate], {}, feasible=False)
                 limit = self.config.max_risk
                 receipt["withinRiskLimit"] = False
@@ -1728,7 +1772,7 @@ class EgoRuntime:
         if skill == "insert_screw_into_hole":
             gate = self._insert_screw_tip_gate(params.get("object") or params.get("target"))
             if gate is not None:
-                receipt = self.esim._receipt(
+                receipt = planner._receipt(
                     es, "insert_screw_into_hole", params, 1.0, [gate], {}, feasible=False)
                 limit = self.config.max_risk
                 receipt["withinRiskLimit"] = False
@@ -1737,7 +1781,7 @@ class EgoRuntime:
                     self.receipts[receipt["id"]] = receipt
                     self._receipt_generation[receipt["id"]] = self._generation
                 return receipt
-        receipt = self.esim.predict(es, skill, params)
+        receipt = planner.predict(es, skill, params)
         limit = self.config.max_pick_risk if receipt.get("skill") == "pick" else self.config.max_risk
         receipt["withinRiskLimit"] = receipt["feasible"] and receipt["risk"] <= limit
         receipt["maxRisk"] = limit
@@ -2127,9 +2171,20 @@ class EgoRuntime:
     def run(self, receipt_id: str, owner: str | None = None) -> dict:
         """Execute a predicted plan. The runtime re-checks the receipt here, where the motion happens."""
         self._check_control(owner)
-        receipt = self.receipt(receipt_id)
-        self._consume_receipt(receipt)
-        job = self.executor.start(receipt["skill"], receipt).to_dict()
+        with self._arm_selection_lock:
+            current = self.executor.current
+            if current is not None and current.state == "running":
+                raise RuntimeError(f"skill {current.skill} ({current.id}) is still running")
+            receipt = self.receipt(receipt_id)
+            planner = self._planner_for(receipt.get("params") or {})
+            issue = self._arm_load_issue(planner)
+            if issue is not None:
+                raise PermissionError(issue)
+            self._consume_receipt(receipt)
+            if planner.arm is not self.arm and isinstance(planner.arm, PiperArm):
+                planner.arm.invalidate_target()
+            self.esim, self.arm = planner, planner.arm
+            job = self.executor.start(receipt["skill"], receipt).to_dict()
         params = receipt.get("params") or {}
         target = params.get("target") or params.get("on") or (f"({params['x']:.2f}, {params['y']:.2f})" if "x" in params else "")
         self._log("skill", f"{receipt['skill']} 开始" + (f"：{target}" if target else ""))
@@ -2142,7 +2197,8 @@ class EgoRuntime:
         into, and closed afterwards. Those visits are planned from the ego state at the time and
         skipped when they are not feasible."""
         self._check_control(owner)
-        return self.executor.start("look_around", {"id": "look-around", "plan": {}}).to_dict()
+        with self._arm_selection_lock:
+            return self.executor.start("look_around", {"id": "look-around", "plan": {}}).to_dict()
 
     def _closed_drawer_ids(self) -> list[str]:
         """Closed pullable drawers already seen enough times to open, nearest first."""

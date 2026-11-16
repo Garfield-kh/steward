@@ -36,7 +36,16 @@ def test_the_planar_arm_reports_what_it_was_commanded_once_the_arm_is_there():
 
 @pytest.fixture(scope="module")
 def cobot(tmp_path_factory):
-    root = tmp_path_factory.mktemp("cobot-ego")
+    yield from _running_cobot(tmp_path_factory, "left")
+
+
+@pytest.fixture(scope="module")
+def right_cobot(tmp_path_factory):
+    yield from _running_cobot(tmp_path_factory, "right")
+
+
+def _running_cobot(tmp_path_factory, side):
+    root = tmp_path_factory.mktemp(f"cobot-ego-{side}")
     build_cobot_workstation(AuthoringService(root))
     host = StewardHost(str(root), scenario="cobot-table", speed=math.inf, seed=3,
                        run_dir=tmp_path_factory.mktemp("run")).start()
@@ -86,6 +95,26 @@ def test_the_twin_picks_a_bowl_and_puts_it_down_elsewhere_on_the_table_through_r
     want = np.asarray(real["p"][:2]) + np.array([[math.cos(yaw), -math.sin(yaw)], [math.sin(yaw), math.cos(yaw)]]) @ [-0.30, -0.15]
     assert np.linalg.norm(np.asarray(bowl[:2]) - want) < 0.06, (bowl, want)
     assert bowl[2] > 0.74, "on the table, not on the floor"
+
+
+def test_the_right_arm_picks_the_bowl_without_the_left_gripper_taking_it(right_cobot):
+    host, api = right_cobot
+    deadline = time.monotonic() + 60
+    objects = []
+    while time.monotonic() < deadline:
+        objects = call("GET", f"{api}/ego/summary")["objects"]
+        if any(o["category"] == "bowl" for o in objects) and any(o["category"] == "table" for o in objects):
+            break
+        time.sleep(0.5)
+    bowl = next(o for o in objects if o["category"] == "bowl")
+    picked = _run(api, "pick", {"target": bowl["id"], "arm": "R"})
+    assert picked["state"] == "succeeded", (picked["message"], picked["log"])
+    status = host.sim.status()["robots"]["w:cobot-1"]["grippers"]
+    assert status["R_link6"]["holding"]
+    assert not status["L_link6"]["holding"]
+    table = next(o for o in objects if o["category"] == "table")
+    placed = _run(api, "place", {"on": table["id"], "offset": [-0.30, 0.15]})
+    assert placed["state"] == "succeeded", (placed["message"], placed["log"])
 
 
 def test_the_twins_cameras_are_captured_with_the_pose_of_the_gripper_its_arm_works_with(cobot):

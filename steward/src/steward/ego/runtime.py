@@ -230,14 +230,17 @@ class RobotLink:
         this control loop or input run (:meth:`WorldSim.wait_until`); return the world time then."""
         body = {"hold": hold, "rank": rank, "pulls": pulls, **({} if t is None else {"until": t})}
         deadline = time.monotonic() + 60.0
+        last = ""
         while True:
             try:
                 return call("POST", f"{self.url}/clock/wait", body, timeout=6)["t"]
             except HttpError as exc:
                 if exc.status != 504 or self.closed:
                     raise
+                last = str(exc)
                 if time.monotonic() >= deadline:
-                    raise SkillFailed("robot clock wait timed out after 60 s") from exc
+                    raise SkillFailed("robot clock wait timed out after 60 s" +
+                                      (f" ({last})" if "paused" in last else "")) from exc
 
     def arm(self, hold: str, t: float | None = None, rank: int = 0, pulls: bool = True) -> None:
         """Register ``hold`` at world time ``t`` (``None``: now) without waiting, so the world stops for

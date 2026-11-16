@@ -38,13 +38,27 @@ def test_every_camera_matches_the_simulation(rig) -> None:
     sim, est = rig
     _sync(est, sim)
     poses = est.camera_poses()
-    assert set(poses) == {"head_camera", "wide_camera"}
+    assert set(poses) == {"head_camera", "wide_camera", "L_wrist_camera", "R_wrist_camera"}
     for sensor_id, pose in poses.items():
         truth, _ = sim.camera_pose("w:cobot", sensor_id)
         # 1 mm is far tighter than any perception error and absorbs the float path difference
         # between MuJoCo's body quaternions and this joint-chain composition.
         assert np.linalg.norm(np.subtract(pose["p"], truth["p"])) < 1e-3, sensor_id
         assert abs(float(np.dot(pose["q"], truth["q"]))) > 0.99999, sensor_id
+
+
+def test_wrist_cameras_move_with_the_piper_link6(rig) -> None:
+    """Eye-in-hand mounts ride link6; swinging the arm must move the wrist camera with the sim."""
+    sim, est = rig
+    _sync(est, sim)
+    before = est.camera_pose(camera="L_wrist_camera")["p"]
+    sim.command("w:cobot", {"joints": {"L_joint1": 0.8, "L_joint2": 1.2, "L_joint3": -1.5}})
+    sim.step(800)
+    _sync(est, sim)
+    after = est.camera_pose(camera="L_wrist_camera")["p"]
+    assert np.linalg.norm(np.subtract(after, before)) > 0.05
+    truth, _ = sim.camera_pose("w:cobot", "L_wrist_camera")
+    assert np.linalg.norm(np.subtract(after, truth["p"])) < 1e-3
 
 
 def test_the_head_stays_where_it_is_when_the_arms_and_the_lift_move(rig) -> None:

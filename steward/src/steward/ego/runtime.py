@@ -23,6 +23,7 @@ from collections.abc import Callable
 from concurrent.futures import CancelledError
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 from PIL import Image
@@ -33,18 +34,20 @@ from steward.ego.perception import (PerceptionConfig, box_of, decimated, decode_
                                     world_up_face)
 from steward.ego.kinematics import gripper_pose
 from steward.ego.arm import Arm
-from steward.ego.esim import Esim, EsimConfig
+from steward.ego.esim import Esim, EsimConfig, PredictionError
 from steward.ego.estimator import SELF_ID, EgoEstimator, _CONTENT
 from steward.ego import reflection
 from steward.ego.reflection import ReflectionConfig
 from steward.ego.roles import RoleConfig, assign_roles
 from steward.ego.segmenter import DepthClusters, Segmenter, SegmenterError
 from steward.ego.skills import MotionConfig, SkillExecutor, SkillFailed
-from steward.ego.view import EgoViewRenderer
 from steward.math3d import matrix_from_quat, pose_compose, pose_inverse, quat_rotate, wrap_angle, yaw_from_quat
 from steward.net import HttpError, call
 from steward.scene.schema import SceneState
 from steward.viewloop import ViewLoop
+
+if TYPE_CHECKING:
+    from steward.ego.view import EgoViewRenderer
 
 
 @dataclass(frozen=True)
@@ -226,12 +229,15 @@ class RobotLink:
         """Wait until the world clock reaches ``t`` (``None``: now) and, with ``hold``, the world lets
         this control loop or input run (:meth:`WorldSim.wait_until`); return the world time then."""
         body = {"hold": hold, "rank": rank, "pulls": pulls, **({} if t is None else {"until": t})}
+        deadline = time.monotonic() + 60.0
         while True:
             try:
-                return call("POST", f"{self.url}/clock/wait", body)["t"]
+                return call("POST", f"{self.url}/clock/wait", body, timeout=6)["t"]
             except HttpError as exc:
                 if exc.status != 504 or self.closed:
                     raise
+                if time.monotonic() >= deadline:
+                    raise SkillFailed("robot clock wait timed out after 60 s") from exc
 
     def arm(self, hold: str, t: float | None = None, rank: int = 0, pulls: bool = True) -> None:
         """Register ``hold`` at world time ``t`` (``None``: now) without waiting, so the world stops for
@@ -355,6 +361,11 @@ class EgoRuntime:
                                       self._mark_held, self.config.motion,
                                       shift=self._shift_track, on_error=lambda msg: self.alert(msg, "skill"),
                                       on_finish=self._skill_finished, on_release=self._released,
+                                      placement_evidence=self._placement_evidence,
+                                      on_release_target=self._released,
+                                      assemble_onto=self._assemble_onto,
+                                      fasten=self._fasten,
+                                      validate_placement=self._validate_placement,
                                       on_begin=self._skill_begin, clock=self.link,
                                       closed_drawers=self._closed_drawer_ids, drawer_plan=self._drawer_plan,
                                       pin=self._pin_track, furniture=self._furniture_id,
@@ -363,13 +374,17 @@ class EgoRuntime:
                                       home_empty=lambda tick: self.arm.home_empty(self.link.command, tick),
                                       deploy_working=(lambda tick: self.arm.deploy_working(self.link.command, tick)
                                                       if callable(getattr(self.arm, "deploy_working", None))
-                                                      else None))
+                                                      else None),
+                                      verify_screw_seat=self._verify_screw_seat,
+                                      replan_pick=self._replan_pick,
+                                      replan_insert_place=self._replan_insert_place)
         self._view_scene: tuple[dict, int, float] | None = None  # (ES dict, version, stamp) for the view
         # The belief part of the motion state, recorded under ``_lock`` at each read and around each
         # perception update; :meth:`_motion_state` falls back on it while another thread holds the lock.
         self._motion_belief: dict | None = None
         self.face_error: str | None = None  # why the latest camera image for faces could not be fetched
         self._face_thread: threading.Thread | None = None
+        from steward.ego.view import EgoViewRenderer
         renderer = EgoViewRenderer()
         self.view = ViewLoop("ego", lambda settings: self._render_view(renderer, settings), renderer.close)
 
@@ -908,9 +923,16 @@ class EgoRuntime:
         with self._lock:
             if not self._same_episode(generation, body):  # the skill or the body is another episode's
                 return track_id
-            return self.estimator.mark_held(track_id, at, gripper=self.arm.geometry.gripper, body=body)
+            held = self.estimator.mark_held(track_id, at, gripper=self.arm.geometry.gripper, body=body)
+            track = getattr(self.estimator, 'tracks', {}).get(held)
+            if track is not None and track.held_tool_feature is not None:
+                virtual = self.arm.joints_of((body or {}).get('joints', self.estimator.joints),
+                                            (body or {}).get('odometry', self.estimator.odometry))
+                track.held_tool_feature['graspWrist'] = {k:virtual.get(k,0.) for k in ('wrist_roll','wrist_pitch')}
+            return held
 
-    def _released(self, track_id: str, spot: list[float]) -> None:
+    def _released(self, track_id: str, spot: list[float], target: dict | None = None,
+                  tip_roll: float | None = None) -> None:
         """A place knows where it let go; the belief is told, not left to infer it later -- at the
         height the hand is at now, not the carry height the last perception update saw."""
         generation = self._skill_generation()
@@ -921,7 +943,7 @@ class EgoRuntime:
         with self._lock:
             if not self._same_episode(generation, body):  # the skill or the body is another episode's
                 return
-            self.estimator.release_at(track_id, spot, body=body)
+            self.estimator.release_at(track_id, spot, body=body, target=target, tip_roll=tip_roll)
 
     def _skill_generation(self) -> int:
         """The generation the running skill was predicted in: a callback reached after a reset (the
@@ -932,6 +954,13 @@ class EgoRuntime:
         if job is None:
             return self._generation
         return self._receipt_generation.get(job.receipt, -1)
+
+    def _placement_evidence(self, track_id: str) -> dict:
+        with self._lock:
+            if self._skill_generation() != self._generation:
+                return {"ok": None, "status": "unknown", "entity": track_id,
+                        "reason": "sensor session changed since the action"}
+            return self.estimator.placement_evidence(track_id)
 
     def _same_episode(self, generation: int, body: dict | None) -> bool:
         """Whether a skill event of ``generation``, with ``body`` read for it, belongs to the
@@ -954,6 +983,10 @@ class EgoRuntime:
             track = self.estimator.tracks.get(track_id)
             if track is None:
                 return
+            if pinned and not track.pinned:
+                track.pin_observed_age = max(0., self.estimator.stamp - track.last_seen)
+            elif not pinned:
+                track.pin_observed_age = None
             track.pinned = pinned
             if pinned and track.category == "drawer":
                 track.label = "drawer"
@@ -1011,6 +1044,8 @@ class EgoRuntime:
                 "categories": ent.category.unc["p"],
                 "position": [round(v, 3) for v in ent.pose.value["p"]],
                 "yawDeg": round(math.degrees(yaw_from_quat(ent.pose.value["q"])), 1),
+                **({"orientation": ent.state_vars["orientation"].value} if "orientation" in ent.state_vars else {}),
+                **({'fasteningEvidence':ent.state_vars['fasteningEvidence'].value} if 'fasteningEvidence' in ent.state_vars else {}),
                 "uncertaintyM": round(math.sqrt((cov[0] + cov[7]) / 2), 4),
                 "sizeM": [round(v, 3) for v in size],
                 "on": supports.get(ent.id),
@@ -1026,6 +1061,17 @@ class EgoRuntime:
                 **self._appearance(ent.id),
             })
         with self._lock:
+            for obj in objects:
+                track = self.estimator.tracks.get(obj["id"])
+                if track is not None and track.held and track.grasp_association is not None:
+                    obj["graspAssociation"] = dict(track.grasp_association)
+                if track is not None and track.placement is not None:
+                    evidence = self.estimator.placement_evidence(track.id)
+                    # Keep repeated state reads compact; the job carries the full explanation.
+                    obj["placementEvidence"] = {k: evidence[k] for k in
+                                                ("ok", "status", "releasedAt", "deltaXYM", "orientation", "correction") if k in evidence}
+                    if "observation" in evidence:
+                        obj["placementEvidence"]["observedAt"] = evidence["observation"]["stamp"]
             roles = assign_roles(objects, self.config.roles, self._roles)
             self._roles = {oid: role for oid, (role, _) in roles.items()}
         for obj in objects:
@@ -1063,16 +1109,223 @@ class EgoRuntime:
 
     @staticmethod
     def _screw_holes_view(affordances) -> list[dict]:
-        """Public screw-hole markers for ego_state: id, body-frame ``p``, and whether they were observed."""
+        """Public screw-hole markers: id, body-frame ``p``/``n``, frame/provenance, observation source."""
         out = []
         for aff in affordances:
             value = aff.value
             if not (isinstance(value, dict) and "screw-hole" in value):
                 continue
             hole = value["screw-hole"]
-            out.append({"id": str(hole["id"]), "p": [round(float(v), 4) for v in hole["p"][:3]],
-                        "source": aff.src or "prior"})
+            item = {**hole, "id": str(hole["id"]), "p": [round(float(v), 4) for v in hole["p"][:3]],
+                    "source": aff.src or "prior",
+                    "frame": hole.get("frame", "entity" if aff.src == "observed" else "unregistered")}
+            if hole.get("n") is not None:
+                item["n"] = [round(float(v), 4) for v in hole["n"][:3]]
+            out.append(item)
         return out
+
+    def screw_holes(self, entity: str) -> dict:
+        """Locate an object's screw holes in the world frame and report which face upward.
+
+        Pulls one fresh sensor frame first so tip comes from the detected pose, not from a place
+        ``wristRoll`` claim (arm roll is not body tip). Facing uses the observed tip only
+        (``tipSource=observed``); until then ``holesFaceUp`` is false.
+
+        :param entity: Ego-State object id.
+        :returns: ``{entity, tipRollDeg, tipSource, holesFaceUp, holes:[...]}``.
+        :raises KeyError: unknown object.
+        """
+        from steward.math3d import quat_rotate
+
+        # Refresh belief from the cameras before reading tip / hole facing.
+        try:
+            self._poll_once()
+        except Exception:  # noqa: BLE001 - still answer from the last belief when sensors fail
+            pass
+        es = self.ego_state()
+        ent = es.find(entity)
+        if ent is None:
+            raise KeyError(f"unknown object {entity!r}")
+        with self._lock:
+            track = self.estimator.tracks.get(entity)
+            tip = float(track.tip_roll) if track is not None else 0.0
+            tip_source = track.tip_roll_source if track is not None else "unknown"
+        q = ent.pose.value["q"]
+        origin = ent.pose.value["p"]
+        holes = []
+        for aff in ent.rigid.links[0].affordances:
+            value = aff.value
+            if not (isinstance(value, dict) and "screw-hole" in value):
+                continue
+            hole = value["screw-hole"]
+            body_p = [float(v) for v in hole["p"][:3]]
+            body_n = [float(v) for v in hole["n"][:3]] if hole.get("n") is not None else [0.0, 0.0, 1.0]
+            through = bool(hole.get("through"))
+            world_p = [origin[i] + quat_rotate(q, body_p)[i] for i in range(3)]
+            world_n = quat_rotate(q, body_n)
+            up_dot = float(world_n[2])
+            # Through-holes are insertable from either face when the axis is vertical.
+            if through:
+                facing = "up" if abs(up_dot) > 0.7 else "side"
+            elif up_dot > 0.7:
+                facing = "up"
+            elif up_dot < -0.7:
+                facing = "down"
+            else:
+                facing = "side"
+            item = {
+                "id": str(hole["id"]),
+                "bodyP": [round(v, 4) for v in body_p],
+                "worldP": [round(v, 4) for v in world_p],
+                "worldN": [round(v, 4) for v in world_n],
+                "upDot": round(up_dot, 3),
+                "facing": facing,
+                "source": aff.src or "prior",
+            }
+            if through:
+                item["through"] = True
+            holes.append(item)
+        observed = tip_source == "observed"
+        any_up = observed and any(h["facing"] == "up" for h in holes)
+        if not holes:
+            hint = None
+        elif not observed:
+            hint = "tip not yet confirmed by camera; wait/observe again before trusting holesFaceUp"
+        elif not any_up:
+            if any(h.get("through") for h in holes):
+                hint = "through-hole axis not vertical; lay the part flat (either face), then look again"
+            else:
+                hint = "no screw hole faces up; tip the part onto its side with place roll=±π/2, then look again"
+        else:
+            hint = None
+        return {
+            "entity": entity,
+            "category": ent.category.value,
+            "tipRollDeg": round(math.degrees(tip), 1),
+            "tipSource": tip_source,
+            "holesFaceUp": any_up,
+            "holes": holes,
+            "hint": hint,
+        }
+
+    def _drive_screw_tip_gate(self, target: object) -> str | None:
+        """Refuse drive_screw until the screw's tip is camera-confirmed upright (head up).
+
+        :param target: screw entity id from predict params.
+        :returns: refusal message, or None when the tip is observed upright.
+        """
+        if not isinstance(target, str) or not target:
+            return "drive_screw needs target: id of the seated screw"
+        with self._lock:
+            track = self.estimator.tracks.get(target)
+            if track is None:
+                return f"unknown screw target {target!r}"
+            tip_source = track.tip_roll_source
+            tip = float(track.tip_roll)
+        if tip_source != "observed":
+            return (
+                f"{target} tip not yet confirmed by camera (tipSource={tip_source}); "
+                "ego_observe / ego_screw_holes until tipSource=observed and the screw stands "
+                "tip-down in the hole with head up, then drive_screw again")
+        if abs(tip) > 0.35:
+            return (
+                f"{target} is not upright tip-down (tipRollDeg={math.degrees(tip):.0f}); "
+                "insert_screw_into_hole (or place tip-down) into the hole with head up, then observe again")
+        return None
+
+    def _insert_screw_tip_gate(self, screw_id: object | None = None) -> str | None:
+        """Refuse insert until the held screw's tip end is camera-confirmed.
+
+        Without ``tipSource=observed``, ES treats an unknown tip as upright and skips the stand
+        roll — the screw is then placed sideways / head-down. Observe after pick first.
+
+        :param screw_id: optional expected screw id (defaults to the held track).
+        :returns: refusal message, or None when the held screw tip is observed.
+        """
+        with self._lock:
+            held_id = self.estimator.held_id
+            if not held_id:
+                return "insert_screw_into_hole needs a toy_screw in the gripper"
+            track = self.estimator.tracks.get(held_id)
+            if track is None:
+                return f"unknown held screw {held_id!r}"
+            if track.category != "toy_screw":
+                return (
+                    f"insert_screw_into_hole needs a toy_screw in the gripper, got {held_id} "
+                    f"({track.category})")
+            if isinstance(screw_id, str) and screw_id and screw_id != held_id:
+                return f"gripper holds {held_id}, not {screw_id}"
+            tip_source = track.tip_roll_source
+        if tip_source != "observed":
+            return (
+                f"{held_id} tip not yet confirmed by camera (tipSource={tip_source}); "
+                "after pick, ego_observe / ego_screw_holes until tipSource=observed so the skill "
+                "knows which end is the tip and can stand it tip-down into the hole")
+        return None
+
+    def _verify_screw_seat(self, screw_id: str) -> tuple[bool, str]:
+        """After an insert place: poll cameras and confirm the screw stands tip-down in a hole.
+
+        :param screw_id: released screw track id.
+        :returns: ``(ok, message)`` — ok when seated head-up in a hole; message explains a miss.
+        """
+        try:
+            self._poll_once()
+        except Exception:  # noqa: BLE001 - verify from last belief when sensors fail
+            pass
+        es = self.ego_state()
+        target = es.find(screw_id)
+        if target is None:
+            return False, f"unknown screw {screw_id!r} after place"
+        with self._lock:
+            track = self.estimator.tracks.get(screw_id)
+            tip_source = track.tip_roll_source if track is not None else "unknown"
+            tip = float(track.tip_roll) if track is not None else 0.0
+        try:
+            _mate, issues = self.esim._ensure_screw_seated_for_drive(es, target)
+        except PredictionError as exc:
+            return False, str(exc)
+        if tip_source == "observed" and abs(tip) > 0.35:
+            return False, (
+                f"{screw_id} tipped over after place (tipRollDeg={math.degrees(tip):.0f}); "
+                "re-pick and insert tip-down again")
+        return True, issues[0] if issues else f"{screw_id} seated tip-down in hole"
+
+    def _replan_pick(self, screw_id: str) -> dict | None:
+        """Fresh pick plan for a screw that missed its hole (insert retry).
+
+        :param screw_id: screw to grasp again.
+        :returns: pick plan dict, or None when pick is infeasible.
+        """
+        receipt = self.esim.predict(self.ego_state(), "pick", {"target": screw_id})
+        if not receipt.get("feasible"):
+            return None
+        return receipt.get("plan") or None
+
+    def _replan_insert_place(self, insert: dict) -> dict | None:
+        """Fresh tip-down insert place after re-picking a missed screw.
+
+        Polls cameras and requires ``tipSource=observed`` on the held screw so the stand roll
+        knows which end is the tip.
+
+        :param insert: ``insertParams`` from the original plan (``object``, ``on``, optional ``hole``).
+        :returns: insert plan dict, or None when insert predict is infeasible.
+        """
+        try:
+            self._poll_once()
+        except Exception:  # noqa: BLE001 - replan from last belief when sensors fail
+            pass
+        if self._insert_screw_tip_gate(insert.get("object")) is not None:
+            return None
+        params: dict = {"on": insert.get("on")}
+        if insert.get("hole") is not None:
+            params["hole"] = insert["hole"]
+        if insert.get("maxAttempts") is not None:
+            params["maxAttempts"] = insert["maxAttempts"]
+        receipt = self.esim.predict(self.ego_state(), "insert_screw_into_hole", params)
+        if not receipt.get("feasible"):
+            return None
+        return receipt.get("plan") or None
 
     def _unsupported(self, track_id: str) -> bool:
         """Whether the object floats where it is believed to be (:meth:`EgoEstimator.unsupported`)."""
@@ -1449,11 +1702,41 @@ class EgoRuntime:
         return out
 
     def predict(self, skill: str, params: dict) -> dict:
+        if skill in ("drive_screw", "insert_screw_into_hole"):
+            # Refresh cameras before trusting screw tip / head-up (same as ego_screw_holes).
+            try:
+                self._poll_once()
+            except Exception:  # noqa: BLE001 - still predict from the last belief when sensors fail
+                pass
         es = self.ego_state()
         if skill == "close":
             # The drawer the robot pulled open is closed by that pull (handle, axis, distance)
             # unless the caller names another: views of the open drawer box it deeper than it is.
             params = {**self.executor.pull_of(str(params.get("target", ""))), **params}
+        if skill == "drive_screw":
+            gate = self._drive_screw_tip_gate(params.get("target"))
+            if gate is not None:
+                receipt = self.esim._receipt(
+                    es, "drive_screw", params, 1.0, [gate], {}, feasible=False)
+                limit = self.config.max_risk
+                receipt["withinRiskLimit"] = False
+                receipt["maxRisk"] = limit
+                with self._lock:
+                    self.receipts[receipt["id"]] = receipt
+                    self._receipt_generation[receipt["id"]] = self._generation
+                return receipt
+        if skill == "insert_screw_into_hole":
+            gate = self._insert_screw_tip_gate(params.get("object") or params.get("target"))
+            if gate is not None:
+                receipt = self.esim._receipt(
+                    es, "insert_screw_into_hole", params, 1.0, [gate], {}, feasible=False)
+                limit = self.config.max_risk
+                receipt["withinRiskLimit"] = False
+                receipt["maxRisk"] = limit
+                with self._lock:
+                    self.receipts[receipt["id"]] = receipt
+                    self._receipt_generation[receipt["id"]] = self._generation
+                return receipt
         receipt = self.esim.predict(es, skill, params)
         limit = self.config.max_pick_risk if receipt.get("skill") == "pick" else self.config.max_risk
         receipt["withinRiskLimit"] = receipt["feasible"] and receipt["risk"] <= limit
@@ -1568,6 +1851,8 @@ class EgoRuntime:
         belief instead of the robot driving to a pose that belongs to an object that is no
         longer there."""
         plan = (receipt.get("plan") or {}) if skill == "pick" else {}
+        if plan.get('assemblyGrip'):
+            return  # commanded release/frozen body frame; inspect after the grasp
         target, before = plan.get("target"), plan.get("targetP")
         if not target or before is None:
             return
@@ -1804,10 +2089,28 @@ class EgoRuntime:
             print(f"ego: fresh look for {target_id} failed: {exc}", file=sys.stderr, flush=True)
             return False
 
-    def run(self, receipt_id: str, owner: str | None = None) -> dict:
-        """Execute a predicted plan. The runtime re-checks the receipt here, where the motion happens."""
-        self._check_control(owner)
-        receipt = self.receipt(receipt_id)
+    def _validate_placement(self, plan):
+        ref = (plan.get('placementTarget') or {}).get('mateReference', {})
+        with self._lock:
+            memory = self.estimator.stationary_assemblies
+            memory.update(self.estimator.tracks, self.estimator.stamp)
+            record = memory.records.get(ref.get('entity'))
+            if record is not None and record['status'] != 'frozen':
+                memory.warn(record, 'body_moved_during_approach_continue', detail=record.get('reason'))
+                record.update(status='frozen', hardMotion=False, motionSamples={})
+
+    def _fasten(self, job, plan):
+        from steward.ego.fasten import Fasten
+        Fasten(self).run(job, plan)
+
+    def _assemble_onto(self, job, plan):
+        from steward.ego.assemble import AssembleOnto
+        AssembleOnto(self).run(job, plan)
+
+    def _consume_receipt(self, receipt):
+        receipt_id = receipt['id']
+        if self._receipt_generation.get(receipt_id) != self._generation:
+            raise PermissionError('receipt belongs to a different sensor session')
         now = self.estimator.stamp
         if receipt.get("used"):
             raise PermissionError(f"receipt {receipt_id} was already executed; predict again")
@@ -1819,6 +2122,13 @@ class EgoRuntime:
         if receipt["risk"] > limit:
             raise PermissionError(f"receipt risk {receipt['risk']:.2f} exceeds the limit {limit:.2f}")
         receipt["used"] = True
+        return receipt['plan']
+
+    def run(self, receipt_id: str, owner: str | None = None) -> dict:
+        """Execute a predicted plan. The runtime re-checks the receipt here, where the motion happens."""
+        self._check_control(owner)
+        receipt = self.receipt(receipt_id)
+        self._consume_receipt(receipt)
         job = self.executor.start(receipt["skill"], receipt).to_dict()
         params = receipt.get("params") or {}
         target = params.get("target") or params.get("on") or (f"({params['x']:.2f}, {params['y']:.2f})" if "x" in params else "")

@@ -129,14 +129,39 @@ def _recorded_motion(name):
             return arm.virtualize({**sim.proprioception(robot['id']), 'odometry': sim.odometry(robot['id'])})
 
         measured = state()
-        arm._target = dict(measured['joints'])
+        controller = fixture.get('controller')
+        arm._target = dict(measured['joints']) if controller is None else dict(controller['target'])
+        if controller is not None:
+            arm._solved = controller['solution']
         executor = SkillExecutor(lambda command: sim.command(robot['id'], arm.command(command)),
                                  state, lambda eid: eid, config=setup.config.motion,
                                  clock=SteppedClock(sim), motion_policy=arm.motion_policy)
-        executor._setpoints = dict(measured['joints'])
+        executor._setpoints = dict(measured['joints'] if controller is None else controller['setpoints'])
         yield sim, executor, fixture, state
     finally:
         sim.stop()
+
+
+@pytest.mark.parametrize('dx,dz', [(0., 0.), (.005, -.005), (-.005, .005)])
+def test_drawer_pick_enters_below_the_top_and_withdraws_before_lifting(monkeypatch, dx, dz):
+    """A docked real-mesh posture retains the cabinet top above the deep drawer's bottle."""
+    with _recorded_motion('agilex-drawer-pick.json') as (sim, executor, fixture, state):
+        plan = fixture['plan']
+        fixture['target']['p'][0] += dx
+        fixture['target']['p'][2] += dz
+        executor._state = lambda: {**state(), 'entities': {plan['target']: fixture['target']}}
+        # The recording starts at the dock; keep live alignment during the horizontal entry.
+        monkeypatch.setattr(executor, '_dock', lambda *args: None)
+        job = Job('drawer-pick', 'pick', 'r')
+        executor._pick_target(job, plan)
+        sim.step_seconds(.5)
+        grip = sim.robots[fixture['robot']['id']].grippers['L_link6']
+        assert grip.attached == 'w:pill-bottle', 'the bottle must leave the drawer in the working gripper'
+        assert sim._entity_pose('w:pill-bottle')['p'][2] > .8, 'the grasp must clear the cabinet top'
+        supports = {r['a']['entity']: r['b']['entity'] for r in sim.world_state()['relations']
+                    if r['type'] == 'supported-by'}
+        assert supports['w:perfume-bottle'] == 'w:cabinet-1', 'the neighbouring bottle must stay in the drawer'
+        assert state()['odometry']['x'] == pytest.approx(plan['predock'][0], abs=.04)
 
 
 def test_retreat_preserves_the_released_piece_on_the_table(monkeypatch):

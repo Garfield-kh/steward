@@ -38,5 +38,6 @@ def prepare_agilex(base: RuntimeConfig) -> tuple[dict, PiperArm, RuntimeConfig]:
                                  wrist_pitch_max=arm.geometry.wrist_pitch_max)
     planning = {k: tuple(v) if isinstance(v, list) else v for k, v in settings["planning"].items()}
     esim = dataclasses.replace(base.esim, **planning, elevated_grasp_floor=floors["elevated_grasp_floor"],
+                               drawer_entry_lift=floors["working_lift"],
                                tilted_carry_floor=floors["tilted_carry_floor"])
     return model, arm, dataclasses.replace(base, motion=motion, esim=esim)

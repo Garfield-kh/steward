@@ -103,6 +103,7 @@ def test_usd_runtime_uses_its_profile_and_preserves_unrelated_base_settings(impo
     assert cfg.motion.position_tol == .0123
     assert cfg.motion.release_joint_tol == .006 and cfg.motion.release_settle_s == 1.0
     assert cfg.motion.working_lift == arm.config.working_lift
+    assert cfg.esim.drawer_entry_lift == cfg.motion.working_lift
     assert cfg.motion.working_reach == arm.config.working_reach
     assert cfg.motion.wrist_pitch_max == arm.geometry.wrist_pitch_max
     assert base.motion.linear_speed != .2
@@ -143,6 +144,8 @@ def test_usd_runtime_uses_its_profile_and_preserves_unrelated_base_settings(impo
     ('[motion]\nrelease_settle_s = -1.0', 'motion.release_settle_s'),
     ('[planning]\nflip_in_air = 1', 'planning.flip_in_air'),
     ('[planning]\nreceipt_ttl = -1.0', 'planning.receipt_ttl'),
+    ('[planning]\ndrawer_entry_pitch = 1.1', 'planning.drawer_entry_pitch'),
+    ('[planning]\ndrawer_entry_backoff = 0.0', 'planning.drawer_entry_backoff'),
     ('[planning]\npour_roll = 0.2', 'planning.pour_roll'),
     ('[planning]\npour_roll = 4.0', 'planning.pour_roll'),
     ('[planning]\npour_roll_min = 0.0', 'planning.pour_roll_min'),

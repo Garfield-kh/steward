@@ -101,6 +101,11 @@ capture_radius = 0.12
 handle_probes_side_m = [0.06, -0.06, 0.10, -0.10, 0.14, -0.14]
 handle_probes_along_m = [0.04, 0.08, 0.12, -0.05, -0.09, 0.16]
 min_require_tilt = 0.25
+# Under a cabinet top, enter at a tilted front-side grasp through the exposed gap.
+drawer_entry_pitch = 0.5
+drawer_grasp_raise = 0.035
+drawer_grasp_backoff = 0.035
+drawer_entry_backoff = 0.05
 receipt_ttl = 300.0
 place_clearance = 0.18
 spot_shift_max = 0.85

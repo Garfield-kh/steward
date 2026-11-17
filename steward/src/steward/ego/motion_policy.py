@@ -49,6 +49,7 @@ class MotionPolicy(Protocol):
     def approach_handle(self, driver: SkillExecutor, job: Job, plan: dict) -> tuple[float, float, float]: ...
     def after_place(self, driver: SkillExecutor, plan: dict) -> None: ...
     def after_handle(self, driver: SkillExecutor, plan: dict) -> None: ...
+    def prepare_carry(self, driver: SkillExecutor, plan: dict) -> None: ...
 
 
 class PlanarMotionPolicy:
@@ -75,6 +76,9 @@ class PlanarMotionPolicy:
 
     def clear_handle_descent(self, driver: SkillExecutor, handle: list[float], reach: float) -> None:
         """Planar slides descend directly at their docked position."""
+
+    def prepare_carry(self, driver: SkillExecutor, plan: dict) -> None:
+        """Planar grasps can rise to carry height at their grasp position."""
 
     def recover(self, driver: SkillExecutor) -> None:
         """Rise ``failure_raise``, turn the wrist upright in place, then draw the arm back; each step
@@ -605,6 +609,39 @@ class PlanarMotionPolicy:
 
 class PiperMotionPolicy(PlanarMotionPolicy):
     """Articulated Piper paths, resolved with each body's workspace and trajectory settings."""
+
+    def approach(self, driver: SkillExecutor, plan: dict, xy: list[float], lift: float) -> None:
+        """Descend in the exposed drawer gap before approaching a grasp under the cabinet top."""
+        if "drawerEntry" not in plan:
+            return super().approach(driver, plan, xy, lift)
+        driver._set_joint("lift", max(plan["approachLift"], driver.config.working_lift))
+        driver._set_joint("reach", plan["closeReach"])
+        driver._set_joint("wrist_pitch", plan["closePitch"])
+        driver._wait(driver.config.settle_s)
+        o = driver._state()["odometry"]
+        heading = np.array([math.cos(o["yaw"]), math.sin(o["yaw"])])
+        left = np.array([-heading[1], heading[0]])
+        delta = (np.array(xy) - plan["drawerEntry"] * heading
+                 + plan["drawerEntrySide"] * left - driver._gripper_xy())
+        driver._translate_to(o["x"] + delta[0], o["y"] + delta[1], o["yaw"], tol=driver.config.dock_position_tol)
+        driver._set_joint("lift", lift)
+        driver._settle_for_release()
+        o = driver._state()["odometry"]
+        delta = np.array(xy) - driver._gripper_xy()
+        driver._translate_to(o["x"] + delta[0], o["y"] + delta[1], o["yaw"], tol=driver.config.dock_position_tol)
+
+    def prepare_carry(self, driver: SkillExecutor, plan: dict) -> None:
+        """Leave the space below the cabinet top before lifting a drawer grasp."""
+        if "drawerExit" in plan:
+            o = driver._state()["odometry"]
+            c, s = math.cos(o["yaw"]), math.sin(o["yaw"])
+            driver._translate_to(o["x"] - plan["drawerExit"] * c - plan["drawerEntrySide"] * s,
+                                 o["y"] - plan["drawerExit"] * s + plan["drawerEntrySide"] * c, o["yaw"])
+
+    def withdraw(self, driver: SkillExecutor, plan: dict) -> None:
+        """Return through the drawer opening before raising after a missed grasp."""
+        self.prepare_carry(driver, plan)
+        super().withdraw(driver, plan)
 
     def clear_handle_descent(self, driver: SkillExecutor, handle: list[float], reach: float) -> None:
         """Keep fingers outside the cabinet while descending with the articulated arm extended."""

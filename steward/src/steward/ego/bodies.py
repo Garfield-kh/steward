@@ -99,6 +99,7 @@ def runtime_config(body: str, base: RuntimeConfig | None = None) -> RuntimeConfi
                                handle_probes_side_m=(0.06, -0.06, 0.10, -0.10, 0.14, -0.14),
                                handle_probes_along_m=(0.04, 0.08, 0.12, -0.05, -0.09, 0.16),
                                elevated_grasp_floor=floors["elevated_grasp_floor"],
+                               drawer_entry_lift=floors["working_lift"],
                                tilted_carry_floor=floors["tilted_carry_floor"],
                                min_require_tilt=0.25, receipt_ttl=300.0,
                                # Flip-in-air drops from turnLift; allow a wide shift so the lid already

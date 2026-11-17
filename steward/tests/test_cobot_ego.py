@@ -321,6 +321,10 @@ def test_the_twin_takes_things_out_of_both_drawers_deep_ones_with_its_tool_tilte
                       if o.get("on") == drawer["id"] and o["category"] == wanted]
             assert inside, wanted
             picked, _ = _receipt(api, "pick", {"target": inside[0]["id"]})
+            expected = "w:pill-bottle" if cabinet_side else "w:pistol"
+            robot = next(iter(host.sim.robots.values()))
+            assert any(grip.attached == expected for grip in robot.grippers.values()), \
+                f"the requested {wanted} must be held before placement"
             plans[wanted] = (picked["plan"], drawer["position"][2] + drawer["sizeM"][2] / 2)
             _receipt(api, "place", {"on": drawer["id"]})
             _receipt(api, "close", {"target": drawer["id"]})

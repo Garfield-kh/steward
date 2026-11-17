@@ -1027,11 +1027,12 @@ class SkillExecutor:
         # Off the floor the planned height (its base at floor level) outranks the noisy live estimate.
         # An elevated drawer grasp stores its working height in plan["lift"] (via graspDz); prefer it
         # so the live centre cannot pull the tilt back into the USD hole.
-        pick_lift = plan["lift"] if plan.get("support") == "floor" else max(float(target["p"][2]), float(plan["lift"]))
+        pick_lift = (plan["lift"] if plan.get("support") == "floor" or "drawerEntry" in plan
+                     else max(float(target["p"][2]), float(plan["lift"])))
         # A tilted close at the dock reach may need a raised floor; tool-down closes (closePitch≈0)
         # keep the object's true height so the gripper does not close in air above a short bottle.
         close_pitch = abs(float(plan.get("closePitch") or 0.0))
-        if (float(plan.get("wristPitch") or 0.0) > 0.4 and plan.get("approachLift") is not None
+        if ("drawerEntry" not in plan and float(plan.get("wristPitch") or 0.0) > 0.4 and plan.get("approachLift") is not None
                 and close_pitch >= 0.15):
             pick_lift = max(pick_lift, min(float(plan["approachLift"]), float(plan.get("lift", pick_lift) + 0.12)))
         self._reach_over(plan, target["p"][:2], pick_lift)
@@ -1149,6 +1150,7 @@ class SkillExecutor:
         mild_tilt = (not pitched) and (plan_tilt > 0.2 or live_tilt > 0.2)
         carry = max(float(plan["carryLift"]),
                     self.config.tilted_carry_floor if (pitched or mild_tilt) else 0.0)
+        self.motion_policy.prepare_carry(self, plan)
         self._set_joint("lift", carry)
         if not plan.get("keepReach"):
             if pitched:

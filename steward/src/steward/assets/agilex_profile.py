@@ -48,7 +48,8 @@ _SCHEMA = {
         "handle_probes_side_m": (float, None), "handle_probes_along_m": (float, None),
         **dict.fromkeys(("place_edge_margin", "handle_reach", "capture_radius", "min_require_tilt",
                          "receipt_ttl", "place_clearance", "spot_shift_max", "pour_hold_s",
-                         "pour_roll", "pour_roll_min"), float),
+                         "pour_roll", "pour_roll_min", "drawer_entry_pitch", "drawer_grasp_raise",
+                         "drawer_grasp_backoff", "drawer_entry_backoff"), float),
     },
 }
 
@@ -147,6 +148,8 @@ def _validate(cfg: dict, path: Path) -> None:
             if type(value) in (int, float):
                 require(value > 0, section + "." + key, "expected a positive number")
     planning = cfg['planning']
+    require(planning['drawer_entry_pitch'] <= arm['wrist_pitch_max'],
+            'planning.drawer_entry_pitch', 'exceeds arm.wrist_pitch_max')
     require(0.3 <= planning['pour_roll'] <= arm['wrist_roll_max'],
             'planning.pour_roll', 'expected radians in [0.3, arm.wrist_roll_max]')
     require(planning['pour_roll_min'] <= math.pi,

@@ -116,10 +116,11 @@ class Arm:
         return 0.0 if self.reachable(lift, reach, wrist_yaw, wrist_roll) else None
 
     def min_lift_for(self, reach: float, wrist_pitch: float = 0.0, *,
-                     wrist_yaw: float = 0.0) -> float | None:
-        """Lowest reachable TCP height at the requested extension and orientation; None if unreachable."""
-        low = self.geometry.lift_min
-        return low if self.reachable(low, reach, wrist_yaw=wrist_yaw, wrist_pitch=wrist_pitch) else None
+                     wrist_yaw: float = 0.0, lo: float | None = None, hi: float | None = None) -> float | None:
+        """Lowest reachable TCP height within optional ``lo``/``hi`` bounds; None if unreachable."""
+        low = max(self.geometry.lift_min, lo) if lo is not None else self.geometry.lift_min
+        high = min(self.geometry.lift_max, hi) if hi is not None else self.geometry.lift_max
+        return low if low <= high and self.reachable(low, reach, wrist_yaw=wrist_yaw, wrist_pitch=wrist_pitch) else None
 
     def reachable_path(self, targets: Sequence[dict], *, start_joints: dict | None = None) -> bool:
         """Whether the arm can move its grasp point through ``targets`` (virtual joints; turn, tip

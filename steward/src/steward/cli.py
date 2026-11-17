@@ -220,13 +220,15 @@ def _segmenter(config: str, root: str):
 
 def _start_ego(robot_url: str, api_port: int, out_dir: Path, bind_wait_s: float = 0.0, segmenter=None,
                body: str = "steward-bot"):
-    from steward.ego.bodies import body_arm, robot_model, runtime_config
+    from steward.ego.bodies import prepare_body
     from steward.ego.runtime import EgoRuntime, RobotLink
     from steward.ego.server import ego_api
 
-    model = robot_model(body)
-    runtime = EgoRuntime(RobotLink(robot_url), model, runtime_config(body), out_dir=out_dir, segmenter=segmenter,
-                         arm=body_arm(body, model))
+    link = RobotLink(robot_url)
+    link.require_body(body)
+    setup = prepare_body(body)
+    runtime = EgoRuntime(link, setup.model, setup.config, out_dir=out_dir, segmenter=segmenter,
+                         arm=setup.arm)
     runtime.start()
     api = ego_api(runtime, port=api_port, bind_wait_s=bind_wait_s).start()
     return runtime, api
@@ -663,6 +665,9 @@ def _cobot_scripted(args) -> int:
     host = _host(args, run_dir)  # builds the builtin scenario on first use
     sim = host.sim
     robot_id = host.scenario["robots"][0]
+    if host.embodiments[robot_id]["id"] != "cobot-magic":
+        host.stop()
+        raise ValueError("The scripted Cobot mission supports only cobot-magic; use steward up --body agilex-usd")
     skills = CobotSkills(command=lambda cmd: sim.command(robot_id, cmd), state=lambda: sim.sensors(robot_id))
     est = EgoEstimator(robot_model=cobot_magic().to_dict())
     rgbd = phase_modules(host.phase)["perception"] == "rgbd"

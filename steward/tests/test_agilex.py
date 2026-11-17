@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from steward.assets.agilex import agilex_usd
-from steward.ego.bodies import body_arm, robot_model, runtime_config
+from steward.ego.bodies import body_arm, prepare_body, robot_model
 from steward.ego.estimator import _apply_joint
 from steward.ego.kinematics import _link_pose
 from steward.embodiments import embodiment_of, with_body
@@ -104,9 +104,10 @@ def test_usd_robot_navigates_picks_and_places_through_ego_receipts(tmp_path):
     runtime = api = None
     errors = []
     try:
-        model = robot_model('agilex-usd')
-        runtime = EgoRuntime(RobotLink(host.robot_servers['w:cobot-1'].url), model,
-                             runtime_config('agilex-usd'), arm=body_arm('agilex-usd', model))
+        setup = prepare_body('agilex-usd')
+        link = RobotLink(host.robot_servers['w:cobot-1'].url)
+        link.require_body('agilex-usd')
+        runtime = EgoRuntime(link, setup.model, setup.config, arm=setup.arm)
         runtime.start()
         api = ego_api(runtime).start()
 

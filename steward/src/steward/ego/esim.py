@@ -122,7 +122,7 @@ class EsimConfig:
     pour_roll: float = 1.9
     # Tipped less, the contents stay in the container: its walls hold them until it is past upright
     # (measured with the puzzle box: at 1.5 rad nothing came out, at 1.75 everything did).
-    pour_roll_min: float = 1.7
+    pour_roll_min: float = 1.7  # minimum container tilt from world upright, not wrist rotation
     pour_check_step: float = 0.1  # roll step at which the whole tip is checked for a continuous motion
     wrist_check_step: float = 0.1  # angular step for a held object's approach, including yaw and roll
     lift_check_step: float = 0.05  # height step at which a grasp's way down and up is checked likewise
@@ -2358,7 +2358,16 @@ class Esim:
         # Prefer the approach pitch (``pitch_for`` after an untilted carry) over live FK: pour docks
         # past ~0.50 m must keep that tilt through the tip, not re-plan tool-down.
         pitch = float(approach.get("wristPitch") or self._held_pitch(es)[0] or 0.0)
-        yaw = self._arm_joints(es).get("wrist_yaw", 0.0)
+        current = self._arm_joints(es)
+        yaw = current.get("wrist_yaw", 0.0)
+        _, _, base_yaw = self._robot_xy_yaw(es)
+        current_tool = matrix_from_quat(quat_from_yaw(base_yaw)) @ self.arm.tool_rotation(
+            yaw, current.get("wrist_roll", 0.0), current.get("wrist_pitch", 0.0))
+        held_up = current_tool.T @ matrix_from_quat(held.pose.value["q"])[:, 2]
+
+        def container_tilt(r: float) -> float:
+            up = self.arm.tool_rotation(yaw, r, pitch) @ held_up
+            return math.acos(float(np.clip(up[2], -1.0, 1.0)))
 
         def tips(r: float) -> bool:
             steps = max(1, math.ceil(abs(r) / self.config.pour_check_step))
@@ -2372,28 +2381,30 @@ class Esim:
                                            + [at(steps, rise * j / rises) for j in range(1, rises + 1)]
                                            + [at(k, rise) for k in range(steps - 1, -1, -1)])
 
-        def farthest(r: float, least: float) -> float:
-            """The largest tip, from ``r`` toward upright in 0.1 rad steps, that :func:`tips`; below ``least`` if none."""
+        def farthest(r: float) -> float | None:
+            """The largest requested wrist roll with sufficient container tilt and a continuous path."""
             sign = 1.0 if r >= 0 else -1.0
-            while abs(r) >= least and not tips(r):
+            while abs(r) >= 0.3:
+                if container_tilt(r) >= self.config.pour_roll_min and tips(r):
+                    return r
                 r -= sign * 0.1
-            return r
+            return None
 
         wanted = roll
         for side in ([roll] if "roll" in params else [roll, -roll]):
-            roll = farthest(side, self.config.pour_roll_min)
-            if abs(roll) >= self.config.pour_roll_min:
+            roll = farthest(side)
+            if roll is not None:
                 break
-        if abs(roll) < self.config.pour_roll_min:
-            most = max((farthest(side, 0.3) for side in ([wanted] if "roll" in params else [wanted, -wanted])), key=abs)
-            raise PredictionError(f"holding {held.id} {approach['reach']:.2f} m out, the wrist tips it at most "
-                                  f"{max(abs(most), 0.0):.1f} rad without turning over, short of the "
-                                  f"{self.config.pour_roll_min:.1f} rad its walls need to let the contents out; pour "
-                                  "onto a spot nearer the edge, or take the contents out one by one")
+        if roll is None:
+            raise PredictionError(f"holding {held.id} {approach['reach']:.2f} m out, no continuous pour path "
+                                  f"within wrist roll {abs(wanted):.2f} rad tilts the container at least "
+                                  f"{self.config.pour_roll_min:.2f} rad from upright; change the grasp or pour "
+                                  "spot, or take the contents out one by one")
         if abs(abs(wanted) - abs(roll)) > 1e-6:
-            issues.append(f"the wrist tips {held.id} only {roll:.1f} rad here (asked {wanted:.1f})")
+            issues.append(f"pouring {held.id} uses wrist roll {roll:.1f} rad here (asked {wanted:.1f})")
         plan = {**approach, "object": held.id, "support": support.id, "spot": list(spot), "gripSpot": list(grip),
-                "lift": height, "roll": roll, "pivot": pivot, "pourS": self.config.pour_hold_s, "rise": rise,
+                "lift": height, "roll": roll, "containerTilt": container_tilt(roll),
+                "pivot": pivot, "pourS": self.config.pour_hold_s, "rise": rise,
                 "gentle": True}
         # Deep pour docks must keep the planned tilt through tip and exit (tool-down tops out ~0.50 m).
         if abs(pitch) >= 1e-3:

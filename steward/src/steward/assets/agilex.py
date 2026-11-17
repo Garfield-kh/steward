@@ -9,12 +9,10 @@ from __future__ import annotations
 import copy
 import json
 import math
-import os
 from pathlib import Path
-import tomllib
 
-from steward.assets.cobot import ROOT_ACTUATOR
-from steward.assets.generators import head_link
+from steward.assets.agilex_profile import load_agilex_profile
+from steward.math3d import quat_from_axis_angle
 from steward.scene.schema import Entity, Joint, Link, SceneState, exact, pose
 from steward.scene.validate import require_valid
 
@@ -26,15 +24,12 @@ def agilex_usd(config_path: Path | None = None) -> dict:
     Both arms start with their six revolute joints at zero radians.
     A missing asset fails with import instructions; no substitute geometry is loaded.
     """
-    path = config_path or Path(os.environ.get("STEWARD_AGILEX_USD_CONFIG",
-                               str(Path(__file__).resolve().parents[3] / "config/agilex-usd.toml")))
-    cfg = tomllib.loads(path.read_text())
-    positive = ("arm_kp", "arm_damping", "arm_effort", "lift_kp", "lift_damping", "lift_effort", "finger_kp", "finger_damping")
-    for key in (*positive, "lift_home", "survey_pitch_deg", "work_pitch_deg"):
-        value = cfg.get(key)
-        if type(value) not in (int, float) or not math.isfinite(value) or (key in positive and value <= 0):
-            raise ValueError(f"Invalid {key} in {path}: expected a finite {'positive ' if key in positive else ''}number")
-    template = (path.parent / cfg["template"]).resolve()
+    return build_agilex_model(load_agilex_profile(config_path))
+
+
+def build_agilex_model(cfg: dict) -> dict:
+    """Build from settings already resolved and validated by load_agilex_profile."""
+    template = Path(cfg["template"])
     if not template.is_file():
         raise ValueError(f"USD embodiment template missing: {template}. Run steward import-usd with --name agilex-usd; "
                          "see README's USD embodiment instructions or set STEWARD_AGILEX_USD_CONFIG.")
@@ -76,7 +71,7 @@ def agilex_usd(config_path: Path | None = None) -> dict:
             group = "lift" if name == "lift" else "finger" if finger else "arm"
             if "actuator" in joint:
                 joint["actuator"] = {"kind": "position", "gains": {"kp": cfg[f"{group}_kp"]},
-                                     "limits": {"effort": cfg.get(f"{group}_effort", cfg["arm_effort"])}}
+                                     "limits": {"effort": cfg[f"{group}_effort"]}}
             joint["dynamics"] = {"value": {"damping": cfg[f"{group}_damping"]}}
             if name == "lift":
                 value = cfg["lift_home"]
@@ -89,6 +84,12 @@ def agilex_usd(config_path: Path | None = None) -> dict:
                 raise ValueError(f"Initial {name}={value} lies outside the USD limits {limits}")
             joint["q"] = {"value": [value]}
         joints.append(joint)
+    by_name = {joint["id"]: joint for joint in joints}
+    for side in ("L", "R"):
+        for number, value in enumerate(cfg["arm"]["deploy_joints"], 1):
+            limits = by_name[f"{side}_joint{number}"]["limits"]["value"]
+            if not limits["lo"] <= value <= limits["hi"]:
+                raise ValueError(f"Invalid arm.deploy_joints: {side}_joint{number}={value} outside the USD limits {limits}")
     links = []
     for link in body["links"]:
         if link["id"] in removed:
@@ -105,14 +106,23 @@ def agilex_usd(config_path: Path | None = None) -> dict:
             link["affordances"] = [{"value": "grasp-point"},
                 {"value": {"tcp-offset": pose(finger["origin"]["value"]["p"])}}]
         if link["id"] == "top_camera_link":
-            link["sensors"] = head_link(camera_pitch_deg=cfg["survey_pitch_deg"],
-                                        wide_pitch_deg=cfg["work_pitch_deg"], head_size=(320, 240)).to_dict()["sensors"]
+            link["sensors"] = []
+            for name, pitch_key in (("head", "survey_pitch_deg"), ("wide", "work_pitch_deg")):
+                camera = cfg["cameras"][name]
+                link["sensors"].append({
+                    "id": name + "_camera", "kind": "rgbd",
+                    "mount": pose(camera["position"], quat_from_axis_angle([0, 1, 0], math.radians(cfg[pitch_key]))),
+                    "intrinsics": {"width": camera["size"][0], "height": camera["size"][1], "fovy": camera["fovy_deg"]},
+                    "rateHz": camera["rate_hz"],
+                })
         links.append(link)
     # Put the floor at entity z=0 so scenario replacement preserves the spawn pose.
     links.insert(0, Link(id="ground", name="planar base reference", inertial=exact({"mass": 0.001})).to_dict())
     joints.insert(0, Joint(id="base_height", parent="ground", child="base", type=exact("fixed"),
                            origin=exact(entity["pose"]["value"]), q=exact([]), qd=exact([])).to_dict())
-    body.update(links=links, joints=joints, root={"value": "planar"}, rootActuator=copy.deepcopy(ROOT_ACTUATOR))
+    body.update(links=links, joints=joints, root={"value": "planar"}, rootActuator={
+        "kind": "position", "gains": {k: cfg["base"][k] for k in ("kp", "damping")},
+        "limits": {k: cfg["base"][k] for k in ("effort", "velocity")}})
     for coupling in body.get("couplings", []):
         for key in ("joint1", "joint2"):
             coupling[key] = joint_names[coupling[key]]

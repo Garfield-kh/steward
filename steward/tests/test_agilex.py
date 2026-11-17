@@ -29,7 +29,7 @@ def imported_profile(tmp_path):
     template = tmp_path / 'template.json'
     template.write_bytes((FIXTURES / 'agilex-kinematics.json').read_bytes())
     config = tmp_path / 'body.toml'
-    config.write_text(PROFILE.read_text().replace('../var/steward/imports/agilex-usd/template.json', 'template.json'))
+    config.write_text(PROFILE.read_text().replace('../assets/agilex/runtime/template.json', 'template.json'))
     return config
 
 
@@ -90,7 +90,7 @@ def test_encoder_fk_includes_off_center_hinge_pivots(imported_profile):
 
 
 @pytest.mark.skipif(os.environ.get('STEWARD_TEST_AGILEX_USD') != '1',
-                    reason='requires the locally imported user USD; set STEWARD_TEST_AGILEX_USD=1')
+                    reason='long-running real-mesh task; set STEWARD_TEST_AGILEX_USD=1')
 def test_usd_robot_navigates_picks_and_places_through_ego_receipts(tmp_path):
     from steward.authoring.service import AuthoringService, build_cobot_workstation
     from steward.ego.runtime import EgoRuntime, RobotLink

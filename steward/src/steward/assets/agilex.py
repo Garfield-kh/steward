@@ -22,7 +22,8 @@ def agilex_usd(config_path: Path | None = None) -> dict:
 
     ``config_path`` defaults to ``STEWARD_AGILEX_USD_CONFIG`` or the shipped TOML profile.
     Both arms start with their six revolute joints at zero radians.
-    A missing asset fails with import instructions; no substitute geometry is loaded.
+    Mesh references are relative to the template directory; absolute references remain supported.
+    Missing assets fail before model construction; no substitute geometry is loaded.
     """
     return build_agilex_model(load_agilex_profile(config_path))
 
@@ -31,10 +32,18 @@ def build_agilex_model(cfg: dict) -> dict:
     """Build from settings already resolved and validated by load_agilex_profile."""
     template = Path(cfg["template"])
     if not template.is_file():
-        raise ValueError(f"USD embodiment template missing: {template}. Run steward import-usd with --name agilex-usd; "
-                         "see README's USD embodiment instructions or set STEWARD_AGILEX_USD_CONFIG.")
+        raise ValueError(f"USD embodiment template missing: {template}. Restore the bundled AgileX runtime assets "
+                         "or select an imported template with STEWARD_AGILEX_USD_CONFIG.")
     entity = json.loads(template.read_text())
     body = entity["body"]
+    for link in body["links"]:
+        for geoms in link.get("geometry", {}).values():
+            for geom in geoms:
+                if geom["kind"] == "mesh":
+                    mesh = (template.parent / geom["ref"]).resolve()
+                    if not mesh.is_file():
+                        raise ValueError(f"USD embodiment mesh missing: {mesh}. Restore the template's mesh files.")
+                    geom["ref"] = str(mesh)
     link_names = {}
     for link in body["links"]:
         parts = link["id"].split("/")

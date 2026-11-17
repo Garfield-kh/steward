@@ -1,6 +1,6 @@
 # Runtime calibration for the imported split_aloha_mid_360_with_piper robot.
 # Paths are relative to this file; STEWARD_AGILEX_USD_CONFIG selects another profile.
-template = "../var/steward/imports/agilex-usd/template.json"
+template = "../assets/agilex/runtime/template.json"
 # Raw USD lift joint coordinate in metres; limits come from the template.
 lift_home = -0.45
 arm_kp = 1500.0

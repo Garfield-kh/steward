@@ -44,7 +44,7 @@ AgileX 在停靠成功前保持机械臂姿态。放置规划检查目标腕姿�
 
 ## 导入 USD 机器人
 
-可选的 `usd` extra 使用 MuJoCo 4.0 的原生 OpenUSD 解码器。在独立的 Python 3.12 环境中安装它，以保留常规仿真环境。从仓库根目录运行：
+随仓库提供的 [AgileX 资产](assets/agilex/README.zh.md) 无需转换即可运行；下面的步骤用于重新转换并检查源模型。可选的 `usd` extra 使用 MuJoCo 4.0 的原生 OpenUSD 解码器。在独立的 Python 3.12 环境中安装它，以保留常规仿真环境。从仓库根目录运行：
 
 ```sh
 uv venv --python 3.12 steward/var/usd-env
@@ -63,7 +63,7 @@ steward/.venv/bin/steward world --scenario agilex-usd --phase phase0 \
 导入器支持一棵刚体机器人树，包括固定、旋转和平移关节、网格与基本几何体、力式位置驱动以及标量 PhysX mimic 联动约束。转换保留关节限位、枢轴和显式惯量。网格碰撞使用 MuJoCo 凸包。着色网络、贴图和相机不会转移；缺失的 MDL 着色器会记入报告，缺失的几何依赖则会中止导入。闭环和不支持的动力学会被拒绝。通用导入不会自动分配任务控制器；可通过机器人端口的 `/command` 接口按名称驱动关节。提供的双 Piper 模型另有已注册的适配器 `agilex-usd`，使用方式如下。
 
 
-将仓库附带的 [robot.usd](assets/agilex/robot.usd) 以 `agilex-usd` 名称导入后，可在任务场景中启动：
+在任务场景中启动随仓库提供的 `agilex-usd` 本体：
 
 ```sh
 steward/.venv/bin/steward up --scenario cobot-table --body agilex-usd --phase phase0 \
@@ -88,7 +88,7 @@ Phase 0 从盒沿抓取可倾倒容器；空心中心不能与盒内拼图竞争
 
 运行装配位于 [`ego/agilex.py`](src/steward/ego/agilex.py)；`prepare_body` 从同一份配置快照生成模型、控制器和策略。两种 Piper 本体共享 [`piper_arm.py`](src/steward/ego/piper_arm.py)、[`piper_ik.py`](src/steward/ego/piper_ik.py)、ESim 和 SkillExecutor。可注入的 [`MotionPolicy`](src/steward/ego/motion_policy.py) 负责停靠后的机械臂准备、接近、把手接近、搬运抬升前的撤离、放置和释放把手后的退离、撤臂及失败恢复；执行器负责技能顺序、计时、取消和任务结果。接近把手时的下降失败会先记入当前任务日志，再尝试恢复。IK 自碰撞连杆分组可通过 [`SelfCollisionPolicy`](src/steward/ego/collision_policy.py) 注入；USD 装配从自身模型选择障碍连杆。原有 `cobot_arm` 与 `ik.CobotIK` 导入路径仍可用。机器人端口通过 `GET /identity` 提供本体身份，CLI 在启动 Ego 前核对。旧 `CobotEgoRuntime`、`CobotSkills` 和 Cobot 脚本任务只接受 `cobot-magic`；导入模型应使用 `steward up --body agilex-usd`。
 
-本地资产集成测试命令为 `STEWARD_TEST_AGILEX_USD=1 steward/.venv/bin/python -m pytest -q steward/tests/test_agilex.py`。它通过 Ego API 导航、抓起碗并放到桌面另一处，最后核对世界坐标。运动学测试夹具包含源关节数据，以小盒体替代网格；集成测试使用导入的真实网格，因为需要先执行上述导入步骤，所以需显式启用。
+本地资产集成测试命令为 `STEWARD_TEST_AGILEX_USD=1 steward/.venv/bin/python -m pytest -q steward/tests/test_agilex.py`。它通过 Ego API 导航、抓起碗并放到桌面另一处，最后核对世界坐标。运动学测试夹具包含源关节数据，以小盒体替代网格；集成测试使用随仓库提供的网格，因完整物理任务耗时较长，需显式启用。
 
 同一资产开关还会启用 [`test_agilex_physics.py`](tests/test_agilex_physics.py)，验证原生肩高、原始升降行程、相机外参、手指联动、多个姿态下的网格遮罩覆盖，以及从记录的释放姿态撤离后物体仍由桌面支撑、从记录的停靠姿态下降时避开柜体并实际拉开抽屉，以及存在小幅感知误差时仍抓住正确的抽屉物体。[`test_cobot_ego.py`](tests/test_cobot_ego.py) 经各本体的正式运行装配执行共享任务断言；未启用开关时会跳过真实 USD 参数。[`test_body_retreat.py`](tests/test_body_retreat.py) 为三种本体验证表面支撑、抽屉打开与关闭、最终收拢姿态和观察位置，以及释放保护。轻量 IK 对照使用相同物理肩高，原生初态检查则保留 USD 配置自身的初始升降位置。
 

@@ -3,7 +3,7 @@ id: agilex-usd
 display: AgileX USD dual Piper
 configuration: config/agilex-usd.toml
 mechanical:
-  source: imports/agilex-usd/template.json
+  source: assets/agilex/runtime/template.json
   base: planar x/y/yaw position control; wheel joints fixed
   arms: USD follower arms fl/fr mapped to L/R; original transforms and limits
   torso: {joint: lift, range_m: [-0.6, 0.0], home_m: -0.45}

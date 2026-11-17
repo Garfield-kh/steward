@@ -44,7 +44,7 @@ Passing `--misnames-config ''` disables name mappings. A switch to `phase0-misna
 
 ## Import a USD robot
 
-The optional `usd` extra uses MuJoCo 4.0's native OpenUSD decoder. Install it in a separate Python 3.12 environment to keep the regular simulation environment unchanged. From the repository root:
+The bundled [AgileX assets](assets/agilex/README.md) run without conversion; the following steps regenerate and inspect source models. The optional `usd` extra uses MuJoCo 4.0's native OpenUSD decoder. Install it in a separate Python 3.12 environment to keep the regular simulation environment unchanged. From the repository root:
 
 ```sh
 uv venv --python 3.12 steward/var/usd-env
@@ -63,7 +63,7 @@ The example options address the supplied AgileX asset: its centimeter metadata d
 The importer accepts one rigid robot tree with fixed, revolute and prismatic joints, meshes and basic solids, force position drives and scalar PhysX mimic constraints. Joint limits, pivots and explicit inertias survive conversion. Mesh collisions use MuJoCo convex hulls. Shader networks, textures and cameras are not transferred; missing MDL shaders are reported, while missing geometry dependencies abort import. Closed loops and unsupported dynamics are rejected. A generic import has no assigned task controller; named joints can be driven through the robot port's `/command` endpoint. The supplied dual-Piper model has a separate registered adapter, `agilex-usd`, described below.
 
 
-After importing the bundled [robot.usd](assets/agilex/robot.usd) as `agilex-usd`, run it in a task scene:
+Run the bundled `agilex-usd` body in a task scene:
 
 ```sh
 steward/.venv/bin/steward up --scenario cobot-table --body agilex-usd --phase phase0 \
@@ -88,7 +88,7 @@ The adapter preserves USD meshes, inertias and finger coupling, adds grasp point
 
 Runtime assembly lives in [`ego/agilex.py`](src/steward/ego/agilex.py); `prepare_body` resolves its model, controller and policy from one profile snapshot. Both Piper bodies share [`piper_arm.py`](src/steward/ego/piper_arm.py), [`piper_ik.py`](src/steward/ego/piper_ik.py), ESim and SkillExecutor. The injectable [`MotionPolicy`](src/steward/ego/motion_policy.py) owns arm preparation after docking, approach, handle approach, pre-carry withdrawal, post-placement and post-handle retreat, withdrawal and failure recovery; the executor owns task sequencing, timing, cancellation and job results. Handle-lowering failures are recorded on the active job before recovery. IK self-collision link groups are injectable through [`SelfCollisionPolicy`](src/steward/ego/collision_policy.py); the USD assembly selects obstacles from its own model. Existing `cobot_arm` and `ik.CobotIK` imports remain available. The robot port exposes its embodiment through `GET /identity`; the CLI checks it before starting Ego. Legacy `CobotEgoRuntime`, `CobotSkills` and scripted Cobot missions accept only `cobot-magic`; use `steward up --body agilex-usd` for the imported model.
 
-For the local asset integration test, run `STEWARD_TEST_AGILEX_USD=1 steward/.venv/bin/python -m pytest -q steward/tests/test_agilex.py`. It navigates, picks a bowl and places it elsewhere on the table through the Ego API, then checks the world position. The kinematics fixture contains source joint data with small box stand-ins; the integration test uses the actual imported meshes and is opt-in because it requires the import step above.
+For the local asset integration test, run `STEWARD_TEST_AGILEX_USD=1 steward/.venv/bin/python -m pytest -q steward/tests/test_agilex.py`. It navigates, picks a bowl and places it elsewhere on the table through the Ego API, then checks the world position. The kinematics fixture contains source joint data with small box stand-ins; the integration test uses the bundled meshes and is opt-in because the full physical task is slow.
 
 The same asset opt-in enables [`test_agilex_physics.py`](tests/test_agilex_physics.py) for native shoulder height, raw lift travel, camera extrinsics, finger coupling, mesh-mask coverage across poses and table support after retreat from a recorded release posture, cabinet clearance and drawer travel from a recorded docking posture, and correct-object drawer grasps with small perception offsets. [`test_cobot_ego.py`](tests/test_cobot_ego.py) runs shared task assertions through each body’s formal runtime assembly; without the opt-in its real-USD parameters are skipped. [`test_body_retreat.py`](tests/test_body_retreat.py) checks surface support, drawer opening and closure, final stow and viewing position, and release guards for all three bodies. Lightweight IK comparisons use matched physical shoulder heights, while native-home checks retain the USD profile’s own initial lift.
 

@@ -13,7 +13,7 @@ from steward.authoring.service import AuthoringService, build_default_kitchen
     'cobot-magic',
     pytest.param('agilex-usd', marks=pytest.mark.skipif(
         os.environ.get('STEWARD_TEST_AGILEX_USD') != '1',
-        reason='requires imported meshes; set STEWARD_TEST_AGILEX_USD=1 and STEWARD_AGILEX_USD_CONFIG')),
+        reason='long-running real-mesh task; set STEWARD_TEST_AGILEX_USD=1')),
 ])
 def piper_body(request):
     """Formal body entry for shared task tests; actual USD assets are explicitly enabled."""

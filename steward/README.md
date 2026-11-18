@@ -42,6 +42,20 @@ AgileX preserves its arm posture until docking succeeds. Placement checks the re
 
 Passing `--misnames-config ''` disables name mappings. A switch to `phase0-misnamed` without a mapping is rejected, and the running world and later episodes retain the previous phase.
 
+## Merom house
+
+`merom-house` loads the bundled, optimized full-house layout from `phyagentos_assets_new`. It uses metres and Z-up, with 132 fixed entities and 1,163 separate collision pieces. The scene includes no robot or movable objects; selecting a robot body does not add one. Original USD files and a USD decoder are not required.
+
+From this directory after installation:
+
+```sh
+.venv/bin/steward --root var/merom world --scenario merom-house --phase phase0 --freeze-idle --wca-port 7460 --robot-port 0 --ego-api '' --world-harness '' --robot-harness ''
+```
+
+Open the printed console URL. The scene also appears in the console scenario selector and is installed on first load. Meshes are extracted into the selected data root; existing scene edits are retained on subsequent loads. The [asset manifest](src/steward/assets/merom_house/manifest.json) records the source hashes, coordinate convention and geometry counts. The bundle retains the optimized worktable, open space beneath it, separate collision proxies and golden toast colors.
+
+Local mesh geometry uses `kind: "mesh"` and a file `ref` in either the visual or collision list. Collision meshes require `link.inertial.value` with positive `mass`, three positive `diagonal` moments and a `pose`; visual meshes remain non-colliding and massless.
+
 ## Run with DeepSeek Harness
 
 ```sh

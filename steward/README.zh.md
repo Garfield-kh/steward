@@ -42,6 +42,20 @@ AgileX 在停靠成功前保持机械臂姿态。放置规划检查目标腕姿�
 
 传入 `--misnames-config ''` 会禁用名称映射。缺少映射时切换到 `phase0-misnamed` 会被拒绝，当前世界和后续 Episode 保留原感知级别。
 
+## Merom 全屋场景
+
+`merom-house` 加载随包提供的 `phyagentos_assets_new` 优化版全屋布局。场景使用米和 Z 轴向上坐标，包含 132 个固定实体和 1,163 个独立碰撞部件。场景没有机器人或可移动物体；选择机器人本体不会自动添加机器人。不需要原始 USD 文件或 USD 解码器。
+
+安装后，在本目录运行：
+
+```sh
+.venv/bin/steward --root var/merom world --scenario merom-house --phase phase0 --freeze-idle --wca-port 7460 --robot-port 0 --ego-api '' --world-harness '' --robot-harness ''
+```
+
+打开输出的控制台地址。场景也会出现在控制台场景选择器中，首次加载时安装。网格解压到指定数据目录；后续加载会保留已有场景编辑。[资产清单](src/steward/assets/merom_house/manifest.json)记录源文件哈希、坐标约定和几何数量。资产包保留优化后的工作台、桌下开放空间、分块碰撞代理和金黄色吐司。
+
+本地网格几何在视觉或碰撞列表中使用 `kind: "mesh"` 和文件 `ref`。碰撞网格要求 `link.inertial.value` 提供正数 `mass`、三个正数 `diagonal` 惯性矩和 `pose`；视觉网格不参与碰撞，也不增加质量。
+
 ## 与 DeepSeek Harness 一起运行
 
 ```sh

@@ -1,0 +1,30 @@
+{
+  "source": {
+    "layout": "phyagentos_assets_new",
+    "usd": "merom_scene_baked.usd",
+    "usd_sha256": "3cda8eed79484e554f4ddaaf957b1e76b46c962fa98139d7f053a183a9d79e95",
+    "optimized_scene_sha256": "6f6d566fc0611e8148e06ccdd5c9a13de29855b07b702bf4684f7020f10e27b2"
+  },
+  "coordinates": {
+    "length_unit": "meter",
+    "up_axis": "Z"
+  },
+  "entities": 132,
+  "unique_meshes": 1228,
+  "mesh_bytes": 6513784,
+  "geometry": {
+    "visual": {
+      "geoms": 199,
+      "mesh_triangles": 85345
+    },
+    "collision": {
+      "geoms": 1163,
+      "mesh_triangles": 108504
+    }
+  },
+  "files": {
+    "scene.json": "81adf5d16c44409530768898d3455a71ac28c00df1d5ff854a4583d5bec08de1",
+    "scenario.json": "e2bfc89d45f0adb08cd6dd2c68c9e7a9ef407ec2e9be9592c4722b4f76f933ae",
+    "meshes.zip": "d39e932cd9eb815ff227d619c590002fd191fd51029546af9996c8b03d4f4cc2"
+  }
+}

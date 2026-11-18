@@ -13,6 +13,7 @@ dependencies = [
 
 [project.optional-dependencies]
 providers = ["requests>=2.31"]
+localization = ["scipy>=1.11"]
 
 [project.scripts]
 steward = "steward.cli:main"

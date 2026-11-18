@@ -23,8 +23,14 @@
     }
   },
   "files": {
-    "scene.json": "81adf5d16c44409530768898d3455a71ac28c00df1d5ff854a4583d5bec08de1",
-    "scenario.json": "e2bfc89d45f0adb08cd6dd2c68c9e7a9ef407ec2e9be9592c4722b4f76f933ae",
+    "scene.json": "02e60351b0ab4c5a255c3385ebc8fa13044409aed6905676c030fdb3c4810915",
+    "scenario.json": "2f771b489d71823e004b191c08f4435a4bf3332fcfb21eb13ee07b2e39cac399",
     "meshes.zip": "d39e932cd9eb815ff227d619c590002fd191fd51029546af9996c8b03d4f4cc2"
+  },
+  "semantics": {
+    "objects": 105,
+    "walls": 15,
+    "floors": 12,
+    "all_roots": "fixed"
   }
 }

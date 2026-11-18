@@ -1,7 +1,7 @@
 {
   "name": "merom-house",
   "scene": "merom-house",
-  "robots": [],
+  "robots": ["w:robot-1"],
   "task": "",
   "phase": "phase0",
   "view": {

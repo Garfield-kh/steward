@@ -158,7 +158,9 @@ def _validate_body(body: Any, where: str) -> list[str]:
                     or not isinstance(inertial.get("mass"), (int, float)) or not math.isfinite(inertial["mass"])
                     or inertial["mass"] <= 0 or not _is_pose(inertial.get("pose"))):
                 errors.append(f"{lw}.inertial: explicit inertia needs positive mass/diagonal and a valid pose")
-        if any(g.get("kind") == "mesh" for g in link.get("geometry", {}).get("collision", [])) and "diagonal" not in inertial:
+        if "diagonal" not in inertial and any(
+                isinstance(g, dict) and g.get("kind") == "mesh" for g in link.get("geometry", {}).get("collision", [])
+        ):
             errors.append(f"{lw}.inertial: mesh collisions require explicit mass, pose and diagonal inertia")
         for role, geoms in link.get("geometry", {}).items():
             if role not in GEOMETRY_ROLES:

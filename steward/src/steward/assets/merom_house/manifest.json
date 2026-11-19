@@ -10,12 +10,12 @@
     "up_axis": "Z"
   },
   "entities": 132,
-  "unique_meshes": 1228,
-  "mesh_bytes": 6513784,
+  "unique_meshes": 1249,
+  "mesh_bytes": 6542344,
   "geometry": {
     "visual": {
-      "geoms": 199,
-      "mesh_triangles": 85345
+      "geoms": 220,
+      "mesh_triangles": 85933
     },
     "collision": {
       "geoms": 1163,
@@ -23,9 +23,9 @@
     }
   },
   "files": {
-    "scene.json": "cecde92fbae5c5a2e3dc3c073d904b098e0585d2a7e0e38ac4db084884d518c3",
+    "scene.json": "6230bfcd0a5ec1eb823655003521991c7209356d6f6cc3faa9c3034a9a2b7010",
     "scenario.json": "f5e3bb6e2af90425699d164097a72fb8670fd07fd0e7b966e36aa52edc6618cd",
-    "meshes.zip": "cab22c6bb85d319d85267ac8d6b6ea8744e4fad48c696ba95e528ddf45ddd718"
+    "meshes.zip": "3a3c3bda76445291a92e73d2c562bd14f1b9788a430f17ecf70db9c2870fd02c"
   },
   "semantics": {
     "objects": 105,

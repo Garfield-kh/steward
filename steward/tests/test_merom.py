@@ -14,6 +14,8 @@ import pytest
 
 from steward.authoring import merom
 from steward.authoring.service import AuthoringService
+from steward.ego.bodies import body_arm
+from steward.ego.esim import Esim
 from steward.ego.estimator import EgoEstimator
 from steward.ego.runtime import EgoRuntime, RobotLink
 from steward.ego.skills import SkillFailed
@@ -40,7 +42,7 @@ def test_bundle_meshes_and_layout_match_the_conversion_record():
     assert sum(e["body"]["links"][0]["id"] == "floor" for e in structure) == 12
     with ZipFile(merom.BUNDLE / "meshes.zip") as archive:
         refs = set()
-        for role, expected in [("visual", (199, 85345)), ("collision", (1163, 108504))]:
+        for role, expected in [("visual", (220, 85933)), ("collision", (1163, 108504))]:
             geoms = [g for e in scene["entities"] for link in e["body"]["links"]
                      for g in link["geometry"].get(role, [])]
             triangles = 0
@@ -97,6 +99,49 @@ def test_all_doorways_clear_one_and_a_half_cobot_widths(tmp_path):
                         if (first in robot_bodies) != (second in robot_bodies):
                             assert contact.dist >= -0.001, (x, y, offset, sim.model.geom(contact.geom1).name,
                                                             sim.model.geom(contact.geom2).name)
+    finally:
+        sim.stop()
+
+
+def test_doorways_stay_open_in_perception_and_southern_room_is_reachable(tmp_path):
+    service = AuthoringService(tmp_path)
+    service.ensure_scenario("merom-house")
+    scene = service.load_scenario("merom-house")["sceneState"]
+    robot = next(e for e in scene["entities"] if e["role"] == "robot")
+    planner = Esim(robot, arm=body_arm("cobot-magic", robot))
+    sim = WorldSim(scene, seed=7)
+    try:
+        openings = 0
+        for wall in sim.template.entities:
+            if wall.category.value != "wall" or len(wall.rigid.links) == 1:
+                continue
+            boxes = {links[0]: sim.entity_obb(wall.id, links) for _, links, _ in sim.perception_parts(wall)}
+            for link, lintel in boxes.items():
+                if not link.startswith("lintel_"):
+                    continue
+                assert lintel.center[2] - lintel.size[2] / 2 > 1.9
+                for pier, box in boxes.items():
+                    if pier.startswith("wall_"):
+                        offset = np.abs(np.array(box.center[:2]) - lintel.center[:2])
+                        assert max(offset - np.array(box.size[:2]) / 2) > planner.radius + planner.config.nav_margin
+                openings += 1
+        assert openings == 10
+
+        estimator = EgoEstimator(robot_model=robot)
+        joints = [sim.model.joint(n).qposadr[0] for n in sim.build.names[robot["id"]].root_joints]
+        for step, yaw in enumerate(np.linspace(-math.pi / 2, 3 * math.pi / 2, 13)):
+            sim.data.qpos[joints] = [1.0, 1.71, yaw]
+            sim.data.time = step * 0.1
+            mujoco.mj_forward(sim.model, sim.data)
+            estimator.update(sim.sensors(robot["id"]))
+        belief = estimator.to_scene()
+        # Confirm the robot saw both jambs before testing the route between them.
+        obstacles = planner._floor_obstacles(belief, set())
+        for x in (0.835, 2.636):
+            assert any(b.contains(x, 1.025) for b in obstacles)
+        assert not any(b.contains(1.56, 1.025) for b in obstacles)
+        receipt = planner.predict(belief, "navigate", {"x": 2.2, "y": -0.1, "yaw": -math.pi / 2})
+        assert receipt["feasible"] and receipt["plan"]["pathLength"] < 3.0
     finally:
         sim.stop()
 

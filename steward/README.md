@@ -44,7 +44,7 @@ Passing `--misnames-config ''` disables name mappings. A switch to `phase0-misna
 
 ## Merom house
 
-`merom-house` loads the bundled, optimized full-house layout from `phyagentos_assets_new`. Its environment uses metres and Z-up, with 132 fixed entities and 1,163 separate collision pieces: 105 objects, 15 walls and 12 floor sections. Object categories describe the furniture and contents; all imported bodies remain fixed. A Cobot Magic robot starts in the living room at `(1.7, 7.2, 0)` m, facing +Y toward the sofa. The ten doorways have 0.99–1.61 m of clear width, including baseboards. Original USD files and a USD decoder are not required.
+`merom-house` loads the bundled, optimized full-house layout from `phyagentos_assets_new`. Its environment uses metres and Z-up, with 132 fixed entities and 1,163 separate collision pieces: 105 objects, 15 walls and 12 floor sections. Object categories describe the furniture and contents; all imported bodies remain fixed. A Cobot Magic robot starts in the living room at `(1.7, 7.2, 0)` m, facing +Y toward the sofa. The ten doorways have 0.99–1.61 m of clear width, including baseboards. Wall sections and the lintel above each doorway are perceived separately so the navigation map preserves the opening. Original USD files and a USD decoder are not required.
 
 From this directory after installation:
 

@@ -44,12 +44,12 @@ AgileX 在停靠成功前保持机械臂姿态。放置规划检查目标腕姿�
 
 ## Merom 全屋场景
 
-`merom-house` 加载随包提供的 `phyagentos_assets_new` 优化版全屋布局。环境使用米和 Z 轴向上坐标，包含 132 个固定实体和 1,163 个独立碰撞部件：105 个物体、15 段墙和 12 块地板。物体类别标明家具和物品种类；所有导入刚体保持固定。Cobot Magic 机器人从客厅 `(1.7, 7.2, 0)` m 处开始，朝向沙发一侧的 +Y 方向。不需要原始 USD 文件或 USD 解码器。
+`merom-house` 加载随包提供的 `phyagentos_assets_new` 优化版全屋布局。环境使用米和 Z 轴向上坐标，包含 132 个固定实体和 1,163 个独立碰撞部件：105 个物体、15 段墙和 12 块地板。物体类别标明家具和物品种类；所有导入刚体保持固定。Cobot Magic 机器人从客厅 `(1.7, 7.2, 0)` m 处开始，朝向沙发一侧的 +Y 方向。计入踢脚线后，10 处门洞的净宽为 0.99–1.61 m。不需要原始 USD 文件或 USD 解码器。
 
 安装后，在本目录运行：
 
 ```sh
-.venv/bin/steward --root var/merom-perception up --scenario merom-house --phase phase0 --freeze-idle --wca-port 7460 --robot-port 0 --api-port 0 --no-dispatch-task --segmentation-config '' --world-harness '' --robot-harness ''
+.venv/bin/steward --root var/merom-wide-doors up --scenario merom-house --phase phase0 --freeze-idle --wca-port 7460 --robot-port 0 --api-port 0 --no-dispatch-task --segmentation-config '' --world-harness '' --robot-harness ''
 ```
 
 打开输出的控制台地址。场景也会出现在控制台场景选择器中，首次加载时安装。网格解压到指定数据目录；后续加载会保留已有场景编辑。[资产清单](src/steward/assets/merom_house/manifest.json)记录源文件哈希、坐标约定和几何数量。资产包保留优化后的工作台、桌下开放空间、分块碰撞代理和金黄色吐司。

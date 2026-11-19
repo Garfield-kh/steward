@@ -61,6 +61,46 @@ def test_bundle_meshes_and_layout_match_the_conversion_record():
         assert by_id[name]["body"]["links"][0]["geometry"]["visual"][0]["rgba"] == [0.8, 0.54, 0.27, 1]
 
 
+def test_all_doorways_clear_one_and_a_half_cobot_widths(tmp_path):
+    service = AuthoringService(tmp_path)
+    service.ensure_scenario("merom-house")
+    scene = service.load_scenario("merom-house")["sceneState"]
+    robot = next(e for e in scene["entities"] if e["id"] == "w:robot-1")
+    base = next(link for link in robot["body"]["links"] if link["id"] == "base")
+    chassis = base["geometry"]["collision"][0]
+    chassis["size"][1] *= 1.5
+    sim = WorldSim(scene)
+    try:
+        names = sim.build.names[robot["id"]]
+        joints = [sim.model.joint(name).qposadr[0] for name in names.root_joints]
+        robot_bodies = set(entity_body_ids(sim.model, names))
+        # Door centres in metres, with the yaw of a robot crossing the threshold.
+        doorways = [
+            (-2.150, -0.115, math.pi / 2),  # West bedroom closet
+            (-3.350, 1.857, 0), (-0.490, 1.795, 0),  # Kitchen exterior and hall
+            # Three doorways in the wall along the south side of the hall.
+            (0.135, 1.025, math.pi / 2), (1.560, 1.025, math.pi / 2),
+            (3.995, 1.025, math.pi / 2),
+            # East hall to the bedroom passage, bathroom and closet.
+            (2.280, 1.670, 0), (2.280, 2.980, 0),
+            (2.280, 4.950, 0),
+            (-0.645, 9.423, 0),  # Living room exterior
+        ]
+        for x, y, yaw in doorways:
+            for offset in np.linspace(-0.44, 0.44, 45):
+                xy = [x + offset * math.cos(yaw), y + offset * math.sin(yaw)]
+                for heading in (yaw, yaw + math.pi):
+                    sim.data.qpos[joints] = [*xy, heading]
+                    mujoco.mj_forward(sim.model, sim.data)
+                    for contact in sim.data.contact:
+                        first, second = sim.model.geom_bodyid[[contact.geom1, contact.geom2]]
+                        if (first in robot_bodies) != (second in robot_bodies):
+                            assert contact.dist >= -0.001, (x, y, offset, sim.model.geom(contact.geom1).name,
+                                                            sim.model.geom(contact.geom2).name)
+    finally:
+        sim.stop()
+
+
 def test_worktable_retains_metre_scale_support_and_open_space(tmp_path):
     service = AuthoringService(tmp_path)
     service.ensure_scenario("merom-house")

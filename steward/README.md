@@ -44,12 +44,12 @@ Passing `--misnames-config ''` disables name mappings. A switch to `phase0-misna
 
 ## Merom house
 
-`merom-house` loads the bundled, optimized full-house layout from `phyagentos_assets_new`. Its environment uses metres and Z-up, with 132 fixed entities and 1,163 separate collision pieces: 105 objects, 15 walls and 12 floor sections. Object categories describe the furniture and contents; all imported bodies remain fixed. A Cobot Magic robot starts in the living room at `(1.7, 7.2, 0)` m, facing +Y toward the sofa. Original USD files and a USD decoder are not required.
+`merom-house` loads the bundled, optimized full-house layout from `phyagentos_assets_new`. Its environment uses metres and Z-up, with 132 fixed entities and 1,163 separate collision pieces: 105 objects, 15 walls and 12 floor sections. Object categories describe the furniture and contents; all imported bodies remain fixed. A Cobot Magic robot starts in the living room at `(1.7, 7.2, 0)` m, facing +Y toward the sofa. The ten doorways have 0.99–1.61 m of clear width, including baseboards. Original USD files and a USD decoder are not required.
 
 From this directory after installation:
 
 ```sh
-.venv/bin/steward --root var/merom-perception up --scenario merom-house --phase phase0 --freeze-idle --wca-port 7460 --robot-port 0 --api-port 0 --no-dispatch-task --segmentation-config '' --world-harness '' --robot-harness ''
+.venv/bin/steward --root var/merom-wide-doors up --scenario merom-house --phase phase0 --freeze-idle --wca-port 7460 --robot-port 0 --api-port 0 --no-dispatch-task --segmentation-config '' --world-harness '' --robot-harness ''
 ```
 
 Open the printed console URL. The scene also appears in the console scenario selector and is installed on first load. Meshes are extracted into the selected data root; existing scene edits are retained on subsequent loads. The [asset manifest](src/steward/assets/merom_house/manifest.json) records the source hashes, coordinate convention and geometry counts. The bundle retains the optimized worktable, open space beneath it, separate collision proxies and golden toast colors.

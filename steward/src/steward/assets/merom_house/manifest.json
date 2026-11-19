@@ -23,9 +23,9 @@
     }
   },
   "files": {
-    "scene.json": "02e60351b0ab4c5a255c3385ebc8fa13044409aed6905676c030fdb3c4810915",
-    "scenario.json": "2f771b489d71823e004b191c08f4435a4bf3332fcfb21eb13ee07b2e39cac399",
-    "meshes.zip": "d39e932cd9eb815ff227d619c590002fd191fd51029546af9996c8b03d4f4cc2"
+    "scene.json": "cecde92fbae5c5a2e3dc3c073d904b098e0585d2a7e0e38ac4db084884d518c3",
+    "scenario.json": "f5e3bb6e2af90425699d164097a72fb8670fd07fd0e7b966e36aa52edc6618cd",
+    "meshes.zip": "cab22c6bb85d319d85267ac8d6b6ea8744e4fad48c696ba95e528ddf45ddd718"
   },
   "semantics": {
     "objects": 105,

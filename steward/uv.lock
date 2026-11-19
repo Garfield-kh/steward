@@ -1013,6 +1013,10 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+localization = [
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+]
 providers = [
     { name = "requests" },
 ]
@@ -1031,9 +1035,10 @@ requires-dist = [
     { name = "numpy", specifier = ">=1.26" },
     { name = "pillow", specifier = ">=10.0" },
     { name = "requests", marker = "extra == 'providers'", specifier = ">=2.31" },
+    { name = "scipy", marker = "extra == 'localization'", specifier = ">=1.11" },
     { name = "zstandard", specifier = ">=0.23" },
 ]
-provides-extras = ["providers"]
+provides-extras = ["providers", "localization"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -1,4 +1,7 @@
 """Ordinary placement and a nominal driver stroke, using Ego estimates only."""
+
+from steward.assembly_profile import enabled as _assembly_enabled
+
 from itertools import product
 import math
 import numpy as np
@@ -66,47 +69,100 @@ def driver_stroke(planner, es, params):
     body = es.entity(params['body'])
     warnings = []
     anchor = support_anchor(planner, es, body, warnings)
-    goal = np.asarray(params['head'], float)
+    if _assembly_enabled():
+        goal = np.asarray(params['head'], float) + [0., 0., .002]  # hover at head, never press into the component
+    else:
+        goal = np.asarray(params['head'], float)
     safe = max(grip[2], goal[2]+feature['lengthM']+.04)
     if safe > planner.lift_max:
         raise PredictionError('driver stroke lift outside arm range')
     failures = []
     # Best orientation first; ordinary docking retains navigation and arm reach checks.
-    for error, _, pitch, roll in options[:8]:
-        rotation = planner.arm.tool_rotation(0., roll, pitch)
-        for heading in (base_yaw, base_yaw+math.pi/2, base_yaw-math.pi/2, base_yaw+math.pi):
-            world_r = matrix_from_quat(quat_from_yaw(heading)) @ rotation
-            endpoint = goal-world_r @ tip_local
-            def wrist(yaw):
-                return (heading-yaw+math.pi) % (2*math.pi)-math.pi, float(roll)
-            def path(yaw, reach, near):
-                wy, wr = wrist(yaw)
-                at = dict(current); targets = [at]
-                changes = [dict(lift=safe), dict(reach=near), dict(wrist_yaw=wy),
-                           dict(wrist_roll=wr), dict(wrist_pitch=float(pitch)),
-                           dict(reach=reach), dict(lift=float(endpoint[2])),
-                           dict(lift=safe), dict(reach=near),
-                           dict(wrist_yaw=current['wrist_yaw']), dict(wrist_roll=current['wrist_roll']),
-                           dict(wrist_pitch=current['wrist_pitch'])]
-                for change in changes:
-                    end = {**at, **change}
-                    n = max(1, *(math.ceil(abs(end[k]-at[k])/(.01 if k in ('lift','reach') else .1)) for k in change))
-                    targets.extend({k:at[k]+(end[k]-at[k])*i/n for k in at} for i in range(1,n+1))
-                    at = end
-                return planner.arm.reachable_path(targets,
-                    start_joints={j.id:j.q.value[0] for j in planner._self(es).rigid.joints if j.q.value})
-            try:
-                approach = planner._approach(es, anchor, endpoint[:2], float(endpoint[2]), {held.id},
-                    pitches=[float(pitch)], lifts=[safe, float(endpoint[2])], wrist=wrist, approach_path=path)
-            except PredictionError as exc:
-                failures.append(str(exc)); continue
-            wy, wr = wrist(approach['yaw'])
-            plan = dict(approach, object=held.id, support=anchor.id,
-                gripSpot=endpoint[:2].tolist(), lift=float(endpoint[2]), safeLift=safe,
-                wristYaw=wy, wristRoll=wr, wristPitch=float(pitch), goal=goal.tolist(),
-                estimatedAxisErrorDeg=math.degrees(error), dwellS=.5,
-                parkWrist={k:current[k] for k in ('wrist_yaw','wrist_roll','wrist_pitch')})
-            receipt = planner._receipt(es, '_simple_driver', params, .03, [], plan)
-            receipt['warnings'].extend(warnings)
-            return receipt
+    if _assembly_enabled():
+        for error, _, pitch, roll in options[:8]:
+            rotation = planner.arm.tool_rotation(0., roll, pitch)
+            for heading in (base_yaw, base_yaw+math.pi/2, base_yaw-math.pi/2, base_yaw+math.pi):
+                world_r = matrix_from_quat(quat_from_yaw(heading)) @ rotation
+                endpoint = goal-world_r @ tip_local
+                def wrist(yaw):
+                    return (heading-yaw+math.pi) % (2*math.pi)-math.pi, float(roll)
+                def path(yaw, reach, near):
+                    wy, wr = wrist(yaw)
+                    at = dict(current); targets = [at]
+                    changes = [dict(lift=safe), dict(reach=near), dict(wrist_yaw=wy),
+                               dict(wrist_roll=wr), dict(wrist_pitch=float(pitch)),
+                               dict(reach=reach), dict(lift=float(endpoint[2])),
+                               dict(lift=safe), dict(reach=near),
+                               dict(wrist_yaw=current['wrist_yaw']), dict(wrist_roll=current['wrist_roll']),
+                               dict(wrist_pitch=current['wrist_pitch'])]
+                    for change in changes:
+                        end = {**at, **change}
+                        n = max(1, *(math.ceil(abs(end[k]-at[k])/(.01 if k in ('lift','reach') else .1)) for k in change))
+                        targets.extend({k:at[k]+(end[k]-at[k])*i/n for k in at} for i in range(1,n+1))
+                        at = end
+                    return planner.arm.reachable_path(targets,
+                        start_joints={j.id:j.q.value[0] for j in planner._self(es).rigid.joints if j.q.value})
+                try:
+                    approach = planner._approach(es, anchor, endpoint[:2], float(endpoint[2]), {held.id},
+                        pitches=[float(pitch)], lifts=[safe, float(endpoint[2])], wrist=wrist, approach_path=path)
+                except PredictionError as exc:
+                    failures.append(str(exc)); continue
+                wy, wr = wrist(approach['yaw'])
+                plan = dict(approach, object=held.id, support=anchor.id,
+                    gripSpot=endpoint[:2].tolist(), lift=float(endpoint[2]), safeLift=safe,
+                    wristYaw=wy, wristRoll=wr, wristPitch=float(pitch), goal=goal.tolist(), head=list(params['head']),
+                    estimatedAxisErrorDeg=math.degrees(error), dwellS=.5, targetSource=params.get('targetSource'),
+                    seatHole=params.get('hole'), body=params.get('body'),
+                    targetEvidence=dict(point=list(params['head']),source=params.get('targetSource'),
+                        stamp=params.get('targetObservedAt'),observed=params.get('targetObserved',False)),
+                    parkWrist={k:current[k] for k in ('wrist_yaw','wrist_roll','wrist_pitch')})
+                from steward.ego.fasten_sequence import PER_HOLE
+                if PER_HOLE:
+                    plan['driverTipGeometry'] = dict(source=feature.get('source'),
+                        featureStamp=feature.get('stamp'),polarityObserved=feature.get('polarityObserved',False),
+                        tipInGripM=tip_local.tolist(), tipOffsetWorldM=(world_r @ tip_local).tolist(),
+                        plannedGripM=endpoint.tolist(), plannedTipM=(endpoint+world_r @ tip_local).tolist(),
+                        headM=list(params['head']), tipMinusHeadM=(goal-np.asarray(params['head'])).tolist(),
+                        independentToolCalibration=feature.get('source') == 'rgbd_endpoint_width')
+                receipt = planner._receipt(es, '_simple_driver', params, .03, [], plan)
+                receipt['warnings'].extend(warnings)
+                return receipt
+    else:
+        for error, _, pitch, roll in options[:8]:
+            rotation = planner.arm.tool_rotation(0., roll, pitch)
+            for heading in (base_yaw, base_yaw+math.pi/2, base_yaw-math.pi/2, base_yaw+math.pi):
+                world_r = matrix_from_quat(quat_from_yaw(heading)) @ rotation
+                endpoint = goal-world_r @ tip_local
+                def wrist(yaw):
+                    return (heading-yaw+math.pi) % (2*math.pi)-math.pi, float(roll)
+                def path(yaw, reach, near):
+                    wy, wr = wrist(yaw)
+                    at = dict(current); targets = [at]
+                    changes = [dict(lift=safe), dict(reach=near), dict(wrist_yaw=wy),
+                               dict(wrist_roll=wr), dict(wrist_pitch=float(pitch)),
+                               dict(reach=reach), dict(lift=float(endpoint[2])),
+                               dict(lift=safe), dict(reach=near),
+                               dict(wrist_yaw=current['wrist_yaw']), dict(wrist_roll=current['wrist_roll']),
+                               dict(wrist_pitch=current['wrist_pitch'])]
+                    for change in changes:
+                        end = {**at, **change}
+                        n = max(1, *(math.ceil(abs(end[k]-at[k])/(.01 if k in ('lift','reach') else .1)) for k in change))
+                        targets.extend({k:at[k]+(end[k]-at[k])*i/n for k in at} for i in range(1,n+1))
+                        at = end
+                    return planner.arm.reachable_path(targets,
+                        start_joints={j.id:j.q.value[0] for j in planner._self(es).rigid.joints if j.q.value})
+                try:
+                    approach = planner._approach(es, anchor, endpoint[:2], float(endpoint[2]), {held.id},
+                        pitches=[float(pitch)], lifts=[safe, float(endpoint[2])], wrist=wrist, approach_path=path)
+                except PredictionError as exc:
+                    failures.append(str(exc)); continue
+                wy, wr = wrist(approach['yaw'])
+                plan = dict(approach, object=held.id, support=anchor.id,
+                    gripSpot=endpoint[:2].tolist(), lift=float(endpoint[2]), safeLift=safe,
+                    wristYaw=wy, wristRoll=wr, wristPitch=float(pitch), goal=goal.tolist(),
+                    estimatedAxisErrorDeg=math.degrees(error), dwellS=.5,
+                    parkWrist={k:current[k] for k in ('wrist_yaw','wrist_roll','wrist_pitch')})
+                receipt = planner._receipt(es, '_simple_driver', params, .03, [], plan)
+                receipt['warnings'].extend(warnings)
+                return receipt
     raise PredictionError('simple driver has no reachable stroke: '+'; '.join(failures[-1:]))

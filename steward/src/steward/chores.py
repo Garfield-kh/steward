@@ -15,6 +15,9 @@ explicit offsets in the support's own frame, and every motion goes through a Pre
 
 from __future__ import annotations
 
+from steward.assembly_profile import enabled as _assembly_enabled
+
+
 import itertools
 import math
 import re
@@ -469,17 +472,37 @@ def _settle(api: str, seconds: float = 45.0, want: int = 2) -> dict:
     exploration contains a corner of the room and little else; a round planned on it fails on its
     own emptiness ("no table in the ego state", "one piece of tableware"). Nothing is moved here:
     the robot looks, and the round starts once there is something to plan about."""
-    deadline = time.monotonic() + seconds
+    if _assembly_enabled():
+        from steward.ego import action_budget as ab
+        sensor_clock = ab.Clock()
+        deadline = ab.Deadline(sensor_clock, seconds, 'caller observation settling interval') if ab.enabled() else time.monotonic()+seconds
+    else:
+        deadline = time.monotonic() + seconds
     s: dict = {"objects": [], "relations": []}
-    while time.monotonic() < deadline:
-        try:
-            s = _summary(api)
-        except (HttpError, OSError):
-            time.sleep(2.0)  # the robot is not answering yet; the phases report a dead API themselves
-            continue
-        if _objects(s, "table") and len(tableware(s)) >= want:
-            return s
-        time.sleep(2.0)
+    if _assembly_enabled():
+        while not ab.expired(deadline):
+            try:
+                s = _summary(api)
+                if ab.enabled() and 't' in s:
+                    first = not sensor_clock.initialized
+                    sensor_clock.observe(float(s['t']))
+                    if first: deadline.start = sensor_clock.stamp
+            except (HttpError, OSError):
+                time.sleep(2.0)  # the robot is not answering yet; the phases report a dead API themselves
+                continue
+            if _objects(s, "table") and len(tableware(s)) >= want:
+                return s
+            time.sleep(2.0)
+    else:
+        while time.monotonic() < deadline:
+            try:
+                s = _summary(api)
+            except (HttpError, OSError):
+                time.sleep(2.0)  # the robot is not answering yet; the phases report a dead API themselves
+                continue
+            if _objects(s, "table") and len(tableware(s)) >= want:
+                return s
+            time.sleep(2.0)
     return s
 
 

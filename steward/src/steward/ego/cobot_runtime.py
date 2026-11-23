@@ -8,7 +8,7 @@ Ego API serves the belief to the console -- the same shape as the mobile robot's
 a scenario.
 
 A round of the mission ends with the arms parked, and the world decides when the next one
-starts: an episode reset (the console's 重置, or loading the scenario again) changes the episode
+starts: an episode reset (the console's reset action, or loading the scenario again) changes the episode
 number of the robot's readings, which the runtime reads as a reboot -- it forgets its belief and
 looks again. A reset that
 lands in the middle of a round is caught the same way: the round ends however it ends, and the

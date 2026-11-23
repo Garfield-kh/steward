@@ -3,10 +3,18 @@
 Runs inside ONE cancellable SkillExecutor job. It never starts a nested job or
 reads task definitions. Each actuator stage consumes a fresh bounded-risk receipt.
 """
+
+from steward.assembly_profile import enabled as _assembly_enabled
+
+if _assembly_enabled():
+    from steward.ego.phase_timing import timed
 from copy import deepcopy
 import math
 import json
 import time
+
+if _assembly_enabled():
+    from steward.ego import action_budget as ab
 
 import numpy as np
 
@@ -45,6 +53,11 @@ class AssembleOnto:
         job.log.append('stage ' + json.dumps(row, sort_keys=True))
 
     def check(self):
+        if _assembly_enabled():
+            from steward.ego.fasten_sequence import remaining
+            remaining(float('inf'))
+            from steward.ego.assembly_session import check_budget
+            check_budget()
         if self.ex._stop.is_set():
             raise SkillStopped()
         if self.generation != self.rt._generation:
@@ -53,14 +66,26 @@ class AssembleOnto:
     def step(self, job, skill, params, *, receipt=None):
         started = time.monotonic()
         root = job.postcondition
-        try:
-            return self._step(job, skill, params, receipt=receipt)
-        except Exception as exc:
-            self.progress(job, skill, False, str(exc), result=root)
-            raise
-        finally:
-            if root.get('motionPlans'):
-                root['motionPlans'][-1]['wallS'] = time.monotonic()-started
+        if _assembly_enabled():
+            try:
+                return self._step(job, skill, params, receipt=receipt)
+            except Exception as exc:
+                self.progress(job, skill, False, str(exc), result=root)
+                raise
+            finally:
+                from steward.ego.component_report import preserve
+                preserve(root,job)
+                if root.get('motionPlans'):
+                    root['motionPlans'][-1]['wallS'] = time.monotonic()-started
+        else:
+            try:
+                return self._step(job, skill, params, receipt=receipt)
+            except Exception as exc:
+                self.progress(job, skill, False, str(exc), result=root)
+                raise
+            finally:
+                if root.get('motionPlans'):
+                    root['motionPlans'][-1]['wallS'] = time.monotonic()-started
 
     def _step(self, job, skill, params, *, receipt=None):
         root = job.postcondition
@@ -69,11 +94,19 @@ class AssembleOnto:
         started = time.monotonic()
         job.log.append('predict '+skill)
         receipt = receipt or self.rt.predict(skill, params)
+        if _assembly_enabled():
+            if receipt.get('preconditions'):
+                from steward.ego.preconditions import record_job
+                record_job(job, receipt['preconditions'], receipt['id']+':admission')
+                root = job.postcondition
         root.setdefault('motionPlans', []).append(dict(skill=skill, params=deepcopy(params),
             wallStart=time.time()-(time.monotonic()-started), predictWallS=time.monotonic()-started,
             plan=deepcopy(receipt.get('plan', {})), withinRiskLimit=receipt.get('withinRiskLimit')))
         for warning in receipt.get('warnings', []):
             self.warn(**warning)
+        if _assembly_enabled():
+            if receipt.get('plan', {}).get('supportTargetCheck'):
+                root['supportTargetCheck'] = deepcopy(receipt['plan']['supportTargetCheck'])
         if not receipt.get('withinRiskLimit'):
             raise SkillFailed(f'{skill}: ' + '; '.join(receipt['issues']))
         try:
@@ -83,14 +116,85 @@ class AssembleOnto:
         job.log.append(f"assembly stage {skill}: {receipt['id']}")
         self.ex._begin(job, skill, receipt)
         self.check()
-        if skill == 'navigate':
-            self.ex._drive(job, plan['path'], plan['yaw'])
-        elif skill == 'pick':
-            self.ex._pick(job, plan)
-        elif skill == 'place':
-            # Check again immediately before the irreversible release sequence.
-            self.reference(self.body_id)
-            self.ex._place(job, plan)
+        if _assembly_enabled():
+            if skill == 'navigate':
+                self.ex._drive(job, plan['path'], plan['yaw'])
+            elif skill == 'pick':
+                from steward.ego import placement_xy_compensation
+                if placement_xy_compensation.enabled() and getattr(self, '_placement_xy_compensation_replay', False):
+                    plan['placementXYCompensationVerticalPick'] = True
+                from steward.ego.assembly_session import current
+                if current() is not None:
+                    current().require_pick(plan['target'])
+                self.ex._pick(job, plan)
+            elif skill == 'place':
+                # Check again immediately before the irreversible release sequence.
+                self.reference(self.body_id)
+                from steward.ego.component_registration import refresh
+                surface_after = self.ex._state()['stamp']
+                plan = refresh(self, job, plan, params)
+                from steward.ego.place_surface import refresh as refresh_surface
+                plan = refresh_surface(self, job, plan, params, after=surface_after,
+                    raw=getattr(self, '_component_native_frame', None))
+                if plan.get('lowerSeatPlacement'):
+                    # The support has already been turned over. Use its posterior
+                    # at the destination, not a surface seen before a source trip.
+                    self.ex._dock(job, plan)
+                    self.look(self.ex._state()['stamp'], cycles=1)
+                    fresh = self.rt.predict('place', params)
+                    refresh = dict(withinRiskLimit=bool(fresh.get('withinRiskLimit')),
+                                   issues=fresh.get('issues', []),
+                                   surface=deepcopy(fresh.get('plan', {}).get('lowerSeatPlacement')))
+                    root['lowerSeatRefresh'] = refresh
+                    if fresh.get('withinRiskLimit'):
+                        plan = self.rt._consume_receipt(fresh)
+                        deadline = getattr(self.ex, '_primitive_deadline', None)
+                        try:
+                            self.ex._begin(job, skill, fresh)
+                        finally:
+                            if deadline is not None:
+                                self.ex._primitive_deadline = ab.limited(deadline, self.ex._primitive_deadline)
+                        self.check()
+                        refresh['receipt'] = deepcopy(fresh)
+                    else:
+                        from steward.ego.assembly_destination import refresh_contradiction
+                        contradicted = refresh_contradiction(self, plan, fresh)
+                        if contradicted:
+                            root['supportTargetCheck'] = contradicted
+                            raise SkillFailed('assembly destination refresh not admitted; keeping component: '+
+                                              contradicted['reason'])
+                        refresh['fallback'] = 'original_admitted_release'
+                    root['lowerSeatPlacement'] = deepcopy(plan['lowerSeatPlacement'])
+                    if plan.get('placementSurface'):
+                        plan['surfaceRefreshed'] = True
+                        root['placementSurface'] = deepcopy(plan['placementSurface'])
+                from steward.ego.assembly_destination import require as require_destination
+                require_destination(self, job, plan, params)
+                from steward.ego.assembly_precision import placement, post_component
+                try:
+                    from steward.ego.working_face import placement as stationary_placement
+                    with stationary_placement(self, job, plan, params), placement(self, job, plan, params):
+                        self.ex._place(job, plan)
+                    post_component(self, job, plan, params)
+                finally:
+                    if plan.get('supportTargetCheck'):
+                        root['supportTargetCheck'] = deepcopy(plan['supportTargetCheck'])
+                    from steward.ego.component_registration import post_orientation
+                    post_orientation(self, job, plan)
+                    from steward.ego.geometry_relocalization import provenance
+                    root.update(provenance(plan.get('placementTarget'), plan.get('releasedAt'), self.rt.estimator),
+                        releasedAt=plan.get('releasedAt'))
+                    if plan.get('precision'):
+                        root['precision'] = deepcopy(plan['precision'])
+        else:
+            if skill == 'navigate':
+                self.ex._drive(job, plan['path'], plan['yaw'])
+            elif skill == 'pick':
+                self.ex._pick(job, plan)
+            elif skill == 'place':
+                # Check again immediately before the irreversible release sequence.
+                self.reference(self.body_id)
+                self.ex._place(job, plan)
         self.progress(job, skill, True, 'executed with bounded-risk receipt', result=root)
         return plan
 
@@ -142,58 +246,117 @@ class AssembleOnto:
                 latestSampleRangeM=newest['range'] if newest else None,
                 sampler={t.id: deepcopy(t.interface_sample_status) for t in candidates})
 
-    def look(self, since, source=None, *, cycles=3):
-        """Wait for N completed imaged instants after arrival, not N body polls.
+    if _assembly_enabled():
+        @timed("observation")
+        def look(self, since, source=None, *, cycles=3):
+            """Wait for N completed imaged instants after arrival, not N body polls.
 
-        Wall time is only a no-progress watchdog, reset by every imaged cycle.
-        Slow but progressing perception gets its full frame budget.
-        """
-        with self.rt._lock:
-            start_cycle = self.rt.estimator.perception_cycles
-        seen, statuses, rejects, track_ids = set(), set(), {}, set()
-        started = progressed = time.monotonic()
-        last_cycle = start_cycle
-        result = dict(since=since, requestedCycles=cycles, waitedCycles=0)
-        job = getattr(self, '_observation_job', None)
-        if job is not None:
-            job.postcondition.setdefault('observationWaits', []).append(result)
-        while True:
-            self.check()
+            Wall time is only a no-progress watchdog, reset by every imaged cycle.
+            Slow but progressing perception gets its full frame budget.
+            """
             with self.rt._lock:
-                est = self.rt.estimator
-                for seq, stamp in est.perception_stamps:
-                    if seq >= start_cycle and stamp > since:
-                        seen.add(seq)
-                if est.perception_cycles != last_cycle:
-                    progressed = time.monotonic()
-                    last_cycle = est.perception_cycles
-                tracks = [t for t in est.tracks.values() if source is None or self.matches(t, source)]
-                fresh = any((t.assembly_observation and t.assembly_observation['stamp'] > since)
-                            if source is None else any(v['stamp'] > since for v in t.interface_views)
-                            for t in tracks)
-                for t in tracks:
-                    status = t.interface_sample_status
-                    key = (t.id, status.get('stamp'))
-                    if status.get('stamp', -math.inf) > since and key not in statuses:
-                        statuses.add(key)
-                        for reason, count in status.get('rejected', {}).items():
-                            rejects[reason] = rejects.get(reason, 0)+count
-                        outcome = status.get('outcome', 'unknown')
-                        rejects[outcome] = rejects.get(outcome, 0)+1
-                result.update(self.observation_diagnostics(source), waitedCycles=len(seen),
-                              samplerOutcomeCounts=rejects, wallS=time.monotonic()-started)
-                track_ids.update(result['matchedTrackIds'])
-                result['seenTrackIds'] = sorted(track_ids)
-                result['trackIdChanges'] = sorted(tid for tid in track_ids if source and tid != source['id'])
-            if fresh:
-                result['reason'] = 'fresh_sample'
-                return result
-            if len(seen) >= cycles or time.monotonic()-progressed >= 180 or time.monotonic()-started >= 300:
-                result['reason'] = 'frame_budget_exhausted' if len(seen) >= cycles else 'observation_timeout_continue'
-                if source is not None:
-                    self.warn('no_fresh_view', diagnostics=deepcopy(result), ageS=result.get('latestSampleAgeS'), rangeM=result.get('latestSampleRangeM'))
-                return result
-            self.ex._wait(.25)
+                start_cycle = self.rt.estimator.perception_cycles
+            seen, statuses, rejects, track_ids = set(), set(), {}, set()
+            started = progressed = time.monotonic()
+            total_deadline = ab.make(self.ex, ab.observation(self.ex, cycles) if ab.enabled() else 300., 'requested frame count * existing frame window')
+            progress_deadline = ab.make(self.ex, ab.observation(self.ex) if ab.enabled() else 180., 'one existing frame window without a completed frame')
+            last_cycle = start_cycle
+            result = dict(since=since, requestedCycles=cycles, waitedCycles=0)
+            job = getattr(self, '_observation_job', None)
+            if job is not None:
+                job.postcondition.setdefault('observationWaits', []).append(result)
+            while True:
+                self.check()
+                with self.rt._lock:
+                    est = self.rt.estimator
+                    for seq, stamp in est.perception_stamps:
+                        if seq >= start_cycle and stamp > since:
+                            seen.add(seq)
+                    if est.perception_cycles != last_cycle:
+                        progressed = time.monotonic()
+                        progress_deadline = ab.make(self.ex, ab.observation(self.ex) if ab.enabled() else 180.)
+                        last_cycle = est.perception_cycles
+                    tracks = [t for t in est.tracks.values() if source is None or self.matches(t, source)]
+                    fresh = any((t.assembly_observation and t.assembly_observation['stamp'] > since)
+                                if source is None else any(v['stamp'] > since for v in t.interface_views)
+                                for t in tracks)
+                    for t in tracks:
+                        status = t.interface_sample_status
+                        key = (t.id, status.get('stamp'))
+                        if status.get('stamp', -math.inf) > since and key not in statuses:
+                            statuses.add(key)
+                            for reason, count in status.get('rejected', {}).items():
+                                rejects[reason] = rejects.get(reason, 0)+count
+                            outcome = status.get('outcome', 'unknown')
+                            rejects[outcome] = rejects.get(outcome, 0)+1
+                    result.update(self.observation_diagnostics(source), waitedCycles=len(seen),
+                                  samplerOutcomeCounts=rejects, wallS=time.monotonic()-started)
+                    track_ids.update(result['matchedTrackIds'])
+                    result['seenTrackIds'] = sorted(track_ids)
+                    if ab.enabled(): result.update(clock='simulation',simS=round(total_deadline.sim_s,3))
+                    result['trackIdChanges'] = sorted(tid for tid in track_ids if source and tid != source['id'])
+                if fresh:
+                    result['reason'] = 'fresh_sample'
+                    return result
+                if len(seen) >= cycles or ab.expired(progress_deadline) or ab.expired(total_deadline):
+                    result['reason'] = 'frame_budget_exhausted' if len(seen) >= cycles else 'observation_timeout_continue'
+                    if source is not None:
+                        self.warn('no_fresh_view', diagnostics=deepcopy(result), ageS=result.get('latestSampleAgeS'), rangeM=result.get('latestSampleRangeM'))
+                    return result
+                self.ex._wait(.25)
+    else:
+        def look(self, since, source=None, *, cycles=3):
+            """Wait for N completed imaged instants after arrival, not N body polls.
+
+            Wall time is only a no-progress watchdog, reset by every imaged cycle.
+            Slow but progressing perception gets its full frame budget.
+            """
+            with self.rt._lock:
+                start_cycle = self.rt.estimator.perception_cycles
+            seen, statuses, rejects, track_ids = set(), set(), {}, set()
+            started = progressed = time.monotonic()
+            last_cycle = start_cycle
+            result = dict(since=since, requestedCycles=cycles, waitedCycles=0)
+            job = getattr(self, '_observation_job', None)
+            if job is not None:
+                job.postcondition.setdefault('observationWaits', []).append(result)
+            while True:
+                self.check()
+                with self.rt._lock:
+                    est = self.rt.estimator
+                    for seq, stamp in est.perception_stamps:
+                        if seq >= start_cycle and stamp > since:
+                            seen.add(seq)
+                    if est.perception_cycles != last_cycle:
+                        progressed = time.monotonic()
+                        last_cycle = est.perception_cycles
+                    tracks = [t for t in est.tracks.values() if source is None or self.matches(t, source)]
+                    fresh = any((t.assembly_observation and t.assembly_observation['stamp'] > since)
+                                if source is None else any(v['stamp'] > since for v in t.interface_views)
+                                for t in tracks)
+                    for t in tracks:
+                        status = t.interface_sample_status
+                        key = (t.id, status.get('stamp'))
+                        if status.get('stamp', -math.inf) > since and key not in statuses:
+                            statuses.add(key)
+                            for reason, count in status.get('rejected', {}).items():
+                                rejects[reason] = rejects.get(reason, 0)+count
+                            outcome = status.get('outcome', 'unknown')
+                            rejects[outcome] = rejects.get(outcome, 0)+1
+                    result.update(self.observation_diagnostics(source), waitedCycles=len(seen),
+                                  samplerOutcomeCounts=rejects, wallS=time.monotonic()-started)
+                    track_ids.update(result['matchedTrackIds'])
+                    result['seenTrackIds'] = sorted(track_ids)
+                    result['trackIdChanges'] = sorted(tid for tid in track_ids if source and tid != source['id'])
+                if fresh:
+                    result['reason'] = 'fresh_sample'
+                    return result
+                if len(seen) >= cycles or time.monotonic()-progressed >= 180 or time.monotonic()-started >= 300:
+                    result['reason'] = 'frame_budget_exhausted' if len(seen) >= cycles else 'observation_timeout_continue'
+                    if source is not None:
+                        self.warn('no_fresh_view', diagnostics=deepcopy(result), ageS=result.get('latestSampleAgeS'), rangeM=result.get('latestSampleRangeM'))
+                    return result
+                self.ex._wait(.25)
 
     @staticmethod
     def matches(track, source):
@@ -243,41 +406,79 @@ class AssembleOnto:
                     occlusion='unknown', cameraPositionM=pose['p']))
             return cameras
 
-    def view(self, job, support, origin, turn):
-        self._observation_job = job
-        if job.postcondition is None:
-            job.postcondition = {}
-        box, _, top = entity_box(support)
-        target = getattr(self, 'observation_target', [box.cx, box.cy, top])
-        close = getattr(self, '_close_view', False)
-        # The retry approaches the support edge facing the target, not a wider orbit.
-        if close:
-            offset = np.asarray(target[:2])-[box.cx, box.cy]
-            if np.linalg.norm(offset) > .02:
-                origin, turn = math.atan2(offset[1], offset[0]), 0
-        candidates = []
-        for delta in (0, .25, -.25, .5, -.5):
-            angle = origin+turn+delta
-            edge = min(box.hx/max(abs(math.cos(angle-box.yaw)), 1e-9),
-                       box.hy/max(abs(math.sin(angle-box.yaw)), 1e-9))
-            radius = max(.60 if close else .75, edge+(.30 if close else .45))
-            x,y = box.cx+radius*math.cos(angle), box.cy+radius*math.sin(angle)
-            params = {'x':x, 'y':y, 'yaw':math.atan2(target[1]-y,target[0]-x)}
-            geometry = self.camera_geometry(target, params)
-            visible = [c for c in geometry if c['centreInFov']]
-            score = min((c['rangeM']+.005*abs(c['verticalOffsetDeg']) for c in visible), default=math.inf)
-            candidates.append((score, params, geometry))
-        for _, params, geometry in sorted(candidates, key=lambda c: c[0]):
-            receipt = self.rt.predict('navigate', params)
-            if receipt.get('withinRiskLimit'):
-                self.step(job, 'navigate', params, receipt=receipt)
-                arrived = self.ex._state()
-                job.postcondition.setdefault('observationPoses', []).append(dict(
-                    retry=close, commanded=params, arrivedAt=arrived['stamp'],
-                    odometry=arrived['odometry'], cameras=self.camera_geometry(target, arrived['odometry']),
-                    pointing='base_yaw; camera mounts from robot FK'))
-                return arrived['stamp']
-        raise SkillFailed('no reachable observation pose around the perceived support')
+    if _assembly_enabled():
+        @timed("observation_trip")
+        def view(self, job, support, origin, turn):
+            self._observation_job = job
+            if job.postcondition is None:
+                job.postcondition = {}
+            box, _, top = entity_box(support)
+            target = getattr(self, 'observation_target', [box.cx, box.cy, top])
+            close = getattr(self, '_close_view', False)
+            # The retry approaches the support edge facing the target, not a wider orbit.
+            if close:
+                offset = np.asarray(target[:2])-[box.cx, box.cy]
+                if np.linalg.norm(offset) > .02:
+                    origin, turn = math.atan2(offset[1], offset[0]), 0
+            candidates = []
+            for delta in (0, .25, -.25, .5, -.5):
+                angle = origin+turn+delta
+                edge = min(box.hx/max(abs(math.cos(angle-box.yaw)), 1e-9),
+                           box.hy/max(abs(math.sin(angle-box.yaw)), 1e-9))
+                radius = max(.60 if close else .75, edge+(.30 if close else .45))
+                x,y = box.cx+radius*math.cos(angle), box.cy+radius*math.sin(angle)
+                params = {'x':x, 'y':y, 'yaw':math.atan2(target[1]-y,target[0]-x)}
+                geometry = self.camera_geometry(target, params)
+                visible = [c for c in geometry if c['centreInFov']]
+                score = min((c['rangeM']+.005*abs(c['verticalOffsetDeg']) for c in visible), default=math.inf)
+                candidates.append((score, params, geometry))
+            for _, params, geometry in sorted(candidates, key=lambda c: c[0]):
+                receipt = self.rt.predict('navigate', params)
+                if receipt.get('withinRiskLimit'):
+                    self.step(job, 'navigate', params, receipt=receipt)
+                    arrived = self.ex._state()
+                    job.postcondition.setdefault('observationPoses', []).append(dict(
+                        retry=close, commanded=params, arrivedAt=arrived['stamp'],
+                        odometry=arrived['odometry'], cameras=self.camera_geometry(target, arrived['odometry']),
+                        pointing='base_yaw; camera mounts from robot FK'))
+                    return arrived['stamp']
+            raise SkillFailed('no reachable observation pose around the perceived support')
+    else:
+        def view(self, job, support, origin, turn):
+            self._observation_job = job
+            if job.postcondition is None:
+                job.postcondition = {}
+            box, _, top = entity_box(support)
+            target = getattr(self, 'observation_target', [box.cx, box.cy, top])
+            close = getattr(self, '_close_view', False)
+            # The retry approaches the support edge facing the target, not a wider orbit.
+            if close:
+                offset = np.asarray(target[:2])-[box.cx, box.cy]
+                if np.linalg.norm(offset) > .02:
+                    origin, turn = math.atan2(offset[1], offset[0]), 0
+            candidates = []
+            for delta in (0, .25, -.25, .5, -.5):
+                angle = origin+turn+delta
+                edge = min(box.hx/max(abs(math.cos(angle-box.yaw)), 1e-9),
+                           box.hy/max(abs(math.sin(angle-box.yaw)), 1e-9))
+                radius = max(.60 if close else .75, edge+(.30 if close else .45))
+                x,y = box.cx+radius*math.cos(angle), box.cy+radius*math.sin(angle)
+                params = {'x':x, 'y':y, 'yaw':math.atan2(target[1]-y,target[0]-x)}
+                geometry = self.camera_geometry(target, params)
+                visible = [c for c in geometry if c['centreInFov']]
+                score = min((c['rangeM']+.005*abs(c['verticalOffsetDeg']) for c in visible), default=math.inf)
+                candidates.append((score, params, geometry))
+            for _, params, geometry in sorted(candidates, key=lambda c: c[0]):
+                receipt = self.rt.predict('navigate', params)
+                if receipt.get('withinRiskLimit'):
+                    self.step(job, 'navigate', params, receipt=receipt)
+                    arrived = self.ex._state()
+                    job.postcondition.setdefault('observationPoses', []).append(dict(
+                        retry=close, commanded=params, arrivedAt=arrived['stamp'],
+                        odometry=arrived['odometry'], cameras=self.camera_geometry(target, arrived['odometry']),
+                        pointing='base_yaw; camera mounts from robot FK'))
+                    return arrived['stamp']
+            raise SkillFailed('no reachable observation pose around the perceived support')
 
     def stationary_since(self, source, support, track, result):
         # The only motion veto is the common body-only, post-grasp raw-view test.
@@ -295,28 +496,53 @@ class AssembleOnto:
                 self.warn('body_motion_estimate_continue', detail=record['reason'])
         return True, 'no_direct_body_motion; stationary_assumption'
 
-    def freeze(self, job, plan, support, origin):
-        self._observation_job = job
-        self.check()
-        with self.rt._lock:
-            old = self.rt.estimator.stationary_assemblies.records.get(plan['body'])
-        if old is not None:
-            self.reference(plan['body'])
-            self.progress(job, 'register', True, 'reuse stationary estimate')
-            return
-        source = plan['bodySource']
-        self.observation_target = source['position']
-        category = 'airplane_fuselage' if source['category'] == 'toy_airplane' else source['category']
-        frame, holes = SCREW_HOLE_FRAMES.get(category), screw_holes(category)
-        track = self.locate(source)
-        diag = {}
-        multiview_interface_box(list(track.interface_views), frame, holes,
-                                after=self.rt.estimator.stamp-20, diagnostics=diag)
-        job.postcondition.setdefault('registrationAttempts', []).append(diag)
-        self.warn('registration_quality', diagnostics=deepcopy(diag))
-        result = self.best_estimate(track)
-        self._store_registration(job, plan, support, category, track, result)
-        self.progress(job, 'register', True, 'best available estimate; quality is advisory')
+    if _assembly_enabled():
+        @timed("registration")
+        def freeze(self, job, plan, support, origin):
+            self._observation_job = job
+            self.check()
+            with self.rt._lock:
+                old = self.rt.estimator.stationary_assemblies.records.get(plan['body'])
+            if old is not None:
+                self.reference(plan['body'])
+                self.progress(job, 'register', True, 'reuse stationary estimate')
+                return
+            source = plan['bodySource']
+            self.observation_target = source['position']
+            category = 'airplane_fuselage' if source['category'] == 'toy_airplane' else source['category']
+            frame, holes = SCREW_HOLE_FRAMES.get(category), screw_holes(category)
+            track = self.locate(source)
+            diag = {}
+            multiview_interface_box(list(track.interface_views), frame, holes,
+                                    after=self.rt.estimator.stamp-20, diagnostics=diag)
+            job.postcondition.setdefault('registrationAttempts', []).append(diag)
+            self.warn('registration_quality', diagnostics=deepcopy(diag))
+            result = self.best_estimate(track)
+            self._store_registration(job, plan, support, category, track, result)
+            self.progress(job, 'register', True, 'best available estimate; quality is advisory')
+    else:
+        def freeze(self, job, plan, support, origin):
+            self._observation_job = job
+            self.check()
+            with self.rt._lock:
+                old = self.rt.estimator.stationary_assemblies.records.get(plan['body'])
+            if old is not None:
+                self.reference(plan['body'])
+                self.progress(job, 'register', True, 'reuse stationary estimate')
+                return
+            source = plan['bodySource']
+            self.observation_target = source['position']
+            category = 'airplane_fuselage' if source['category'] == 'toy_airplane' else source['category']
+            frame, holes = SCREW_HOLE_FRAMES.get(category), screw_holes(category)
+            track = self.locate(source)
+            diag = {}
+            multiview_interface_box(list(track.interface_views), frame, holes,
+                                    after=self.rt.estimator.stamp-20, diagnostics=diag)
+            job.postcondition.setdefault('registrationAttempts', []).append(diag)
+            self.warn('registration_quality', diagnostics=deepcopy(diag))
+            result = self.best_estimate(track)
+            self._store_registration(job, plan, support, category, track, result)
+            self.progress(job, 'register', True, 'best available estimate; quality is advisory')
 
     def best_estimate(self, track):
         category = 'airplane_fuselage' if track.category == 'toy_airplane' else track.category
@@ -440,13 +666,39 @@ class AssembleOnto:
                 'passed': False if any(s['passed'] is False for s in samples) else None}
 
     def run(self, job, plan):
+        if _assembly_enabled():
+            job.postcondition = job.postcondition or {}
         self._active_stage = 'register'
-        try:
-            self._run(job, plan)
-        except Exception as exc:
-            if not (job.postcondition or {}).get('progress', []) or job.postcondition['progress'][-1]['ok']:
-                self.progress(job, self._active_stage, False, str(exc))
-            raise
+        if _assembly_enabled():
+            try:
+                self._run(job, plan)
+            except Exception as exc:
+                job.postcondition['failure'] = str(exc)
+                if not (job.postcondition or {}).get('progress', []) or job.postcondition['progress'][-1]['ok']:
+                    self.progress(job, self._active_stage, False, str(exc))
+                raise
+            finally:
+                with self.rt._lock:
+                    record = self.rt.estimator.stationary_assemblies.records.get(plan['body'])
+                    if record:
+                        record['reference'].pop('componentHoleRegistration', None)
+                from steward.ego.assembly_status import assembly_state
+                state = assembly_state(self.rt, plan, job.postcondition)
+                job.postcondition = {'assemblyState':state, **job.postcondition}
+                job.postcondition['retry'] = dict(allowed=True, before=state['nextAction'])
+                from steward.ego.assembly_precision import publish
+                publish(job)
+                if job.postcondition.get('precisionSummary'):
+                    job.message = job.postcondition['precisionSummary']
+                from steward.ego.preconditions import publish
+                publish(job)
+        else:
+            try:
+                self._run(job, plan)
+            except Exception as exc:
+                if not (job.postcondition or {}).get('progress', []) or job.postcondition['progress'][-1]['ok']:
+                    self.progress(job, self._active_stage, False, str(exc))
+                raise
 
     def _run(self, job, plan):
         self.body_id = plan['body']
@@ -466,8 +718,23 @@ class AssembleOnto:
         # Find the loose component afresh; never look up the body through segmentation again.
         source=plan['partSource']
         self.observation_target = source['position']
+        if _assembly_enabled():
+            from steward.ego.fasten_plan import mating_holes
+            from steward.ego.assembly_status import require_interface_access
+            scene = self.rt.ego_state()
+            from steward.ego.working_face import prepare
+            prepare(self, self.body_id, {h['id'] for h in mating_holes(self.rt.esim, scene, plan)})
+            scene = self.rt.ego_state()
+            access = require_interface_access(self.rt.esim, scene.entity(self.body_id),
+                {h['id'] for h in mating_holes(self.rt.esim, scene, plan)})
+            job.postcondition['interfaceAccess'] = access
+            if access['status'] != 'estimated_accessible':
+                self.warn('interface_face_unresolved', access=access)
         self._active_stage = 'pick'
         part = self.prepare_part(source)
+        if _assembly_enabled():
+            from steward.ego.component_registration import prepare, install
+            component_registration = prepare(self, job, plan, part)
         receipt = self.rt.predict('pick', {'target':part.id})
         if not receipt['plan'].get('protectGraspFrame'):
             self.warn('grasp_frame_unprotected', entity=part.id,
@@ -495,41 +762,119 @@ class AssembleOnto:
             params['closeRelease'] = True
         if plan.get('deferVerify'):
             params['stayNear'] = True
+        if _assembly_enabled():
+            if plan.get('lowerSeatPlacement'):
+                params['lowerSeatPlacement'] = True
+            install(self, job, component_registration, held)
+            from steward.ego.inhand import observe as observe_inhand
+            observe_inhand(self, job, held, params)
         place=self.rt.predict('place',params)
+        if _assembly_enabled():
+            if component_registration and not place.get('withinRiskLimit'):
+                from steward.ego.component_registration import fallback
+                from steward.ego.component_report import missing
+                missing(self,job,'place_admission')
+                fallback(job.postcondition['componentHoleAlignment'], 'registered_place_not_admitted')
+                with self.rt._lock:
+                    self.rt.estimator.stationary_assemblies.records[self.body_id]['reference'].pop('componentHoleRegistration', None)
+                place=self.rt.predict('place',params)
         assembly_report = job.postcondition
-        try:
-            self.step(job,'place',params,receipt=place)
-        finally:
-            # Release may have succeeded before retreat failed; never retry that component blindly.
-            with self.rt._lock:
-                record=deepcopy(self.rt.estimator.stationary_assemblies.records.get(self.body_id, {'parts':[], 'reference':{}}))
-            released=any(p['entity']==held.id for p in record['parts'])
-            placement_evidence = job.postcondition
-            job.postcondition = assembly_report
-            if placement_evidence is not assembly_report:
-                job.postcondition['placementEvidence'] = placement_evidence
-            job.postcondition.update({'releaseExecuted':released,'part':held.id,'body':self.body_id,
-                               'passed':None,'samples':[], 'reference':record['reference']})
-            with self.rt._lock:
-                child = self.rt.estimator.stationary_assemblies.records.get(held.id)
-                if child is not None:
-                    job.postcondition['releasedReference'] = deepcopy(child['reference'])
+        if _assembly_enabled():
+            try:
+                executed_place = self.step(job,'place',params,receipt=place)
+                if executed_place and executed_place.get('precision'):
+                    assembly_report['precision'] = deepcopy(executed_place['precision'])
+                if executed_place and executed_place.get('releaseXYCheck'):
+                    assembly_report['releaseXYCheck'] = deepcopy(executed_place['releaseXYCheck'])
+            finally:
+                # Release may have succeeded before retreat failed; never retry that component blindly.
+                with self.rt._lock:
+                    record=deepcopy(self.rt.estimator.stationary_assemblies.records.get(self.body_id, {'parts':[], 'reference':{}}))
+                released=any(p['entity']==held.id for p in record['parts'])
+                placement_evidence = job.postcondition
+                job.postcondition = assembly_report
+                if placement_evidence is not assembly_report:
+                    job.postcondition['placementEvidence'] = placement_evidence
+                    for key in ('placementReadiness', 'placementReadinessHistory'):
+                        if key in placement_evidence:
+                            job.postcondition[key] = placement_evidence[key]
+                job.postcondition.update({'releaseExecuted':released,'part':held.id,'body':self.body_id,
+                                   'passed':None,'samples':[], 'reference':record['reference']})
+                with self.rt._lock:
+                    child = self.rt.estimator.stationary_assemblies.records.get(held.id)
+                    if child is not None:
+                        job.postcondition['releasedReference'] = deepcopy(child['reference'])
+            from steward.ego import grasp_binding
+            binding = grasp_binding.receipt(self.rt.estimator, held.id)
+            if binding:
+                job.postcondition.update(grasp_binding.public(binding))
+            if binding and not binding['transportCommitted'] and binding.get('newReleaseExecuted'):
+                # The load was placed, even though no named-member registration was
+                # created. Finish the result view rather than retrying that member.
+                self.look(binding['releasedAt'], cycles=1)
+                job.postcondition.update(grasp_binding.public(binding), newReleaseExecuted=True,
+                    specifiedTargetReleased=False, releaseExecuted=False, releasedAt=binding['releasedAt'],
+                    placementCheck=dict(passed=None,status='unknown',reason='load_identity_unconfirmed'),
+                    resultChecked=True, confirmation='unconfirmed', canContinue=True)
+                return
+        else:
+            try:
+                self.step(job,'place',params,receipt=place)
+            finally:
+                # Release may have succeeded before retreat failed; never retry that component blindly.
+                with self.rt._lock:
+                    record=deepcopy(self.rt.estimator.stationary_assemblies.records.get(self.body_id, {'parts':[], 'reference':{}}))
+                released=any(p['entity']==held.id for p in record['parts'])
+                placement_evidence = job.postcondition
+                job.postcondition = assembly_report
+                if placement_evidence is not assembly_report:
+                    job.postcondition['placementEvidence'] = placement_evidence
+                job.postcondition.update({'releaseExecuted':released,'part':held.id,'body':self.body_id,
+                                   'passed':None,'samples':[], 'reference':record['reference']})
+                with self.rt._lock:
+                    child = self.rt.estimator.stationary_assemblies.records.get(held.id)
+                    if child is not None:
+                        job.postcondition['releasedReference'] = deepcopy(child['reference'])
         if not released:
             raise SkillFailed('placement did not record a release')
         self._active_stage = 'retreat_verify'
         after=max(p['releasedAt'] for p in record['parts'])
         job.postcondition['releasedAt'] = after
-        if plan.get('deferVerify'):
-            # Read whatever independent image is already available. No camera
-            # wait, base retreat or two-view tour before the first fastener.
-            from steward.ego.assembly_motion import placement_check
-            expected = next(p for p in record['parts'] if p['entity'] == held.id)
-            with self.rt._lock:
-                check = placement_check(self.rt.estimator.tracks.values(), source, expected,
-                                        after, self.rt.estimator.stamp)
-            job.postcondition.update(placementCheck=check, passed=check['passed'],
-                                     verificationDeferred=True)
-            return
+        if _assembly_enabled():
+            from steward.ego.placement_ready import ENABLED as readiness_enabled
+            if plan.get('deferVerify') or readiness_enabled:
+                # Read whatever independent image is already available. No camera
+                # wait, base retreat or two-view tour before the first fastener.
+                from steward.ego.assembly_motion import placement_check
+                expected = next(p for p in record['parts'] if p['entity'] == held.id)
+                with self.rt._lock:
+                    check = placement_check(self.rt.estimator.tracks.values(), source, expected,
+                                            after, self.rt.estimator.stamp)
+                from steward.ego.assembly_landing import ENABLED as all_paths
+                readiness = job.postcondition.get('placementReadiness')
+                if readiness is not None and (not all_paths or check.get('passed') is not False):
+                    check = readiness
+                elif all_paths and check.get('passed') is False:
+                    job.postcondition['placementReadiness'] = dict(check, reason=check.get('reason', 'component_missed_body'))
+                job.postcondition.update(placementCheck=check, passed=check['passed'],
+                                         verificationDeferred=True)
+                from steward.ego.inhand import refresh_evidence
+                refresh_evidence(self, job, held.id)
+                if all_paths and check.get('passed') is False:
+                    raise SkillFailed('placement readiness failed: '+check.get('reason','component_missed_body'))
+                return
+        else:
+            if plan.get('deferVerify'):
+                # Read whatever independent image is already available. No camera
+                # wait, base retreat or two-view tour before the first fastener.
+                from steward.ego.assembly_motion import placement_check
+                expected = next(p for p in record['parts'] if p['entity'] == held.id)
+                with self.rt._lock:
+                    check = placement_check(self.rt.estimator.tracks.values(), source, expected,
+                                            after, self.rt.estimator.stamp)
+                job.postcondition.update(placementCheck=check, passed=check['passed'],
+                                         verificationDeferred=True)
+                return
         samples=[]
         self.observation_target = record['reference']['position']
         for turn in (0,.65):
@@ -559,6 +904,9 @@ class AssembleOnto:
             check = placement_check(self.rt.estimator.tracks.values(), source, expected,
                                     after, self.rt.estimator.stamp)
         job.postcondition['placementCheck'] = check
+        if _assembly_enabled():
+            from steward.ego.inhand import refresh_evidence
+            refresh_evidence(self, job, held.id)
         if check['passed'] is not None:
             job.postcondition['passed'] = check['passed']
         self.progress(job, 'retreat_verify', job.postcondition['passed'] is True,

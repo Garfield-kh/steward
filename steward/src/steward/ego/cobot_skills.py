@@ -22,10 +22,18 @@ retreat real.
 
 from __future__ import annotations
 
+from steward.assembly_profile import enabled as _assembly_enabled
+
+
+if _assembly_enabled():
+    from steward.ego.phase_timing import timed
+
 import itertools
 import math
 import threading
 import time
+if _assembly_enabled():
+    from steward.ego import action_budget as ab
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -56,9 +64,10 @@ class MotionConfig:
     max_tool_tilt: float = 0.7     # rad the tool may tilt off the requested orientation (wrist limits)
     # insert_screw_into_hole needs the shaft nearly vertical: a 0.5 rad wrist tilt lays the tip
     # sideways in the hole and the screw falls over on release.
-    max_insert_tilt: float = 0.12
-    # drive_screw bit-down can lean a little more (pressing a head), still far below general pick tilt.
-    max_drive_tilt: float = 0.25
+    if not _assembly_enabled():
+        max_insert_tilt: float = 0.12
+        # drive_screw bit-down can lean a little more (pressing a head), still far below general pick tilt.
+        max_drive_tilt: float = 0.25
     tcp_tolerance: float = 0.015   # a solved pose further than this from the pinch point is refused
     grasp_grip_wait_s: float = 0.4
     # Chassis motion, the mobile robot's numbers: the TRACER is not faster in the twin.
@@ -80,10 +89,19 @@ class Job:
     finished: float = 0.0
     log: list[str] = field(default_factory=list)
 
-    def to_dict(self) -> dict:
-        return {"id": self.id, "skill": self.skill, "receipt": self.receipt, "state": self.state,
-                "message": self.message, "started": self.started, "finished": self.finished,
-                "log": self.log[-20:]}
+    if _assembly_enabled():
+        def to_dict(self):
+            from dataclasses import asdict
+            from steward.ego.phase_timing import snapshot
+            result = asdict(self)
+            if hasattr(self, 'phaseTiming'):
+                result['phaseTiming'] = snapshot(self)
+            return result
+    else:
+        def to_dict(self) -> dict:
+            return {"id": self.id, "skill": self.skill, "receipt": self.receipt, "state": self.state,
+                    "message": self.message, "started": self.started, "finished": self.finished,
+                    "log": self.log[-20:]}
 
 
 class CobotSkills:
@@ -93,8 +111,13 @@ class CobotSkills:
                  ik: CobotIK | None = None, config: MotionConfig | None = None,
                  on_error: Callable[[str], None] | None = None,
                  on_finish: Callable[[Job], None] | None = None):
-        self._command = command
-        self._state = state
+        if _assembly_enabled():
+            from steward.ego.phase_timing import state_reader, command_writer
+            self._command = command_writer(command)
+            self._state = ab.reader(self, state_reader(state))
+        else:
+            self._command = command
+            self._state = state
         self.ik = ik if ik is not None else CobotIK()
         self.config = config or MotionConfig()
         self._on_error = on_error
@@ -135,238 +158,358 @@ class CobotSkills:
         return job
 
     def _run(self, job: Job, skill: str, receipt: dict) -> None:
-        try:
-            plan = receipt.get("plan", {})
-            if skill == "move_pose":
-                self.move_pose(job, plan)
-            elif skill == "move_joints":
-                self.move_joints(job, plan)
-            elif skill == "pick":
-                self.pick(job, plan)
-            elif skill == "place":
-                self.place(job, plan)
-            elif skill == "insert_screw_into_hole":
-                self.insert_screw_into_hole(job, plan)
-            elif skill == "drive_screw":
-                self.drive_screw(job, plan)
-            elif skill == "push":
-                self.push(job, plan)
-            elif skill == "drawer":
-                self.drawer(job, plan)
-            elif skill == "navigate":
-                self.navigate(job, plan)
-            elif skill == "lift":
-                self.set_lift(job, plan)
-            elif skill == "park":
-                self.park(job, plan)
-            elif skill in ("open", "close"):
-                self.gripper(job, plan.get("gripper") or plan.get("grip"), close=(skill == "close"))
-            else:
-                raise SkillFailed(f"unknown skill {skill}")
-            job.state, job.message = "succeeded", job.message or f"{skill} completed"
-        except SkillStopped:
-            job.state, job.message = "stopped", "stopped on request"
-        except SkillFailed as exc:
-            job.state, job.message = "failed", str(exc)
-            self._retreat_on_failure()
-        except Exception as exc:  # noqa: BLE001 - reported through the job record and the alert channel
-            job.state, job.message = "failed", f"{type(exc).__name__}: {exc}"
-            if self._on_error is not None:
-                self._on_error(f"技能 {skill}（{job.id}）出现未预料的异常：{type(exc).__name__}: {exc}")
-            self._retreat_on_failure()
-        finally:
-            job.finished = self._state()["stamp"]
-            if self._on_finish is not None:
-                self._on_finish(job)
+        if _assembly_enabled():
+            wall_started = time.time()
+            try:
+                from steward.ego.phase_timing import job_timing
+                with job_timing(job):
+                    return self._run_job(job, skill, receipt)
+            finally:
+                from steward.ego.receipt_log import append
+                append(job, receipt, wall_started)
+        else:
+            try:
+                plan = receipt.get("plan", {})
+                if skill == "move_pose":
+                    self.move_pose(job, plan)
+                elif skill == "move_joints":
+                    self.move_joints(job, plan)
+                elif skill == "pick":
+                    self.pick(job, plan)
+                elif skill == "place":
+                    self.place(job, plan)
+                elif skill == "insert_screw_into_hole":
+                    self.insert_screw_into_hole(job, plan)
+                elif skill == "drive_screw":
+                    self.drive_screw(job, plan)
+                elif skill == "push":
+                    self.push(job, plan)
+                elif skill == "drawer":
+                    self.drawer(job, plan)
+                elif skill == "navigate":
+                    self.navigate(job, plan)
+                elif skill == "lift":
+                    self.set_lift(job, plan)
+                elif skill == "park":
+                    self.park(job, plan)
+                elif skill in ("open", "close"):
+                    self.gripper(job, plan.get("gripper") or plan.get("grip"), close=(skill == "close"))
+                else:
+                    raise SkillFailed(f"unknown skill {skill}")
+                job.state, job.message = "succeeded", job.message or f"{skill} completed"
+            except SkillStopped:
+                job.state, job.message = "stopped", "stopped on request"
+            except SkillFailed as exc:
+                job.state, job.message = "failed", str(exc)
+                self._retreat_on_failure()
+            except Exception as exc:  # noqa: BLE001 - reported through the job record and the alert channel
+                job.state, job.message = "failed", f"{type(exc).__name__}: {exc}"
+                if self._on_error is not None:
+                    self._on_error(f"技能 {skill}（{job.id}）出现未预料的异常：{type(exc).__name__}: {exc}")
+                self._retreat_on_failure()
+            finally:
+                job.finished = self._state()["stamp"]
+                if self._on_finish is not None:
+                    self._on_finish(job)
 
     # ------------------------------------------------------------------- verbs
-    def _move_above(self, job: Job, arm: str, at: list[float], tool: list[float],
-                    *, max_tilt: float | None = None) -> list[float]:
-        """Reach a pre-grasp pose above ``at``, lowering the approach until the wrist can hold it.
-
-        A pre-grasp pose is the highest point of the motion, and the far side of the table sits at
-        the wrist's limit: an unreachable approach must be lowered, not treated as an unreachable
-        object. Nothing has moved when the IK refuses, so retrying lower is safe.
-        """
-        last: SkillFailed | None = None
-        for height in (self.config.approach_height, self.config.approach_height * 0.75,
-                       self.config.approach_height * 0.5, 0.03):
-            point = [at[0], at[1], at[2] + height]
+    if _assembly_enabled():
+        def _run_job(self, job: Job, skill: str, receipt: dict) -> None:
             try:
-                self.move_to(job, arm, point, tool, max_tilt=max_tilt)
+                plan = receipt.get("plan", {})
+                if skill == "move_pose":
+                    self.move_pose(job, plan)
+                elif skill == "move_joints":
+                    self.move_joints(job, plan)
+                elif skill == "pick":
+                    self.pick(job, plan)
+                elif skill == "place":
+                    self.place(job, plan)
+                elif skill == "push":
+                    self.push(job, plan)
+                elif skill == "drawer":
+                    self.drawer(job, plan)
+                elif skill == "navigate":
+                    self.navigate(job, plan)
+                elif skill == "lift":
+                    self.set_lift(job, plan)
+                elif skill == "park":
+                    self.park(job, plan)
+                elif skill in ("open", "close"):
+                    self.gripper(job, plan.get("gripper") or plan.get("grip"), close=(skill == "close"))
+                else:
+                    raise SkillFailed(f"unknown skill {skill}")
+                job.state, job.message = "succeeded", job.message or f"{skill} completed"
+            except SkillStopped:
+                job.state, job.message = "stopped", "stopped on request"
             except SkillFailed as exc:
-                last = exc
-                continue
-            if height < self.config.approach_height:
-                job.log.append(f"{arm} approach lowered to {height:.2f} m above the target")
-            return point
-        raise last if last is not None else SkillFailed(f"{arm} arm cannot reach above {_fmt(at)}")
-    def pick(self, job: Job, plan: dict) -> None:
-        """Reach the pinch point over ``plan['at']``, descend, close, and lift clear."""
-        arm = self._arm(plan)
-        at = _xyz(plan["at"], "plan.at")
-        grip = plan.get("gripper", f"{arm}_link6")
-        tool = _tool_down()
-        if (self._state().get("grippers") or {}).get(grip, {}).get("state") != "open":
-            self.gripper(job, grip, close=False)
-        above = self._move_above(job, arm, at, tool)
-        job.log.append(f"{arm} approach above {_fmt(above)}")
-        self.move_to(job, arm, at, tool, line=True)
-        self.gripper(job, grip, close=True)
-        lifted = [at[0], at[1], at[2] + self.config.retreat_height]
-        job.log.append(f"{arm} lift to {_fmt(lifted)}")
-        self.move_to(job, arm, lifted, tool, line=True)
-        st = self._state()
-        holding = (st.get("grippers") or {}).get(grip, {}).get("holding", False)
-        if not holding:
-            raise SkillFailed(f"closed the gripper at {_fmt(at)} but grabbed nothing")
+                job.state, job.message = "failed", str(exc)
+                self._retreat_on_failure()
+            except Exception as exc:  # noqa: BLE001 - reported through the job record and the alert channel
+                job.state, job.message = "failed", f"{type(exc).__name__}: {exc}"
+                if self._on_error is not None:
+                    self._on_error(f"技能 {skill}（{job.id}）出现未预料的异常：{type(exc).__name__}: {exc}")
+                self._retreat_on_failure()
+            finally:
+                job.finished = self._state()["stamp"]
+                if self._on_finish is not None:
+                    self._on_finish(job)
 
-    def place(self, job: Job, plan: dict) -> None:
-        """Carry the load to ``plan['at']``, lower it, open, and retreat."""
-        arm = self._arm(plan)
-        at = _xyz(plan["at"], "plan.at")
-        grip = plan.get("gripper", f"{arm}_link6")
-        orientation = plan.get("orientation")
-        if orientation is not None and len(orientation) != 4:
-            raise SkillFailed(f"plan.orientation must be a wxyz quaternion, got {orientation!r}")
-        tool = orientation or _tool_down()
-        try:
-            above = self._move_above(job, arm, at, tool)
-        except SkillFailed:
-            # Already holding the load at table height: cross over at the height it is carried and
-            # come straight down, which is what a person does and what the reach limit allows.
-            here = self.tcp(arm)
-            above = [at[0], at[1], max(here[2], at[2] + 0.03)]
-            self.move_to(job, arm, above, tool)
-            job.log.append(f"{arm} approach at carry height {above[2]:.3f}")
-        job.log.append(f"{arm} carry to {_fmt(above)}")
-        self.move_to(job, arm, at, tool, line=True)
-        self.gripper(job, grip, close=False)
-        self.move_to(job, arm, [at[0], at[1], at[2] + self.config.retreat_height], tool, line=True)
+    # ------------------------------------------------------------------- verbs
+    if _assembly_enabled():
+        def _move_above(self, job: Job, arm: str, at: list[float], tool: list[float]) -> list[float]:
+            """Reach a pre-grasp pose above ``at``, lowering the approach until the wrist can hold it.
 
-    def insert_screw_into_hole(self, job: Job, plan: dict) -> None:
-        """Seat a held screw tip-down (axis vertical, tip into the hole).
-
-        The held screw must stay nearly vertical: tip along world −z, head up. A tilted tool
-        lays the tip sideways and the screw falls over on release. ``plan``: ``at`` seat point,
-        ``arm``/``gripper``, optional ``orientation`` (default tool-down), optional ``maxTilt``,
-        optional wrist refine, soft release (open, linger, rise still tip-down).
-        """
-        arm = self._arm(plan)
-        at = _xyz(plan["at"], "plan.at")
-        grip = plan.get("gripper", f"{arm}_link6")
-        tool = plan.get("orientation") or _tool_down()
-        tilt = float(plan.get("maxTilt", self.config.max_insert_tilt))
-        if plan.get("refine") and plan.get("wristCamera") and plan.get("refineAt"):
-            at = self._wrist_refine(job, arm, tool, at, plan, max_tilt=tilt)
-        linger = float(plan.get("releaseLingerS", 0.35))
-        rise = float(plan.get("retreatHeight", self.config.retreat_height))
-        above = self._move_above(job, arm, at, tool, max_tilt=tilt)
-        job.log.append(f"{arm} tip-down insert {_fmt(above)} → seat {_fmt(at)} (maxTilt={tilt:.2f})")
-        self.move_to(job, arm, at, tool, line=True, max_tilt=tilt)
-        self.gripper(job, grip, close=False)
-        time.sleep(max(0.0, linger))
-        # Rise while still tip-down so a half-seated screw is not flicked over by a wrist tilt.
-        self.move_to(job, arm, [at[0], at[1], at[2] + rise], tool, line=True, max_tilt=tilt)
-        job.message = f"inserted screw tip-down at {_fmt(at)}"
-
-    def drive_screw(self, job: Job, plan: dict) -> None:
-        """Press a held screwdriver bit-down onto a seated screw head; keep holding the driver.
-
-        The driver is picked lying flat; tool-down alone keeps the bit horizontal. Default
-        orientation tips ±π/2 about tool +x so the bit points world −z (kitchen-robot
-        ``wristRoll`` sign). If that pose is out of reach, the opposite roll is tried, then
-        tool-down as a last resort. ``plan``: ``at``, ``pressAt``, ``arm``/``gripper``, optional
-        ``orientation`` / ``wristRoll``, wrist refine, ``driveS``.
-        """
-        arm = self._arm(plan)
-        at = _xyz(plan["at"], "plan.at")
-        press = _xyz(plan.get("pressAt") or [at[0], at[1], at[2] - 0.012], "plan.pressAt")
-        tilt = float(plan.get("maxTilt", self.config.max_drive_tilt))
-        if plan.get("orientation") is not None:
-            tools = [plan["orientation"]]
-        else:
-            # Prefer a full tip; Piper often needs a slightly smaller roll to stay in reach.
-            # Never fall back to flat tool-down — that presses the shaft side onto the head.
-            roll = float(plan.get("wristRoll", -math.pi / 2))
-            tools = []
-            for mag in (abs(roll), 1.35, 1.20, 1.05):
-                if mag < 1.0:
+            A pre-grasp pose is the highest point of the motion, and the far side of the table sits at
+            the wrist's limit: an unreachable approach must be lowered, not treated as an unreachable
+            object. Nothing has moved when the IK refuses, so retrying lower is safe.
+            """
+            last: SkillFailed | None = None
+            for height in (self.config.approach_height, self.config.approach_height * 0.75,
+                           self.config.approach_height * 0.5, 0.03):
+                point = [at[0], at[1], at[2] + height]
+                try:
+                    self.move_to(job, arm, point, tool)
+                except SkillFailed as exc:
+                    last = exc
                     continue
-                tools.append(_tool_bit_down(math.copysign(mag, roll)))
-                tools.append(_tool_bit_down(-math.copysign(mag, roll)))
-        tool = tools[0]
-        last_err: SkillFailed | None = None
-        for candidate in tools:
+                if height < self.config.approach_height:
+                    job.log.append(f"{arm} approach lowered to {height:.2f} m above the target")
+                return point
+            raise last if last is not None else SkillFailed(f"{arm} arm cannot reach above {_fmt(at)}")
+    else:
+        def _move_above(self, job: Job, arm: str, at: list[float], tool: list[float],
+                        *, max_tilt: float | None = None) -> list[float]:
+            """Reach a pre-grasp pose above ``at``, lowering the approach until the wrist can hold it.
+
+            A pre-grasp pose is the highest point of the motion, and the far side of the table sits at
+            the wrist's limit: an unreachable approach must be lowered, not treated as an unreachable
+            object. Nothing has moved when the IK refuses, so retrying lower is safe.
+            """
+            last: SkillFailed | None = None
+            for height in (self.config.approach_height, self.config.approach_height * 0.75,
+                           self.config.approach_height * 0.5, 0.03):
+                point = [at[0], at[1], at[2] + height]
+                try:
+                    self.move_to(job, arm, point, tool, max_tilt=max_tilt)
+                except SkillFailed as exc:
+                    last = exc
+                    continue
+                if height < self.config.approach_height:
+                    job.log.append(f"{arm} approach lowered to {height:.2f} m above the target")
+                return point
+            raise last if last is not None else SkillFailed(f"{arm} arm cannot reach above {_fmt(at)}")
+    if _assembly_enabled():
+        @timed("pick")
+        def pick(self, job: Job, plan: dict) -> None:
+            """Reach the pinch point over ``plan['at']``, descend, close, and lift clear."""
+            arm = self._arm(plan)
+            at = _xyz(plan["at"], "plan.at")
+            grip = plan.get("gripper", f"{arm}_link6")
+            tool = _tool_down()
+            if (self._state().get("grippers") or {}).get(grip, {}).get("state") != "open":
+                self.gripper(job, grip, close=False)
+            above = self._move_above(job, arm, at, tool)
+            job.log.append(f"{arm} approach above {_fmt(above)}")
+            self.move_to(job, arm, at, tool, line=True)
+            self.gripper(job, grip, close=True)
+            lifted = [at[0], at[1], at[2] + self.config.retreat_height]
+            job.log.append(f"{arm} lift to {_fmt(lifted)}")
+            self.move_to(job, arm, lifted, tool, line=True)
+            st = self._state()
+            holding = (st.get("grippers") or {}).get(grip, {}).get("holding", False)
+            if not holding:
+                raise SkillFailed(f"closed the gripper at {_fmt(at)} but grabbed nothing")
+    else:
+        def pick(self, job: Job, plan: dict) -> None:
+            """Reach the pinch point over ``plan['at']``, descend, close, and lift clear."""
+            arm = self._arm(plan)
+            at = _xyz(plan["at"], "plan.at")
+            grip = plan.get("gripper", f"{arm}_link6")
+            tool = _tool_down()
+            if (self._state().get("grippers") or {}).get(grip, {}).get("state") != "open":
+                self.gripper(job, grip, close=False)
+            above = self._move_above(job, arm, at, tool)
+            job.log.append(f"{arm} approach above {_fmt(above)}")
+            self.move_to(job, arm, at, tool, line=True)
+            self.gripper(job, grip, close=True)
+            lifted = [at[0], at[1], at[2] + self.config.retreat_height]
+            job.log.append(f"{arm} lift to {_fmt(lifted)}")
+            self.move_to(job, arm, lifted, tool, line=True)
+            st = self._state()
+            holding = (st.get("grippers") or {}).get(grip, {}).get("holding", False)
+            if not holding:
+                raise SkillFailed(f"closed the gripper at {_fmt(at)} but grabbed nothing")
+
+    if _assembly_enabled():
+        @timed("place")
+        def place(self, job: Job, plan: dict) -> None:
+            """Carry the load to ``plan['at']``, lower it, open, and retreat."""
+            arm = self._arm(plan)
+            at = _xyz(plan["at"], "plan.at")
+            grip = plan.get("gripper", f"{arm}_link6")
+            tool = _tool_down()
             try:
-                # Probe reach at the hover before committing the press.
-                self._move_above(job, arm, at, candidate, max_tilt=tilt)
-                tool = candidate
-                if candidate is not tools[0]:
-                    job.log.append(f"{arm} bit-down fallback orientation")
-                last_err = None
-                break
-            except SkillFailed as exc:
-                last_err = exc
-        if last_err is not None:
-            raise last_err
-        job.log.append(f"{arm} bit-down drive orientation locked")
-        if plan.get("refine") and plan.get("wristCamera") and plan.get("refineAt"):
-            at = self._wrist_refine(job, arm, tool, at, plan, max_tilt=tilt)
-            press = [at[0], at[1], press[2]]
-        hold = float(plan.get("driveS", 1.5))
-        above = [at[0], at[1], at[2] + self.config.approach_height * 0.5]
-        job.log.append(f"{arm} bit-down drive {_fmt(above)} → press {_fmt(press)}")
-        # Descend with the locked tip; if the press height is out of reach, soften tip again
-        # (same candidates as the hover probe) rather than pressing flat.
-        press_tools = tools if plan.get("orientation") is None else [tool]
-        last_press: SkillFailed | None = None
-        for candidate in press_tools:
+                above = self._move_above(job, arm, at, tool)
+            except SkillFailed:
+                # Already holding the load at table height: cross over at the height it is carried and
+                # come straight down, which is what a person does and what the reach limit allows.
+                here = self.tcp(arm)
+                above = [at[0], at[1], max(here[2], at[2] + 0.03)]
+                self.move_to(job, arm, above, tool)
+                job.log.append(f"{arm} approach at carry height {above[2]:.3f}")
+            job.log.append(f"{arm} carry to {_fmt(above)}")
+            self.move_to(job, arm, at, tool, line=True)
+            self.gripper(job, grip, close=False)
+            self.move_to(job, arm, [at[0], at[1], at[2] + self.config.retreat_height], tool, line=True)
+    else:
+        def place(self, job: Job, plan: dict) -> None:
+            """Carry the load to ``plan['at']``, lower it, open, and retreat."""
+            arm = self._arm(plan)
+            at = _xyz(plan["at"], "plan.at")
+            grip = plan.get("gripper", f"{arm}_link6")
+            orientation = plan.get("orientation")
+            if orientation is not None and len(orientation) != 4:
+                raise SkillFailed(f"plan.orientation must be a wxyz quaternion, got {orientation!r}")
+            tool = orientation or _tool_down()
             try:
-                if candidate is not tool:
+                above = self._move_above(job, arm, at, tool)
+            except SkillFailed:
+                # Already holding the load at table height: cross over at the height it is carried and
+                # come straight down, which is what a person does and what the reach limit allows.
+                here = self.tcp(arm)
+                above = [at[0], at[1], max(here[2], at[2] + 0.03)]
+                self.move_to(job, arm, above, tool)
+                job.log.append(f"{arm} approach at carry height {above[2]:.3f}")
+            job.log.append(f"{arm} carry to {_fmt(above)}")
+            self.move_to(job, arm, at, tool, line=True)
+            self.gripper(job, grip, close=False)
+            self.move_to(job, arm, [at[0], at[1], at[2] + self.config.retreat_height], tool, line=True)
+
+    if not _assembly_enabled():
+        def insert_screw_into_hole(self, job: Job, plan: dict) -> None:
+            """Seat a held screw tip-down (axis vertical, tip into the hole).
+
+            The held screw must stay nearly vertical: tip along world −z, head up. A tilted tool
+            lays the tip sideways and the screw falls over on release. ``plan``: ``at`` seat point,
+            ``arm``/``gripper``, optional ``orientation`` (default tool-down), optional ``maxTilt``,
+            optional wrist refine, soft release (open, linger, rise still tip-down).
+            """
+            arm = self._arm(plan)
+            at = _xyz(plan["at"], "plan.at")
+            grip = plan.get("gripper", f"{arm}_link6")
+            tool = plan.get("orientation") or _tool_down()
+            tilt = float(plan.get("maxTilt", self.config.max_insert_tilt))
+            if plan.get("refine") and plan.get("wristCamera") and plan.get("refineAt"):
+                at = self._wrist_refine(job, arm, tool, at, plan, max_tilt=tilt)
+            linger = float(plan.get("releaseLingerS", 0.35))
+            rise = float(plan.get("retreatHeight", self.config.retreat_height))
+            above = self._move_above(job, arm, at, tool, max_tilt=tilt)
+            job.log.append(f"{arm} tip-down insert {_fmt(above)} → seat {_fmt(at)} (maxTilt={tilt:.2f})")
+            self.move_to(job, arm, at, tool, line=True, max_tilt=tilt)
+            self.gripper(job, grip, close=False)
+            time.sleep(max(0.0, linger))
+            # Rise while still tip-down so a half-seated screw is not flicked over by a wrist tilt.
+            self.move_to(job, arm, [at[0], at[1], at[2] + rise], tool, line=True, max_tilt=tilt)
+            job.message = f"inserted screw tip-down at {_fmt(at)}"
+
+        def drive_screw(self, job: Job, plan: dict) -> None:
+            """Press a held screwdriver bit-down onto a seated screw head; keep holding the driver.
+
+            The driver is picked lying flat; tool-down alone keeps the bit horizontal. Default
+            orientation tips ±π/2 about tool +x so the bit points world −z (kitchen-robot
+            ``wristRoll`` sign). If that pose is out of reach, the opposite roll is tried, then
+            tool-down as a last resort. ``plan``: ``at``, ``pressAt``, ``arm``/``gripper``, optional
+            ``orientation`` / ``wristRoll``, wrist refine, ``driveS``.
+            """
+            arm = self._arm(plan)
+            at = _xyz(plan["at"], "plan.at")
+            press = _xyz(plan.get("pressAt") or [at[0], at[1], at[2] - 0.012], "plan.pressAt")
+            tilt = float(plan.get("maxTilt", self.config.max_drive_tilt))
+            if plan.get("orientation") is not None:
+                tools = [plan["orientation"]]
+            else:
+                # Prefer a full tip; Piper often needs a slightly smaller roll to stay in reach.
+                # Never fall back to flat tool-down — that presses the shaft side onto the head.
+                roll = float(plan.get("wristRoll", -math.pi / 2))
+                tools = []
+                for mag in (abs(roll), 1.35, 1.20, 1.05):
+                    if mag < 1.0:
+                        continue
+                    tools.append(_tool_bit_down(math.copysign(mag, roll)))
+                    tools.append(_tool_bit_down(-math.copysign(mag, roll)))
+            tool = tools[0]
+            last_err: SkillFailed | None = None
+            for candidate in tools:
+                try:
+                    # Probe reach at the hover before committing the press.
                     self._move_above(job, arm, at, candidate, max_tilt=tilt)
                     tool = candidate
-                    job.log.append(f"{arm} softened bit-down for press")
-                self.move_to(job, arm, at, tool, line=True, max_tilt=tilt)
-                self.move_to(job, arm, press, tool, line=True, max_tilt=tilt)
-                last_press = None
-                break
-            except SkillFailed as exc:
-                last_press = exc
-        if last_press is not None:
-            raise last_press
-        time.sleep(max(0.05, hold))
-        job.log.append(f"held bit on screw for {hold:.1f}s")
-        self.move_to(job, arm, at, tool, line=True, max_tilt=tilt)
-        job.message = f"drove screw bit-down at {_fmt(press)}"
+                    if candidate is not tools[0]:
+                        job.log.append(f"{arm} bit-down fallback orientation")
+                    last_err = None
+                    break
+                except SkillFailed as exc:
+                    last_err = exc
+            if last_err is not None:
+                raise last_err
+            job.log.append(f"{arm} bit-down drive orientation locked")
+            if plan.get("refine") and plan.get("wristCamera") and plan.get("refineAt"):
+                at = self._wrist_refine(job, arm, tool, at, plan, max_tilt=tilt)
+                press = [at[0], at[1], press[2]]
+            hold = float(plan.get("driveS", 1.5))
+            above = [at[0], at[1], at[2] + self.config.approach_height * 0.5]
+            job.log.append(f"{arm} bit-down drive {_fmt(above)} → press {_fmt(press)}")
+            # Descend with the locked tip; if the press height is out of reach, soften tip again
+            # (same candidates as the hover probe) rather than pressing flat.
+            press_tools = tools if plan.get("orientation") is None else [tool]
+            last_press: SkillFailed | None = None
+            for candidate in press_tools:
+                try:
+                    if candidate is not tool:
+                        self._move_above(job, arm, at, candidate, max_tilt=tilt)
+                        tool = candidate
+                        job.log.append(f"{arm} softened bit-down for press")
+                    self.move_to(job, arm, at, tool, line=True, max_tilt=tilt)
+                    self.move_to(job, arm, press, tool, line=True, max_tilt=tilt)
+                    last_press = None
+                    break
+                except SkillFailed as exc:
+                    last_press = exc
+            if last_press is not None:
+                raise last_press
+            time.sleep(max(0.05, hold))
+            job.log.append(f"held bit on screw for {hold:.1f}s")
+            self.move_to(job, arm, at, tool, line=True, max_tilt=tilt)
+            job.message = f"drove screw bit-down at {_fmt(press)}"
 
-    def _wrist_refine(self, job: Job, arm: str, tool: list[float], at: list[float],
-                      plan: dict, *, max_tilt: float | None = None) -> list[float]:
-        """Hover, then shift planar aim by ``refineAt - at`` projected (belief from wrist view).
+        def _wrist_refine(self, job: Job, arm: str, tool: list[float], at: list[float],
+                          plan: dict, *, max_tilt: float | None = None) -> list[float]:
+            """Hover, then shift planar aim by ``refineAt - at`` projected (belief from wrist view).
 
-        The mission updates the estimator from the wrist camera before this call; ``refineAt`` is
-        the refined world point (hole centre / screw head). Only XY is applied; Z stays on ``at``.
-        """
-        refine = _xyz(plan["refineAt"], "plan.refineAt")
-        cam = plan.get("wristCamera")
-        # Same lowering ladder as ``_move_above``: a high wrist hover often sits past Piper reach.
-        last: SkillFailed | None = None
-        for height in (self.config.approach_height, self.config.approach_height * 0.75,
-                       self.config.approach_height * 0.5, 0.06):
-            hover = [at[0], at[1], max(at[2] + height, refine[2] + height)]
-            try:
-                self.move_to(job, arm, hover, tool, max_tilt=max_tilt)
-                last = None
-                break
-            except SkillFailed as exc:
-                last = exc
-        if last is not None:
-            raise last
-        dx, dy = refine[0] - at[0], refine[1] - at[1]
-        nudged = [at[0] + dx, at[1] + dy, at[2]]
-        if math.hypot(dx, dy) > 1e-4:
-            job.log.append(f"{arm} wrist refine via {cam}: Δxy=({dx * 100:.1f}, {dy * 100:.1f}) cm → {_fmt(nudged)}")
-        return nudged
+            The mission updates the estimator from the wrist camera before this call; ``refineAt`` is
+            the refined world point (hole centre / screw head). Only XY is applied; Z stays on ``at``.
+            """
+            refine = _xyz(plan["refineAt"], "plan.refineAt")
+            cam = plan.get("wristCamera")
+            # Same lowering ladder as ``_move_above``: a high wrist hover often sits past Piper reach.
+            last: SkillFailed | None = None
+            for height in (self.config.approach_height, self.config.approach_height * 0.75,
+                           self.config.approach_height * 0.5, 0.06):
+                hover = [at[0], at[1], max(at[2] + height, refine[2] + height)]
+                try:
+                    self.move_to(job, arm, hover, tool, max_tilt=max_tilt)
+                    last = None
+                    break
+                except SkillFailed as exc:
+                    last = exc
+            if last is not None:
+                raise last
+            dx, dy = refine[0] - at[0], refine[1] - at[1]
+            nudged = [at[0] + dx, at[1] + dy, at[2]]
+            if math.hypot(dx, dy) > 1e-4:
+                job.log.append(f"{arm} wrist refine via {cam}: Δxy=({dx * 100:.1f}, {dy * 100:.1f}) cm → {_fmt(nudged)}")
+            return nudged
 
     def push(self, job: Job, plan: dict) -> None:
         """Push an object side-on: approach behind it, then travel ``plan['by']`` along the surface."""
@@ -445,137 +588,267 @@ class CobotSkills:
         if not lo <= height <= hi:
             raise SkillFailed(f"lift height {height:.2f} m is outside [{lo:.2f}, {hi:.2f}]")
         self._command({"joints": {"lift": height}})
-        deadline = time.monotonic() + self.config.settle_timeout_s
-        while time.monotonic() < deadline:
-            self._tick()
-            now = self._state()["joints"].get("lift")
-            if now is not None and abs(now - height) < 0.01:
-                job.log.append(f"lift at {height:.2f} m")
-                return
+        if _assembly_enabled():
+            deadline = ab.make(self, self.config.settle_timeout_s, 'configured joint servo settling limit')
+            while not ab.expired(deadline):
+                self._tick()
+                now = self._state()["joints"].get("lift")
+                if now is not None and abs(now - height) < 0.01:
+                    job.log.append(f"lift at {height:.2f} m")
+                    return
+        else:
+            deadline = time.monotonic() + self.config.settle_timeout_s
+            while time.monotonic() < deadline:
+                self._tick()
+                now = self._state()["joints"].get("lift")
+                if now is not None and abs(now - height) < 0.01:
+                    job.log.append(f"lift at {height:.2f} m")
+                    return
         raise SkillFailed(f"lift did not reach {height:.2f} m")
 
     def tcp_base(self) -> list[float]:
         o = self._state().get("odometry") or {}
         return [float(o.get("x", 0.0)), float(o.get("y", 0.0)), float(o.get("yaw", 0.0))]
 
-    def _turn_to(self, yaw_target: float) -> None:
-        """Turn in place to ``yaw_target``, steering the position controller from measured odometry."""
-        st = self._state()
-        o = st["odometry"]
-        x, y, yaw0 = o["x"], o["y"], o["yaw"]
-        delta = wrap_angle(yaw_target - yaw0)
-        duration = abs(delta) / self.config.angular_speed
-        t0 = st["stamp"]
-        deadline = t0 + duration * 3.0 + 5.0
-        since_progress = {"t": t0, "err": None}
-        while True:
-            st = self._tick()
-            frac = 1.0 if duration == 0 else min(1.0, (st["stamp"] - t0) / duration)
-            self._command({"base": [x, y, yaw0 + delta * frac]})
-            err = abs(wrap_angle(yaw_target - st["odometry"]["yaw"]))
-            if frac >= 1.0 and err < self.config.yaw_tol:
-                return
-            if _stalled(st["stamp"], err, since_progress, self.config.drive_stall_s):
-                raise SkillFailed(f"turn is blocked: no progress for {self.config.drive_stall_s:.0f} s "
-                                  f"(yaw error {err:.2f} rad)")
-            if st["stamp"] > deadline:
-                raise SkillFailed(f"turn did not converge (yaw error {err:.2f} rad)")
+    if _assembly_enabled():
+        @timed("turn")
+        def _turn_to(self, yaw_target: float) -> None:
+            """Turn in place to ``yaw_target``, steering the position controller from measured odometry."""
+            st = self._state()
+            o = st["odometry"]
+            x, y, yaw0 = o["x"], o["y"], o["yaw"]
+            delta = wrap_angle(yaw_target - yaw0)
+            duration = abs(delta) / self.config.angular_speed
+            t0 = st["stamp"]
+            deadline = t0 + duration * 3.0 + 5.0
+            since_progress = {"t": t0, "err": None}
+            while True:
+                st = self._tick()
+                frac = 1.0 if duration == 0 else min(1.0, (st["stamp"] - t0) / duration)
+                self._command({"base": [x, y, yaw0 + delta * frac]})
+                err = abs(wrap_angle(yaw_target - st["odometry"]["yaw"]))
+                if frac >= 1.0 and err < self.config.yaw_tol:
+                    return
+                if _stalled(st["stamp"], err, since_progress, self.config.drive_stall_s):
+                    raise SkillFailed(f"turn is blocked: no progress for {self.config.drive_stall_s:.0f} s "
+                                      f"(yaw error {err:.2f} rad)")
+                if st["stamp"] > deadline:
+                    raise SkillFailed(f"turn did not converge (yaw error {err:.2f} rad)")
+    else:
+        def _turn_to(self, yaw_target: float) -> None:
+            """Turn in place to ``yaw_target``, steering the position controller from measured odometry."""
+            st = self._state()
+            o = st["odometry"]
+            x, y, yaw0 = o["x"], o["y"], o["yaw"]
+            delta = wrap_angle(yaw_target - yaw0)
+            duration = abs(delta) / self.config.angular_speed
+            t0 = st["stamp"]
+            deadline = t0 + duration * 3.0 + 5.0
+            since_progress = {"t": t0, "err": None}
+            while True:
+                st = self._tick()
+                frac = 1.0 if duration == 0 else min(1.0, (st["stamp"] - t0) / duration)
+                self._command({"base": [x, y, yaw0 + delta * frac]})
+                err = abs(wrap_angle(yaw_target - st["odometry"]["yaw"]))
+                if frac >= 1.0 and err < self.config.yaw_tol:
+                    return
+                if _stalled(st["stamp"], err, since_progress, self.config.drive_stall_s):
+                    raise SkillFailed(f"turn is blocked: no progress for {self.config.drive_stall_s:.0f} s "
+                                      f"(yaw error {err:.2f} rad)")
+                if st["stamp"] > deadline:
+                    raise SkillFailed(f"turn did not converge (yaw error {err:.2f} rad)")
 
-    def _translate_to(self, x1: float, y1: float, yaw: float) -> None:
-        """Drive straight to ``(x1, y1)`` holding ``yaw`` over the same path."""
-        st = self._state()
-        x0, y0 = st["odometry"]["x"], st["odometry"]["y"]
-        # The yaw joint is continuous: keep the heading in the odometry's unwrapped frame, or the
-        # position controller spins the base a whole turn.
-        current = st["odometry"]["yaw"]
-        yaw = current + wrap_angle(yaw - current)
-        length = math.hypot(x1 - x0, y1 - y0)
-        duration = length / self.config.linear_speed
-        t0 = st["stamp"]
-        deadline = t0 + duration * 3.0 + 5.0
-        since_progress = {"t": t0, "err": None}
-        while True:
-            st = self._tick()
-            frac = 1.0 if duration == 0 else min(1.0, (st["stamp"] - t0) / duration)
-            self._command({"base": [x0 + (x1 - x0) * frac, y0 + (y1 - y0) * frac, yaw]})
-            err = math.hypot(x1 - st["odometry"]["x"], y1 - st["odometry"]["y"])
-            if frac >= 1.0 and err < self.config.position_tol:
-                return
-            if _stalled(st["stamp"], err, since_progress, self.config.drive_stall_s):
-                raise SkillFailed(f"base is blocked {err:.2f} m from the waypoint "
-                                  f"({st['odometry']['x']:.2f}, {st['odometry']['y']:.2f}); no progress for "
-                                  f"{self.config.drive_stall_s:.0f} s")
-            if st["stamp"] > deadline:
-                raise SkillFailed(f"base did not reach the waypoint (error {err:.2f} m)")
+    if _assembly_enabled():
+        @timed("translation")
+        def _translate_to(self, x1: float, y1: float, yaw: float) -> None:
+            """Drive straight to ``(x1, y1)`` holding ``yaw`` over the same path."""
+            st = self._state()
+            x0, y0 = st["odometry"]["x"], st["odometry"]["y"]
+            # The yaw joint is continuous: keep the heading in the odometry's unwrapped frame, or the
+            # position controller spins the base a whole turn.
+            current = st["odometry"]["yaw"]
+            yaw = current + wrap_angle(yaw - current)
+            length = math.hypot(x1 - x0, y1 - y0)
+            duration = length / self.config.linear_speed
+            t0 = st["stamp"]
+            deadline = t0 + duration * 3.0 + 5.0
+            since_progress = {"t": t0, "err": None}
+            while True:
+                st = self._tick()
+                frac = 1.0 if duration == 0 else min(1.0, (st["stamp"] - t0) / duration)
+                self._command({"base": [x0 + (x1 - x0) * frac, y0 + (y1 - y0) * frac, yaw]})
+                err = math.hypot(x1 - st["odometry"]["x"], y1 - st["odometry"]["y"])
+                if frac >= 1.0 and err < self.config.position_tol:
+                    return
+                if _stalled(st["stamp"], err, since_progress, self.config.drive_stall_s):
+                    raise SkillFailed(f"base is blocked {err:.2f} m from the waypoint "
+                                      f"({st['odometry']['x']:.2f}, {st['odometry']['y']:.2f}); no progress for "
+                                      f"{self.config.drive_stall_s:.0f} s")
+                if st["stamp"] > deadline:
+                    raise SkillFailed(f"base did not reach the waypoint (error {err:.2f} m)")
+    else:
+        def _translate_to(self, x1: float, y1: float, yaw: float) -> None:
+            """Drive straight to ``(x1, y1)`` holding ``yaw`` over the same path."""
+            st = self._state()
+            x0, y0 = st["odometry"]["x"], st["odometry"]["y"]
+            # The yaw joint is continuous: keep the heading in the odometry's unwrapped frame, or the
+            # position controller spins the base a whole turn.
+            current = st["odometry"]["yaw"]
+            yaw = current + wrap_angle(yaw - current)
+            length = math.hypot(x1 - x0, y1 - y0)
+            duration = length / self.config.linear_speed
+            t0 = st["stamp"]
+            deadline = t0 + duration * 3.0 + 5.0
+            since_progress = {"t": t0, "err": None}
+            while True:
+                st = self._tick()
+                frac = 1.0 if duration == 0 else min(1.0, (st["stamp"] - t0) / duration)
+                self._command({"base": [x0 + (x1 - x0) * frac, y0 + (y1 - y0) * frac, yaw]})
+                err = math.hypot(x1 - st["odometry"]["x"], y1 - st["odometry"]["y"])
+                if frac >= 1.0 and err < self.config.position_tol:
+                    return
+                if _stalled(st["stamp"], err, since_progress, self.config.drive_stall_s):
+                    raise SkillFailed(f"base is blocked {err:.2f} m from the waypoint "
+                                      f"({st['odometry']['x']:.2f}, {st['odometry']['y']:.2f}); no progress for "
+                                      f"{self.config.drive_stall_s:.0f} s")
+                if st["stamp"] > deadline:
+                    raise SkillFailed(f"base did not reach the waypoint (error {err:.2f} m)")
 
-    def _drive(self, job: Job, path: list, final_yaw: float) -> None:
-        for waypoint in path:
-            wx, wy = waypoint[:2]
-            o = self._state()["odometry"]
-            if math.hypot(wx - o["x"], wy - o["y"]) < self.config.position_tol:
-                continue
-            heading = math.atan2(wy - o["y"], wx - o["x"])
-            if len(waypoint) == 3:
-                heading = waypoint[2]
-                if abs(wrap_angle(o['yaw']-heading)) > self.config.yaw_tol:
-                    raise SkillFailed('escape heading changed; predict again')
-            else:
-                self._turn_to(heading)
-            self._translate_to(wx, wy, heading)
-            job.log.append(f"reached waypoint ({wx:.2f}, {wy:.2f})")
-        self._turn_to(final_yaw)
+    if _assembly_enabled():
+        @timed("navigation")
+        def _drive(self, job: Job, path: list, final_yaw: float) -> None:
+            for waypoint in path:
+                wx, wy = waypoint[:2]
+                o = self._state()["odometry"]
+                if math.hypot(wx - o["x"], wy - o["y"]) < self.config.position_tol:
+                    continue
+                heading = math.atan2(wy - o["y"], wx - o["x"])
+                if len(waypoint) == 3:
+                    heading = waypoint[2]
+                    if abs(wrap_angle(o['yaw']-heading)) > self.config.yaw_tol:
+                        raise SkillFailed('escape heading changed; predict again')
+                else:
+                    self._turn_to(heading)
+                self._translate_to(wx, wy, heading)
+                job.log.append(f"reached waypoint ({wx:.2f}, {wy:.2f})")
+            self._turn_to(final_yaw)
+    else:
+        def _drive(self, job: Job, path: list, final_yaw: float) -> None:
+            for waypoint in path:
+                wx, wy = waypoint[:2]
+                o = self._state()["odometry"]
+                if math.hypot(wx - o["x"], wy - o["y"]) < self.config.position_tol:
+                    continue
+                heading = math.atan2(wy - o["y"], wx - o["x"])
+                if len(waypoint) == 3:
+                    heading = waypoint[2]
+                    if abs(wrap_angle(o['yaw']-heading)) > self.config.yaw_tol:
+                        raise SkillFailed('escape heading changed; predict again')
+                else:
+                    self._turn_to(heading)
+                self._translate_to(wx, wy, heading)
+                job.log.append(f"reached waypoint ({wx:.2f}, {wy:.2f})")
+            self._turn_to(final_yaw)
 
     # -------------------------------------------------------------- primitives
-    def move_to(self, job: Job, arm: str, tcp: list[float], orientation: list[float] | None = None,
-                line: bool = False, *, max_tilt: float | None = None) -> list[float]:
-        """Move the arm so the pinch point reaches ``tcp``; returns the joint targets.
+    if _assembly_enabled():
+        @timed("arm_motion")
+        def move_to(self, job: Job, arm: str, tcp: list[float], orientation: list[float] | None = None,
+                    line: bool = False) -> list[float]:
+            """Move the arm so the pinch point reaches ``tcp``; returns the joint targets.
 
-        ``line=True`` walks the pinch point straight there in ``line_step`` increments instead of
-        one joint interpolation, which is what a descent or a lift has to be.
-        ``max_tilt`` caps how far the tool may lean from ``orientation`` (defaults to
-        ``MotionConfig.max_tool_tilt``; tip-down insert passes a tighter limit).
-        """
-        if line:
-            here = self.tcp(arm)
-            distance = sum((a - b) ** 2 for a, b in zip(tcp, here, strict=True)) ** 0.5
-            steps = max(1, int(distance / self.config.line_step) + 1)
-            for i in range(1, steps + 1):
-                frac = i / steps
-                waypoint = [here[j] + (tcp[j] - here[j]) * frac for j in range(3)]
-                self._move_to(job, arm, waypoint, orientation, max_tilt=max_tilt)
-        else:
-            self._move_to(job, arm, tcp, orientation, max_tilt=max_tilt)
-        return self.ik.current(arm)
-
-    def _move_to(self, job: Job, arm: str, tcp: list[float], orientation: list[float] | None,
-                 *, max_tilt: float | None = None) -> None:
-        self._sync(arm)
-        seed = self.ik.current(arm)
-        target = self._link6_target(tcp, orientation)
-        tilt_limit = self.config.max_tool_tilt if max_tilt is None else max_tilt
-        try:
-            if orientation is None:
-                joints = self.ik.solve(arm, target["p"], target["q"], q_init=seed)
+            ``line=True`` walks the pinch point straight there in ``line_step`` increments instead of
+            one joint interpolation, which is what a descent or a lift has to be."""
+            if line:
+                here = self.tcp(arm)
+                distance = sum((a - b) ** 2 for a, b in zip(tcp, here, strict=True)) ** 0.5
+                steps = max(1, int(distance / self.config.line_step) + 1)
+                for i in range(1, steps + 1):
+                    frac = i / steps
+                    waypoint = [here[j] + (tcp[j] - here[j]) * frac for j in range(3)]
+                    self._move_to(job, arm, waypoint, orientation)
             else:
-                # The wrist cannot hold a strictly vertical tool everywhere, so a small tilt is
-                # accepted rather than declaring a reachable place unreachable — except tip-down
-                # insert/drive, which pass a tight ``max_tilt`` so the shaft stays vertical.
-                joints, tilt = self.ik.solve_tool(arm, target["p"], target["q"],
-                                                  max_tilt=tilt_limit, q_init=seed)
-                # Report the pinch point, not the wrist: a tilted tool that keeps its wrist on
-                # target is exactly how a descent ends up a few centimetres off the plate.
-                reached = self._tcp_of(self.ik.fk(arm, joints))
-                missed = sum((a - b) ** 2 for a, b in zip(reached, tcp, strict=True)) ** 0.5
-                if missed > self.config.tcp_tolerance:
-                    raise SkillFailed(f"{arm} tool would land {missed * 100:.1f} cm from {_fmt(tcp)} "
-                                      f"at {_fmt(reached)} (tilt {tilt:.2f} rad)")
-                if tilt > 0.02:
-                    job.log.append(f"{arm} tool tilted {tilt:.2f} rad to reach {_fmt(tcp)}")
-        except IkError as exc:
-            raise SkillFailed(f"{arm} arm cannot reach {_fmt(tcp)} in a usable tool orientation: {exc}") from exc
-        self._command({"joints": dict(zip(self.ik.joint_names(arm), joints, strict=True))})
-        self._wait_joints(arm, joints)
-        job.log.append(f"{arm} at {_fmt(self.tcp(arm))}")
+                self._move_to(job, arm, tcp, orientation)
+            return self.ik.current(arm)
+    else:
+        def move_to(self, job: Job, arm: str, tcp: list[float], orientation: list[float] | None = None,
+                    line: bool = False, *, max_tilt: float | None = None) -> list[float]:
+            """Move the arm so the pinch point reaches ``tcp``; returns the joint targets.
+
+            ``line=True`` walks the pinch point straight there in ``line_step`` increments instead of
+            one joint interpolation, which is what a descent or a lift has to be.
+            ``max_tilt`` caps how far the tool may lean from ``orientation`` (defaults to
+            ``MotionConfig.max_tool_tilt``; tip-down insert passes a tighter limit).
+            """
+            if line:
+                here = self.tcp(arm)
+                distance = sum((a - b) ** 2 for a, b in zip(tcp, here, strict=True)) ** 0.5
+                steps = max(1, int(distance / self.config.line_step) + 1)
+                for i in range(1, steps + 1):
+                    frac = i / steps
+                    waypoint = [here[j] + (tcp[j] - here[j]) * frac for j in range(3)]
+                    self._move_to(job, arm, waypoint, orientation, max_tilt=max_tilt)
+            else:
+                self._move_to(job, arm, tcp, orientation, max_tilt=max_tilt)
+            return self.ik.current(arm)
+
+    if _assembly_enabled():
+        def _move_to(self, job: Job, arm: str, tcp: list[float], orientation: list[float] | None) -> None:
+            self._sync(arm)
+            seed = self.ik.current(arm)
+            target = self._link6_target(tcp, orientation)
+            try:
+                if orientation is None:
+                    joints = self.ik.solve(arm, target["p"], target["q"], q_init=seed)
+                else:
+                    # The wrist cannot hold a strictly vertical tool everywhere, so a small tilt is
+                    # accepted rather than declaring a reachable place unreachable.
+                    joints, tilt = self.ik.solve_tool(arm, target["p"], target["q"],
+                                                      max_tilt=self.config.max_tool_tilt, q_init=seed)
+                    # Report the pinch point, not the wrist: a tilted tool that keeps its wrist on
+                    # target is exactly how a descent ends up a few centimetres off the plate.
+                    reached = self._tcp_of(self.ik.fk(arm, joints))
+                    missed = sum((a - b) ** 2 for a, b in zip(reached, tcp, strict=True)) ** 0.5
+                    if missed > self.config.tcp_tolerance:
+                        raise SkillFailed(f"{arm} tool would land {missed * 100:.1f} cm from {_fmt(tcp)} "
+                                          f"at {_fmt(reached)} (tilt {tilt:.2f} rad)")
+                    if tilt > 0.02:
+                        job.log.append(f"{arm} tool tilted {tilt:.2f} rad to reach {_fmt(tcp)}")
+            except IkError as exc:
+                raise SkillFailed(f"{arm} arm cannot reach {_fmt(tcp)}: {exc}") from exc
+            self._command({"joints": dict(zip(self.ik.joint_names(arm), joints, strict=True))})
+            self._wait_joints(arm, joints)
+            job.log.append(f"{arm} at {_fmt(self.tcp(arm))}")
+    else:
+        def _move_to(self, job: Job, arm: str, tcp: list[float], orientation: list[float] | None,
+                     *, max_tilt: float | None = None) -> None:
+            self._sync(arm)
+            seed = self.ik.current(arm)
+            target = self._link6_target(tcp, orientation)
+            tilt_limit = self.config.max_tool_tilt if max_tilt is None else max_tilt
+            try:
+                if orientation is None:
+                    joints = self.ik.solve(arm, target["p"], target["q"], q_init=seed)
+                else:
+                    # The wrist cannot hold a strictly vertical tool everywhere, so a small tilt is
+                    # accepted rather than declaring a reachable place unreachable — except tip-down
+                    # insert/drive, which pass a tight ``max_tilt`` so the shaft stays vertical.
+                    joints, tilt = self.ik.solve_tool(arm, target["p"], target["q"],
+                                                      max_tilt=tilt_limit, q_init=seed)
+                    # Report the pinch point, not the wrist: a tilted tool that keeps its wrist on
+                    # target is exactly how a descent ends up a few centimetres off the plate.
+                    reached = self._tcp_of(self.ik.fk(arm, joints))
+                    missed = sum((a - b) ** 2 for a, b in zip(reached, tcp, strict=True)) ** 0.5
+                    if missed > self.config.tcp_tolerance:
+                        raise SkillFailed(f"{arm} tool would land {missed * 100:.1f} cm from {_fmt(tcp)} "
+                                          f"at {_fmt(reached)} (tilt {tilt:.2f} rad)")
+                    if tilt > 0.02:
+                        job.log.append(f"{arm} tool tilted {tilt:.2f} rad to reach {_fmt(tcp)}")
+            except IkError as exc:
+                raise SkillFailed(f"{arm} arm cannot reach {_fmt(tcp)} in a usable tool orientation: {exc}") from exc
+            self._command({"joints": dict(zip(self.ik.joint_names(arm), joints, strict=True))})
+            self._wait_joints(arm, joints)
+            job.log.append(f"{arm} at {_fmt(self.tcp(arm))}")
 
     def move_pose(self, job: Job, plan: dict) -> None:
         """Put the arm's pinch point at ``plan['at']`` (with an optional wxyz ``orientation``).
@@ -632,30 +905,57 @@ class CobotSkills:
 
     def _wait_joints(self, arm: str, target: list[float]) -> None:
         names = self.ik.joint_names(arm)
-        deadline = time.monotonic() + self.config.settle_timeout_s
-        last, since = None, time.monotonic()
+        if _assembly_enabled():
+            deadline = ab.make(self, self.config.settle_timeout_s, 'configured joint servo settling limit')
+            last, since = None, (self._state()['stamp'] if ab.enabled() else time.monotonic())
+        else:
+            deadline = time.monotonic() + self.config.settle_timeout_s
+            last, since = None, time.monotonic()
         compensated = False
-        while time.monotonic() < deadline:
-            self._tick()
-            now = [self._state()["joints"][n] for n in names]
-            if max(abs(a - b) for a, b in zip(now, target, strict=True)) <= self.config.joint_tol:
-                return
-            # A joint that stops moving short of the target is either blocked or holding a load
-            # against gravity: a position servo settles with a steady-state error. If the residual
-            # is small, command the target plus that residual once -- integral action, which is
-            # what a real arm's servo loop does -- before calling it blocked.
-            if last is not None and max(abs(a - b) for a, b in zip(now, last, strict=True)) < 1e-3:
-                if time.monotonic() - since > self.config.stall_s:
-                    residual = [t - n for t, n in zip(target, now, strict=True)]
-                    if not compensated and max(abs(r) for r in residual) < 0.1:
-                        self._command({"joints": dict(zip(names, [t + r for t, r in zip(target, residual, strict=True)],
-                                                         strict=True))})
-                        compensated, since, last = True, time.monotonic(), None
-                        continue
-                    raise SkillFailed(f"{arm} arm stalled {_fmt(list(now))} toward {_fmt(target)}")
-            else:
-                since = time.monotonic()
-            last = now
+        if _assembly_enabled():
+            while not ab.expired(deadline):
+                self._tick()
+                now = [self._state()["joints"][n] for n in names]
+                if max(abs(a - b) for a, b in zip(now, target, strict=True)) <= self.config.joint_tol:
+                    return
+                # A joint that stops moving short of the target is either blocked or holding a load
+                # against gravity: a position servo settles with a steady-state error. If the residual
+                # is small, command the target plus that residual once -- integral action, which is
+                # what a real arm's servo loop does -- before calling it blocked.
+                if last is not None and max(abs(a - b) for a, b in zip(now, last, strict=True)) < 1e-3:
+                    if (self._state()['stamp'] if ab.enabled() else time.monotonic()) - since > self.config.stall_s:
+                        residual = [t - n for t, n in zip(target, now, strict=True)]
+                        if not compensated and max(abs(r) for r in residual) < 0.1:
+                            self._command({"joints": dict(zip(names, [t + r for t, r in zip(target, residual, strict=True)],
+                                                             strict=True))})
+                            compensated, since, last = True, (self._state()['stamp'] if ab.enabled() else time.monotonic()), None
+                            continue
+                        raise SkillFailed(f"{arm} arm stalled {_fmt(list(now))} toward {_fmt(target)}")
+                else:
+                    since = self._state()['stamp'] if ab.enabled() else time.monotonic()
+                last = now
+        else:
+            while time.monotonic() < deadline:
+                self._tick()
+                now = [self._state()["joints"][n] for n in names]
+                if max(abs(a - b) for a, b in zip(now, target, strict=True)) <= self.config.joint_tol:
+                    return
+                # A joint that stops moving short of the target is either blocked or holding a load
+                # against gravity: a position servo settles with a steady-state error. If the residual
+                # is small, command the target plus that residual once -- integral action, which is
+                # what a real arm's servo loop does -- before calling it blocked.
+                if last is not None and max(abs(a - b) for a, b in zip(now, last, strict=True)) < 1e-3:
+                    if time.monotonic() - since > self.config.stall_s:
+                        residual = [t - n for t, n in zip(target, now, strict=True)]
+                        if not compensated and max(abs(r) for r in residual) < 0.1:
+                            self._command({"joints": dict(zip(names, [t + r for t, r in zip(target, residual, strict=True)],
+                                                             strict=True))})
+                            compensated, since, last = True, time.monotonic(), None
+                            continue
+                        raise SkillFailed(f"{arm} arm stalled {_fmt(list(now))} toward {_fmt(target)}")
+                else:
+                    since = time.monotonic()
+                last = now
         raise SkillFailed(f"{arm} arm did not reach {_fmt(target)} within {self.config.settle_timeout_s:.0f} s")
 
     def _settle_fingers(self, close: bool) -> None:
@@ -677,11 +977,23 @@ class CobotSkills:
 
         return pose_compose({"p": list(tcp), "q": tool}, pose_inverse(offset))
 
-    def _tick(self) -> dict:
-        if self._stop.is_set():
-            raise SkillStopped()
-        time.sleep(self.config.tick_s)
-        return self._state()
+    if _assembly_enabled():
+        @timed("control_tick")
+        def _tick(self) -> dict:
+            ratio_stamp = ab.clock(self).stamp
+            ratio_wall = time.monotonic()
+            if self._stop.is_set():
+                raise SkillStopped()
+            time.sleep(self.config.tick_s)
+            state = self._state()
+            ab.clock(self).measure(state['stamp']-ratio_stamp, time.monotonic()-ratio_wall)
+            return state
+    else:
+        def _tick(self) -> dict:
+            if self._stop.is_set():
+                raise SkillStopped()
+            time.sleep(self.config.tick_s)
+            return self._state()
 
     def _arm(self, plan: dict) -> str:
         grip = plan.get("gripper")
@@ -713,14 +1025,15 @@ def _tool_down() -> list[float]:
     return [0.0, 1.0, 0.0, 0.0]
 
 
-def _tool_bit_down(wrist_roll: float = -math.pi / 2) -> list[float]:
-    """Tool-down, then roll about tool +x so a laterally held screwdriver bit points world −z.
+if not _assembly_enabled():
+    def _tool_bit_down(wrist_roll: float = -math.pi / 2) -> list[float]:
+        """Tool-down, then roll about tool +x so a laterally held screwdriver bit points world −z.
 
-    ``wrist_roll`` uses the kitchen-robot sign: −π/2 sends gripper +y toward world −z.
-    """
-    from steward.math3d import quat_from_axis_angle, quat_mul
+        ``wrist_roll`` uses the kitchen-robot sign: −π/2 sends gripper +y toward world −z.
+        """
+        from steward.math3d import quat_from_axis_angle, quat_mul
 
-    return quat_mul(_tool_down(), quat_from_axis_angle([1.0, 0.0, 0.0], -wrist_roll))
+        return quat_mul(_tool_down(), quat_from_axis_angle([1.0, 0.0, 0.0], -wrist_roll))
 
 
 def _tool_sideways(direction: list[float]) -> list[float]:

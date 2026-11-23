@@ -308,10 +308,4 @@ if __name__ == "__main__":
     main()
 
 
-# ---------------------------------------------------------------------------
-# Deployment (not part of the steward package; nothing imports this file):
-#   scp src/steward/world/realseg_service.py spark:/home/lilin/steward_perception_service.py
-#   ssh spark /home/lilin/restart_perception.sh   # serves :8117, SAM3 weights
-# The restart script on spark runs it with venv-sam3 and the offline HF_HOME
-# layout; the client side is steward.world.realseg via STEWARD_SEGMENTER_URL.
-# ---------------------------------------------------------------------------
+# Deploy this service separately and configure the client with STEWARD_SEGMENTER_URL.

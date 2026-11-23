@@ -1,7 +1,7 @@
 """Real remote segmentation for WSim's RGB-D sensor (opt-in, Phase 1).
 
 ``STEWARD_SEGMENTER_URL`` points WSim at a class-agnostic instance-segmentation API (the
-steward_perception service on spark: SAM3 prompted with a grid of points). While enabled, a
+segmentation service using SAM3 prompted with a grid of points). While enabled, a
 worker thread replaces the synthetic anonymous masks: it renders the robot's head-camera
 frame, prompts the API with a uniform grid plus depth-guided points, drops ground-plane and
 camera-near instances (the synthetic channel excludes the floor and the robot itself), and

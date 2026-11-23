@@ -13,6 +13,12 @@ frame. It never reports World State identifiers.
 
 from __future__ import annotations
 
+from steward.assembly_profile import enabled as _assembly_enabled
+
+
+if _assembly_enabled():
+    import contextlib
+
 import copy
 import io
 import itertools
@@ -34,7 +40,11 @@ from steward.math3d import matrix_from_quat, pose_compose, pose_inverse, quat_fr
 from steward.scene.extent import entity_body_ids, entity_obb
 from steward.scene.fasteners import FastenConfig
 from steward.world.fastening import Fastening
-from steward.scene.mjcf import MjcfBuild, build_mjcf
+if _assembly_enabled():
+    from steward.world.support_fixture import SupportFixture, enabled_from_env, reserve as reserve_support_fixtures
+    from steward.scene.mjcf import FINGER_DISPLAY_TAG, MjcfBuild, build_mjcf
+else:
+    from steward.scene.mjcf import MjcfBuild, build_mjcf
 from steward.scene.schema import Relation, RigidTree, SceneState, exact
 
 _COLLISION_GROUPS = np.array([1, 0, 0, 1, 0, 0], dtype=np.uint8)
@@ -59,10 +69,18 @@ def _npz(arrays: dict[str, np.ndarray]) -> bytes:
     ``np.savez_compressed`` (level 6) takes 0.75 s for, and a robot that segments its own images
     waits for every frame it asks for."""
     buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
-        for name, value in arrays.items():
-            with archive.open(f"{name}.npy", "w", force_zip64=True) as member:
-                np.lib.format.write_array(member, np.asanyarray(value), allow_pickle=False)
+    if _assembly_enabled():
+        stored = __import__("os").environ.get("STEWARD_RGBD_STORED") == "1"
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED if stored else zipfile.ZIP_DEFLATED,
+                             compresslevel=None if stored else 1) as archive:
+            for name, value in arrays.items():
+                with archive.open(f"{name}.npy", "w", force_zip64=True) as member:
+                    np.lib.format.write_array(member, np.asanyarray(value), allow_pickle=False)
+    else:
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED, compresslevel=1) as archive:
+            for name, value in arrays.items():
+                with archive.open(f"{name}.npy", "w", force_zip64=True) as member:
+                    np.lib.format.write_array(member, np.asanyarray(value), allow_pickle=False)
     return buf.getvalue()
 
 
@@ -212,41 +230,105 @@ def _finger_joints(ent, gripper_link: str) -> list[tuple[str, float, float]]:
     return out
 
 
+if _assembly_enabled():
+    FINGER_CLOSE_S = 0.25      # simulated seconds the displayed jaws take to travel
+    FINGER_MIN_GAP_M = 0.002   # displayed jaws never meet closer than this
+    FINGER_PROBE_M = 0.30      # how far outside a jaw the held part is looked for
+
+
+    @contextlib.contextmanager
+    def shown_fingers(model, data, plan: list[tuple[int, int, float]]):
+        """Draw the moving display jaws instead of the fixed ones for ``update_scene`` calls inside the block.
+
+        ``plan`` comes from :meth:`WorldSim.finger_display`: ``(display geom, fixed geom, shift along the
+        gripper link's y axis)``. Only the draw group and the derived world position of non-colliding,
+        massless geoms change, and both are restored on exit."""
+        saved = [(d, f, int(model.geom_group[d]), int(model.geom_group[f]), data.geom_xpos[d].copy()) for d, f, _ in plan]
+        try:
+            for d, f, shift in plan:
+                model.geom_group[d] = model.geom_group[f]
+                model.geom_group[f] = HIDDEN_GROUP
+                axis = data.xmat[model.geom_bodyid[f]].reshape(3, 3)[:, 1]
+                data.geom_xpos[d] = data.geom_xpos[f] + shift * axis
+            yield
+        finally:
+            for d, f, gd, gf, xpos in saved:
+                model.geom_group[d], model.geom_group[f] = gd, gf
+                data.geom_xpos[d] = xpos
+
+
 def _robot_state(ent) -> _RobotState:
     return _RobotState(ent.id, {lid: _GripState() for lid in _gripper_links(ent)})
 
 
+if _assembly_enabled():
+    _FASTEN_EVERY = max(1, int(__import__('os').environ.get('STEWARD_FASTEN_EVERY', '1')))
+
+
 class WorldSim:
-    def __init__(self, scene: dict, *, timestep: float = 0.002, speed: float = 1.0, seed: int = 0,
-                 perception: PerceptionConfig | None = None, grasp: GraspConfig | None = None,
-                 overview_camera: dict | None = None, freeze_idle: bool = False, appearance: str = "flat",
-                 fasten: FastenConfig | None = None):
-        self._initial_scene = copy.deepcopy(scene)
-        self.timestep = timestep
-        self.speed = speed
-        # The world stands still while no one waits for world time to pass: no robot acts and no
-        # client sleeps, e.g. while the agents think.
-        self.freeze_idle = freeze_idle
-        self._pulling_waits = 0  # callers of wait_until without a hold, waiting for a later step
-        # Steps per locked batch when the loop is behind: short batches keep robot commands within
-        # 50 ms of simulated time even when the physics cannot keep up with the requested speed.
-        self.max_batch = 25
-        self.perception = perception or PerceptionConfig()
-        self.grasp = grasp or GraspConfig()
-        self.fasten = fasten if fasten is not None else FastenConfig.from_env()
-        self._seed = seed
-        self._overview = overview_camera
-        self.appearance = appearance
-        self.lock = threading.RLock()
-        self._clock = threading.Condition(self.lock)
-        self._thread: threading.Thread | None = None
-        self._running = False
-        self.paused = False
-        self.events: list[dict] = []
-        self._render_requests: queue.Queue[_RenderRequest] = queue.Queue()
-        self._realsegs: dict = {}  # robot id -> world.realseg.RealSegmenter, when enabled
-        self._step_listeners = []
-        self._load(self._initial_scene)
+    if _assembly_enabled():
+        def __init__(self, scene: dict, *, timestep: float = 0.002, speed: float = 1.0, seed: int = 0,
+                     perception: PerceptionConfig | None = None, grasp: GraspConfig | None = None,
+                     overview_camera: dict | None = None, freeze_idle: bool = False, appearance: str = "flat",
+                     fasten: FastenConfig | None = None, support_fixture: bool | None = None):
+            self._initial_scene = copy.deepcopy(scene)
+            self.timestep = timestep
+            self.speed = speed
+            # The world stands still while no one waits for world time to pass: no robot acts and no
+            # client sleeps, e.g. while the agents think.
+            self.freeze_idle = freeze_idle
+            self._pulling_waits = 0  # callers of wait_until without a hold, waiting for a later step
+            # Steps per locked batch when the loop is behind: short batches keep robot commands within
+            # 50 ms of simulated time even when the physics cannot keep up with the requested speed.
+            self.max_batch = 25
+            self.perception = perception or PerceptionConfig()
+            self.grasp = grasp or GraspConfig()
+            self.fasten = fasten if fasten is not None else FastenConfig.from_env()
+            self.support_fixture = enabled_from_env() if support_fixture is None else support_fixture
+            self._seed = seed
+            self._overview = overview_camera
+            self.appearance = appearance
+            self.lock = threading.RLock()
+            self._clock = threading.Condition(self.lock)
+            self._thread: threading.Thread | None = None
+            self._running = False
+            self.paused = False
+            self.events: list[dict] = []
+            self._render_requests: queue.Queue[_RenderRequest] = queue.Queue()
+            self._realsegs: dict = {}  # robot id -> world.realseg.RealSegmenter, when enabled
+            self._step_listeners = []
+            self._load(self._initial_scene)
+    else:
+        def __init__(self, scene: dict, *, timestep: float = 0.002, speed: float = 1.0, seed: int = 0,
+                     perception: PerceptionConfig | None = None, grasp: GraspConfig | None = None,
+                     overview_camera: dict | None = None, freeze_idle: bool = False, appearance: str = "flat",
+                     fasten: FastenConfig | None = None):
+            self._initial_scene = copy.deepcopy(scene)
+            self.timestep = timestep
+            self.speed = speed
+            # The world stands still while no one waits for world time to pass: no robot acts and no
+            # client sleeps, e.g. while the agents think.
+            self.freeze_idle = freeze_idle
+            self._pulling_waits = 0  # callers of wait_until without a hold, waiting for a later step
+            # Steps per locked batch when the loop is behind: short batches keep robot commands within
+            # 50 ms of simulated time even when the physics cannot keep up with the requested speed.
+            self.max_batch = 25
+            self.perception = perception or PerceptionConfig()
+            self.grasp = grasp or GraspConfig()
+            self.fasten = fasten if fasten is not None else FastenConfig.from_env()
+            self._seed = seed
+            self._overview = overview_camera
+            self.appearance = appearance
+            self.lock = threading.RLock()
+            self._clock = threading.Condition(self.lock)
+            self._thread: threading.Thread | None = None
+            self._running = False
+            self.paused = False
+            self.events: list[dict] = []
+            self._render_requests: queue.Queue[_RenderRequest] = queue.Queue()
+            self._realsegs: dict = {}  # robot id -> world.realseg.RealSegmenter, when enabled
+            self._step_listeners = []
+            self._load(self._initial_scene)
 
     # ------------------------------------------------------------------ setup
     def _load(self, scene_dict: dict) -> None:
@@ -255,6 +337,8 @@ class WorldSim:
         cameras = [self._overview or self._default_overview()]
         self.build: MjcfBuild = build_mjcf(self.template, timestep=self.timestep, extra_cameras=cameras,
                                            appearance=self.appearance, fasteners=self.fasten.mode != "off")
+        if _assembly_enabled():
+            fixture_slots = reserve_support_fixtures(self.build, self.template, self.support_fixture)
         self.model = self.build.compile()
         self.data = mujoco.MjData(self.model)
         self.build.apply_initial(self.model, self.data)
@@ -266,8 +350,15 @@ class WorldSim:
         self._holds: dict[str, _Hold] = {}
         self._renderers: dict[tuple[int, int], mujoco.Renderer] = {}
         self._index_bodies()
+        if _assembly_enabled():
+            self._index_finger_display()
         self._fastening = Fastening(self)
+        if _assembly_enabled():
+            self._support_fixture = SupportFixture(self, fixture_slots)
         self.step_count = 0
+        if _assembly_enabled():
+            from .start_state import apply_start_state
+            apply_start_state(self)
 
     def _index_bodies(self) -> None:
         self._body_entity: dict[int, str] = {}
@@ -277,6 +368,77 @@ class WorldSim:
                 self._body_entity[bid] = eid
             for link_id, body_name in names.bodies.items():
                 self._body_link[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, body_name)] = link_id
+
+    if _assembly_enabled():
+        def _index_finger_display(self) -> None:
+            """Observer-only display jaws (STEWARD_FINGER_VISUAL=1; empty otherwise): per gripper the
+            ``(display geom, fixed geom, open local y)`` pairs and the displayed travel state."""
+            self._finger_display: dict[tuple[str, str], dict] = {}
+            for rid, rs in self.robots.items():
+                for link_id in rs.grippers:
+                    body_name = self.build.names[rid].bodies[link_id]
+                    bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, body_name)
+                    pairs = []
+                    for gid in range(self.model.ngeom):
+                        if int(self.model.geom_bodyid[gid]) != bid:
+                            continue
+                        name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_GEOM, gid) or ""
+                        prefix = f"{body_name}::{FINGER_DISPLAY_TAG}"
+                        if not name.startswith(prefix):
+                            continue
+                        fixed = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, f"{body_name}::v{name[len(prefix):]}")
+                        if fixed >= 0:
+                            pairs.append((gid, fixed, float(self.model.geom_pos[fixed][1])))
+                    if not pairs:
+                        continue
+                    inner = [abs(y) - float(self.model.geom_size[f][1]) for _, f, y in pairs]
+                    self._finger_display[(rid, link_id)] = {
+                        "pairs": pairs, "bid": bid, "half_opening": min(inner),
+                        "t": -math.inf, "from": 0.0, "to": 0.0}
+
+        def _finger_display_now(self, state: dict) -> float:
+            """Displayed inward travel per jaw (m) at the current world time."""
+            frac = min(max((self.time - state["t"]) / FINGER_CLOSE_S, 0.0), 1.0)
+            return state["from"] + (state["to"] - state["from"]) * frac
+
+        def _finger_display_set(self, rs: _RobotState, gripper_link: str, closed: bool) -> None:
+            """Aim the display jaws: open, or closed onto whatever lies between them (display only;
+            reads the physics state, never writes it)."""
+            state = self._finger_display.get((rs.entity_id, gripper_link))
+            if state is None:
+                return
+            travel = 0.0
+            if closed:
+                half = state["half_opening"]
+                travel = half - FINGER_MIN_GAP_M / 2
+                rot = self.data.xmat[state["bid"]].reshape(3, 3)
+                origin = self.data.xpos[state["bid"]]
+                geomid = np.array([-1], dtype=np.int32)
+                held = rs.grippers[gripper_link].attached
+                carried = self._fastening.component(held) if held is not None else ()
+                for side in (1.0, -1.0):
+                    for x in (-0.005, 0.0, 0.005):
+                        for z in (0.0, 0.003):
+                            start = origin + rot @ np.array([x, side * half, z])
+                            inward = -side * rot[:, 1]
+                            # A held part that reaches past the jaw (wider than the opening): the jaw stays put.
+                            far = mujoco.mj_ray(self.model, self.data, start - FINGER_PROBE_M * inward, inward,
+                                                _COLLISION_GROUPS, 1, -1, geomid)
+                            if 0.0 <= far < FINGER_PROBE_M and self._body_entity.get(int(self.model.geom_bodyid[geomid[0]])) in carried:
+                                travel = 0.0
+                                continue
+                            hit = mujoco.mj_ray(self.model, self.data, start, inward, _COLLISION_GROUPS, 1, -1, geomid)
+                            if 0.0 <= hit < travel:
+                                travel = float(hit)
+            state["from"], state["to"], state["t"] = self._finger_display_now(state), max(travel, 0.0), self.time
+
+        def finger_display(self) -> list[tuple[int, int, float]]:
+            """What :func:`shown_fingers` needs to draw the display jaws where they are now."""
+            plan = []
+            for state in self._finger_display.values():
+                travel = self._finger_display_now(state)
+                plan += [(d, f, -math.copysign(travel, y)) for d, f, y in state["pairs"]]
+            return plan
 
     def _default_overview(self) -> dict:
         span = 6.0
@@ -363,36 +525,71 @@ class WorldSim:
 
     def edit_move(self, entity_id: str, placement: dict) -> dict:
         """Move an object or a piece of furniture; objects resting on moved furniture move with it."""
-        with self.lock:
-            ent = self._editable(entity_id)
-            before = self._entity_pose(entity_id)
-            target = self.placement_pose(placement, before)
-            if placement.get("on") == entity_id:
-                raise EditError("an entity cannot be placed on itself")
-            delta = pose_compose(target, pose_inverse(before))
-            carried = [r.a["entity"] for r in self._relations()
-                       if r.type == "supported-by" and r.b["entity"] == entity_id and r.a["entity"] != entity_id]
-            carried = [c for c in carried if self.template.entity(c).rigid.root.value == "free"
-                       and all(not rs.holding_any(c) for rs in self.robots.values())]
-            if self._fastening.welds:
-                carried = sorted({member for cid in [entity_id, *carried]
-                                  for member in self._fastening.component(cid)} - {entity_id})
+        if _assembly_enabled():
+            with self.lock:
+                ent = self._editable(entity_id)
+                before = self._entity_pose(entity_id)
+                target = self.placement_pose(placement, before)
+                if placement.get("on") == entity_id:
+                    raise EditError("an entity cannot be placed on itself")
+                delta = pose_compose(target, pose_inverse(before))
+                carried = [r.a["entity"] for r in self._relations()
+                           if r.type == "supported-by" and r.b["entity"] == entity_id and r.a["entity"] != entity_id]
+                carried = [c for c in carried if self.template.entity(c).rigid.root.value == "free"
+                           and all(not rs.holding_any(c) for rs in self.robots.values())]
+                if self._fastening.welds:
+                    carried = sorted({member for cid in [entity_id, *carried]
+                                      for member in self._fastening.component(cid)} - {entity_id})
+                    for cid in carried:
+                        self._editable(cid)
+                saved = {eid: self._entity_pose(eid) for eid in [entity_id, *carried]}
+                self._set_root_pose(ent, target)
                 for cid in carried:
-                    self._editable(cid)
-            saved = {eid: self._entity_pose(eid) for eid in [entity_id, *carried]}
-            self._set_root_pose(ent, target)
-            for cid in carried:
-                self._set_root_pose(self.template.entity(cid), pose_compose(delta, saved[cid]))
-            mujoco.mj_forward(self.model, self.data)
-            problems = self._penetrations(set(saved) if self._fastening.welds else {entity_id})
-            if problems:
-                for eid, pose in saved.items():
-                    self._set_root_pose(self.template.entity(eid), pose)
+                    self._set_root_pose(self.template.entity(cid), pose_compose(delta, saved[cid]))
                 mujoco.mj_forward(self.model, self.data)
-                raise EditError("; ".join(problems[:3]))
-            self.events.append({"t": self.time, "type": "world/edit", "action": "move", "entity": entity_id,
-                                "carried": carried, "plausibility": "god-mode"})
-            return {"ok": True, "action": "move", "entity": entity_id, "pose": target, "carried": carried}
+                problems = self._penetrations(set(saved) if self._fastening.welds else {entity_id})
+                if problems:
+                    for eid, pose in saved.items():
+                        self._set_root_pose(self.template.entity(eid), pose)
+                    mujoco.mj_forward(self.model, self.data)
+                    raise EditError("; ".join(problems[:3]))
+                # Explicit world edits supersede the fixture; failed edits leave it intact.
+                for eid in saved:
+                    self._support_fixture.detach(eid)
+                self.events.append({"t": self.time, "type": "world/edit", "action": "move", "entity": entity_id,
+                                    "carried": carried, "plausibility": "god-mode"})
+                return {"ok": True, "action": "move", "entity": entity_id, "pose": target, "carried": carried}
+        else:
+            with self.lock:
+                ent = self._editable(entity_id)
+                before = self._entity_pose(entity_id)
+                target = self.placement_pose(placement, before)
+                if placement.get("on") == entity_id:
+                    raise EditError("an entity cannot be placed on itself")
+                delta = pose_compose(target, pose_inverse(before))
+                carried = [r.a["entity"] for r in self._relations()
+                           if r.type == "supported-by" and r.b["entity"] == entity_id and r.a["entity"] != entity_id]
+                carried = [c for c in carried if self.template.entity(c).rigid.root.value == "free"
+                           and all(not rs.holding_any(c) for rs in self.robots.values())]
+                if self._fastening.welds:
+                    carried = sorted({member for cid in [entity_id, *carried]
+                                      for member in self._fastening.component(cid)} - {entity_id})
+                    for cid in carried:
+                        self._editable(cid)
+                saved = {eid: self._entity_pose(eid) for eid in [entity_id, *carried]}
+                self._set_root_pose(ent, target)
+                for cid in carried:
+                    self._set_root_pose(self.template.entity(cid), pose_compose(delta, saved[cid]))
+                mujoco.mj_forward(self.model, self.data)
+                problems = self._penetrations(set(saved) if self._fastening.welds else {entity_id})
+                if problems:
+                    for eid, pose in saved.items():
+                        self._set_root_pose(self.template.entity(eid), pose)
+                    mujoco.mj_forward(self.model, self.data)
+                    raise EditError("; ".join(problems[:3]))
+                self.events.append({"t": self.time, "type": "world/edit", "action": "move", "entity": entity_id,
+                                    "carried": carried, "plausibility": "god-mode"})
+                return {"ok": True, "action": "move", "entity": entity_id, "pose": target, "carried": carried}
 
     def edit_spawn(self, entity_id: str, template: dict, placement: dict, asset: dict | None = None) -> dict:
         """Add a new entity from an asset template; rebuilds the model and keeps the running state."""
@@ -450,6 +647,8 @@ class WorldSim:
         self.template = scene
         self.build = build_mjcf(scene, timestep=self.timestep, extra_cameras=[self._overview or self._default_overview()],
                                 appearance=self.appearance, fasteners=self.fasten.mode != "off")
+        if _assembly_enabled():
+            fixture_slots = reserve_support_fixtures(self.build, scene, self.support_fixture)
         self.model = self.build.compile()
         self.data = mujoco.MjData(self.model)
         self.build.apply_initial(self.model, self.data)
@@ -466,7 +665,11 @@ class WorldSim:
                 self.data.ctrl[a] = ctrl[name]
         self.data.time = sim_time
         self._index_bodies()
+        if _assembly_enabled():
+            self._index_finger_display()
         self._fastening = Fastening(self)
+        if _assembly_enabled():
+            self._support_fixture = SupportFixture(self, fixture_slots, self._support_fixture)
         self.robots = {e.id: robots.get(e.id, _robot_state(e)) for e in scene.entities if e.role == "robot"}
         for rs in self.robots.values():
             for g in rs.grippers.values():
@@ -485,18 +688,37 @@ class WorldSim:
         return float(self.data.time)
 
     def step(self, n: int = 1) -> None:
-        with self.lock:
-            for _ in range(n):
-                self._drive_handles()
-                mujoco.mj_step(self.model, self.data)
-                self._follow_attached()
-                if self._fastening.slots:
-                    # mj_step leaves position caches at the previous integration point.
-                    mujoco.mj_forward(self.model, self.data)
-                    self._fastening.update()
-                self.step_count += 1
-                for listener in tuple(self._step_listeners):
-                    listener()
+        if _assembly_enabled():
+            with self.lock:
+                for _ in range(n):
+                    self._drive_handles()
+                    mujoco.mj_step(self.model, self.data)
+                    self._follow_attached()
+                    checked = bool(self._fastening.slots) and self.step_count % _FASTEN_EVERY == 0
+                    if checked:
+                        # mj_step leaves position caches at the previous integration point.
+                        mujoco.mj_forward(self.model, self.data)
+                        self._fastening.update()
+                    if self._support_fixture.pending:
+                        if not checked:
+                            mujoco.mj_forward(self.model, self.data)
+                        self._support_fixture.update()
+                    self.step_count += 1
+                    for listener in tuple(self._step_listeners):
+                        listener()
+        else:
+            with self.lock:
+                for _ in range(n):
+                    self._drive_handles()
+                    mujoco.mj_step(self.model, self.data)
+                    self._follow_attached()
+                    if self._fastening.slots:
+                        # mj_step leaves position caches at the previous integration point.
+                        mujoco.mj_forward(self.model, self.data)
+                        self._fastening.update()
+                    self.step_count += 1
+                    for listener in tuple(self._step_listeners):
+                        listener()
 
     def subscribe_steps(self, listener):
         """Subscribe a nonblocking recorder callback under the physics lock; return its disposer."""
@@ -670,35 +892,68 @@ class WorldSim:
         """Apply a robot actuator command: base [x, y, yaw], lift, reach, wrist_yaw, wrist_roll,
         gripper "open"/"close", or generic ``joints`` {joint id: target} for any actuated joint of
         any embodiment, and ``gripper`` {grasp-point link id: "open"/"close"} for multi-gripper robots."""
-        with self.lock:
-            rs = self._robot(robot_id)
-            names = self.build.names[robot_id]
-            if "base" in cmd:
-                for key, value in zip(("root_x", "root_y", "root_yaw"), cmd["base"], strict=True):
-                    self._set_ctrl(names.actuators[key], value)
-            for joint in ("lift", "reach", "wrist_yaw", "wrist_roll"):
-                if joint in cmd:
-                    self._set_ctrl(names.actuators[joint], cmd[joint])
-            for name, value in (cmd.get("joints") or {}).items():
-                if name not in names.actuators:
-                    raise KeyError(f"robot {robot_id!r} has no actuated joint {name!r}")
-                self._set_ctrl(names.actuators[name], float(value))
-            if "gripper" in cmd:
-                grip = cmd["gripper"]
-                wanted = dict(grip) if isinstance(grip, dict) else {self._sole_gripper(rs): grip}
-                for link_id, action in wanted.items():
-                    g = rs.grippers.get(link_id)
-                    if g is None:
-                        raise KeyError(f"robot {robot_id!r} has no gripper link {link_id!r}")
-                    if action == "close" and not g.closed:
-                        g.closed = True
-                        self._set_fingers(rs, link_id, closed=True)
-                        self._try_attach(rs, g, link_id)
-                    elif action == "open" and g.closed:
-                        g.closed = False
-                        self._set_fingers(rs, link_id, closed=False)
-                        self._release(rs, g)
-            return {"ok": True, "t": self.time}
+        if _assembly_enabled():
+            with self.lock:
+                rs = self._robot(robot_id)
+                names = self.build.names[robot_id]
+                if "base" in cmd:
+                    for key, value in zip(("root_x", "root_y", "root_yaw"), cmd["base"], strict=True):
+                        self._set_ctrl(names.actuators[key], value)
+                for joint in ("lift", "reach", "wrist_yaw", "wrist_roll"):
+                    if joint in cmd:
+                        self._set_ctrl(names.actuators[joint], cmd[joint])
+                for name, value in (cmd.get("joints") or {}).items():
+                    if name not in names.actuators:
+                        raise KeyError(f"robot {robot_id!r} has no actuated joint {name!r}")
+                    self._set_ctrl(names.actuators[name], float(value))
+                if "gripper" in cmd:
+                    grip = cmd["gripper"]
+                    wanted = dict(grip) if isinstance(grip, dict) else {self._sole_gripper(rs): grip}
+                    for link_id, action in wanted.items():
+                        g = rs.grippers.get(link_id)
+                        if g is None:
+                            raise KeyError(f"robot {robot_id!r} has no gripper link {link_id!r}")
+                        if action == "close" and not g.closed:
+                            g.closed = True
+                            self._set_fingers(rs, link_id, closed=True)
+                            self._try_attach(rs, g, link_id)
+                            self._finger_display_set(rs, link_id, closed=True)
+                        elif action == "open" and g.closed:
+                            g.closed = False
+                            self._set_fingers(rs, link_id, closed=False)
+                            self._release(rs, g)
+                            self._finger_display_set(rs, link_id, closed=False)
+                return {"ok": True, "t": self.time}
+        else:
+            with self.lock:
+                rs = self._robot(robot_id)
+                names = self.build.names[robot_id]
+                if "base" in cmd:
+                    for key, value in zip(("root_x", "root_y", "root_yaw"), cmd["base"], strict=True):
+                        self._set_ctrl(names.actuators[key], value)
+                for joint in ("lift", "reach", "wrist_yaw", "wrist_roll"):
+                    if joint in cmd:
+                        self._set_ctrl(names.actuators[joint], cmd[joint])
+                for name, value in (cmd.get("joints") or {}).items():
+                    if name not in names.actuators:
+                        raise KeyError(f"robot {robot_id!r} has no actuated joint {name!r}")
+                    self._set_ctrl(names.actuators[name], float(value))
+                if "gripper" in cmd:
+                    grip = cmd["gripper"]
+                    wanted = dict(grip) if isinstance(grip, dict) else {self._sole_gripper(rs): grip}
+                    for link_id, action in wanted.items():
+                        g = rs.grippers.get(link_id)
+                        if g is None:
+                            raise KeyError(f"robot {robot_id!r} has no gripper link {link_id!r}")
+                        if action == "close" and not g.closed:
+                            g.closed = True
+                            self._set_fingers(rs, link_id, closed=True)
+                            self._try_attach(rs, g, link_id)
+                        elif action == "open" and g.closed:
+                            g.closed = False
+                            self._set_fingers(rs, link_id, closed=False)
+                            self._release(rs, g)
+                return {"ok": True, "t": self.time}
 
     @staticmethod
     def _sole_gripper(rs: _RobotState) -> str:
@@ -815,6 +1070,8 @@ class WorldSim:
         body = self._root_body(best)
         obj_pose = {"p": self.data.xpos[body].tolist(), "q": self.data.xquat[body].tolist()}
         g.attached = best
+        if _assembly_enabled():
+            self._support_fixture.detach(best)
         g.rel = pose_compose(pose_inverse(self.gripper_pose(rs.entity_id, gripper_link)), obj_pose)
         self._suspend_contacts(rs, g)
         self.events.append({"t": self.time, "type": "grasp/attach", "robot": rs.entity_id, "entity": best})
@@ -902,6 +1159,8 @@ class WorldSim:
             jadr = self._free_joint_dof(eid)
             self.data.qvel[jadr : jadr + 6] = 0.0
         self.events.append({"t": self.time, "type": "grasp/release", "robot": rs.entity_id, "entity": g.attached})
+        if _assembly_enabled():
+            self._support_fixture.released(g.attached)
         g.attached, g.rel, g.saved_contacts = None, None, {}
 
     def _follow_attached(self) -> None:
@@ -1036,44 +1295,84 @@ class WorldSim:
         raw imaging, the ideal detections of every camera (each carries the ``camera`` it came from
         and a pose relative to it; an object two cameras see is reported by the first).
         ``episode`` changes with every load and reset, which the robot experiences as a reboot."""
-        with self.lock:
-            rs = self._robot(robot_id)
-            names = self.build.names[robot_id]
-            roots = names.root_joints
-            x, y, yaw = ((self._joint_q(j) for j in roots) if roots else (0.0, 0.0, 0.0))
-            p = self.perception
-            rng = self._sensor_rng(robot_id, "body")
-            odom = {
-                "x": x + rng.normal(0, p.odom_pos_sigma),
-                "y": y + rng.normal(0, p.odom_pos_sigma),
-                "yaw": yaw + rng.normal(0, p.odom_yaw_sigma),
-                "sigma": {"pos": p.odom_pos_sigma, "yaw": p.odom_yaw_sigma},
-            }
-            joints = {jid: self._joint_q(jname) for jid, jname in names.joints.items()}
-            cameras = self.robot_cameras(robot_id)
-            grips = {lid: {"state": "closed" if g.closed else "open",
-                           "holding": g.attached is not None or g.handle is not None,
-                           "holdingHandle": g.handle is not None}
-                     for lid, g in rs.grippers.items()}
-            frame = {
-                "stamp": self.time,
-                "episode": self.episode,
-                "odometry": odom,
-                "joints": joints,
-                "grippers": grips,
-                "cameras": [{"id": c["id"], "intrinsics": c["intrinsics"]} for c in cameras],
-            }
-            if len(grips) == 1:
-                frame["gripper"] = next(iter(grips.values()))
-            if self.perception.mode == "rgbd":
-                frame["imaging"] = "rgbd"
-                frame["masks"] = self.perception.masks
-            else:
-                seen: set = set()
-                frame["detections"] = [det for c in cameras
-                                       for det in self._detections(robot_id, *self.camera_pose(robot_id, c["id"]), seen,
-                                                                   self._sensor_rng(robot_id, f"detect/{c['id']}"))]
-            return frame
+        if _assembly_enabled():
+            with self.lock:
+                rs = self._robot(robot_id)
+                names = self.build.names[robot_id]
+                roots = names.root_joints
+                x, y, yaw = ((self._joint_q(j) for j in roots) if roots else (0.0, 0.0, 0.0))
+                p = self.perception
+                rng = self._sensor_rng(robot_id, "body")
+                odom = {
+                    "x": x + rng.normal(0, p.odom_pos_sigma),
+                    "y": y + rng.normal(0, p.odom_pos_sigma),
+                    "yaw": yaw + rng.normal(0, p.odom_yaw_sigma),
+                    "sigma": {"pos": p.odom_pos_sigma, "yaw": p.odom_yaw_sigma},
+                }
+                joints = {jid: self._joint_q(jname) for jid, jname in names.joints.items()}
+                cameras = self.robot_cameras(robot_id)
+                grips = {lid: {"state": "closed" if g.closed else "open",
+                               "holding": g.attached is not None or g.handle is not None,
+                               "holdingHandle": g.handle is not None}
+                         for lid, g in rs.grippers.items()}
+                frame = {
+                    "stamp": self.time,
+                    "episode": self.episode,
+                    "odometry": odom,
+                    "joints": joints,
+                    "grippers": grips,
+                    "cameras": [{"id": c["id"], "intrinsics": c["intrinsics"]} for c in cameras],
+                }
+                if len(grips) == 1:
+                    frame["gripper"] = next(iter(grips.values()))
+                if self.perception.mode == "rgbd":
+                    frame["imaging"] = "rgbd"
+                    frame["masks"] = self.perception.masks
+                else:
+                    seen: set = set()
+                    frame["detections"] = [det for c in cameras if not c.get("onDemand")
+                                           for det in self._detections(robot_id, *self.camera_pose(robot_id, c["id"]), seen,
+                                                                       self._sensor_rng(robot_id, f"detect/{c['id']}"))]
+                return frame
+        else:
+            with self.lock:
+                rs = self._robot(robot_id)
+                names = self.build.names[robot_id]
+                roots = names.root_joints
+                x, y, yaw = ((self._joint_q(j) for j in roots) if roots else (0.0, 0.0, 0.0))
+                p = self.perception
+                rng = self._sensor_rng(robot_id, "body")
+                odom = {
+                    "x": x + rng.normal(0, p.odom_pos_sigma),
+                    "y": y + rng.normal(0, p.odom_pos_sigma),
+                    "yaw": yaw + rng.normal(0, p.odom_yaw_sigma),
+                    "sigma": {"pos": p.odom_pos_sigma, "yaw": p.odom_yaw_sigma},
+                }
+                joints = {jid: self._joint_q(jname) for jid, jname in names.joints.items()}
+                cameras = self.robot_cameras(robot_id)
+                grips = {lid: {"state": "closed" if g.closed else "open",
+                               "holding": g.attached is not None or g.handle is not None,
+                               "holdingHandle": g.handle is not None}
+                         for lid, g in rs.grippers.items()}
+                frame = {
+                    "stamp": self.time,
+                    "episode": self.episode,
+                    "odometry": odom,
+                    "joints": joints,
+                    "grippers": grips,
+                    "cameras": [{"id": c["id"], "intrinsics": c["intrinsics"]} for c in cameras],
+                }
+                if len(grips) == 1:
+                    frame["gripper"] = next(iter(grips.values()))
+                if self.perception.mode == "rgbd":
+                    frame["imaging"] = "rgbd"
+                    frame["masks"] = self.perception.masks
+                else:
+                    seen: set = set()
+                    frame["detections"] = [det for c in cameras
+                                           for det in self._detections(robot_id, *self.camera_pose(robot_id, c["id"]), seen,
+                                                                       self._sensor_rng(robot_id, f"detect/{c['id']}"))]
+                return frame
 
     def proprioception(self, robot_id: str) -> dict:
         """The robot's own joint encoders and gripper states, with no exteroceptive fields.
@@ -1166,26 +1465,54 @@ class WorldSim:
         return request.png
 
     def _rgbd_now(self, robot_id: str, sensor_id: str | None = None) -> bytes:
-        with self.lock:
-            header = self.sensors(robot_id)
-            header.pop("imaging", None)
-            header.pop("detections", None)
-            _, sensor = self.camera_pose(robot_id, sensor_id)
-            width, height = sensor["intrinsics"]["width"], sensor["intrinsics"]["height"]
-            key = (width, height)
-            if key not in self._renderers:
-                self._renderers[key] = mujoco.Renderer(self.model, height, width)
-            renderer = self._renderers[key]
-            renderer.update_scene(self.data, camera=self.robot_camera_name(robot_id, sensor["id"]))
-            self._shade(renderer)
-            rgb = renderer.render().copy()
-            renderer.enable_depth_rendering()
-            depth = renderer.render().copy()
-            renderer.disable_depth_rendering()
-            renderer.enable_segmentation_rendering()
-            seg = renderer.render().copy()
-            renderer.disable_segmentation_rendering()
-            part_of, transparent = self._geom_parts(robot_id)
+        if _assembly_enabled():
+            with self.lock:
+                header = self.sensors(robot_id)
+                header.pop("imaging", None)
+                header.pop("detections", None)
+                _, sensor = self.camera_pose(robot_id, sensor_id)
+                width, height = sensor["intrinsics"]["width"], sensor["intrinsics"]["height"]
+                key = (width, height)
+                if key not in self._renderers:
+                    self._renderers[key] = mujoco.Renderer(self.model, height, width)
+                renderer = self._renderers[key]
+                from steward.world.camera_optics import clip_planes
+                with clip_planes(self.model, sensor):
+                    renderer.update_scene(self.data, camera=self.robot_camera_name(robot_id, sensor["id"]))
+                    self._shade(renderer)
+                    rgb = renderer.render().copy()
+                    renderer.enable_depth_rendering()
+                    try:
+                        depth = renderer.render().copy()
+                    finally:
+                        renderer.disable_depth_rendering()
+                    renderer.enable_segmentation_rendering()
+                    try:
+                        seg = renderer.render().copy()
+                    finally:
+                        renderer.disable_segmentation_rendering()
+                part_of, transparent = self._geom_parts(robot_id)
+        else:
+            with self.lock:
+                header = self.sensors(robot_id)
+                header.pop("imaging", None)
+                header.pop("detections", None)
+                _, sensor = self.camera_pose(robot_id, sensor_id)
+                width, height = sensor["intrinsics"]["width"], sensor["intrinsics"]["height"]
+                key = (width, height)
+                if key not in self._renderers:
+                    self._renderers[key] = mujoco.Renderer(self.model, height, width)
+                renderer = self._renderers[key]
+                renderer.update_scene(self.data, camera=self.robot_camera_name(robot_id, sensor["id"]))
+                self._shade(renderer)
+                rgb = renderer.render().copy()
+                renderer.enable_depth_rendering()
+                depth = renderer.render().copy()
+                renderer.disable_depth_rendering()
+                renderer.enable_segmentation_rendering()
+                seg = renderer.render().copy()
+                renderer.disable_segmentation_rendering()
+                part_of, transparent = self._geom_parts(robot_id)
         geom = np.where(seg[..., 1] == int(mujoco.mjtObj.mjOBJ_GEOM), seg[..., 0], -1)
         clear = np.where(geom >= 0, transparent[np.clip(geom, 0, None)], False)
         rng = self._sensor_rng(robot_id, f"rgbd/{sensor['id']}")
@@ -1194,6 +1521,10 @@ class WorldSim:
             parts = np.where(geom >= 0, part_of[np.clip(geom, 0, None)], -1)
             masks = {"mask": self._anonymous_masks(parts, rng)}
         depth_mm = self._noisy_depth(depth, clear, rng)
+        if _assembly_enabled():
+            if "depthRangeM" in sensor:
+                near, far = sensor["depthRangeM"]
+                depth_mm[(depth < near) | (depth > far)] = 0
         return _npz({"camera": np.array(sensor["id"]), "rgb": rgb, "depth": depth_mm,
                      "fovy": np.float32(sensor["intrinsics"]["fovy"]), "header": np.array(json.dumps(header)), **masks})
 
@@ -1307,17 +1638,27 @@ class WorldSim:
         """Screw-hole markers on the detected part, in that part's body frame (ideal perception)."""
         wanted = set(links) if links else None
         out = []
-        for link in ent.rigid.links:
-            if wanted is not None and link.id not in wanted:
-                continue
-            for aff in link.affordances:
-                value = aff.value
-                if isinstance(value, dict) and "screw-hole" in value:
-                    hole = value["screw-hole"]
-                    item = {"id": str(hole["id"]), "p": [round(float(v), 4) for v in hole["p"][:3]]}
-                    if hole.get("n") is not None:
-                        item["n"] = [round(float(v), 4) for v in hole["n"][:3]]
-                    out.append(item)
+        if _assembly_enabled():
+            for link in ent.rigid.links:
+                if wanted is not None and link.id not in wanted:
+                    continue
+                for aff in link.affordances:
+                    value = aff.value
+                    if isinstance(value, dict) and "screw-hole" in value:
+                        hole = value["screw-hole"]
+                        out.append({"id": str(hole["id"]), "p": [round(float(v), 4) for v in hole["p"][:3]]})
+        else:
+            for link in ent.rigid.links:
+                if wanted is not None and link.id not in wanted:
+                    continue
+                for aff in link.affordances:
+                    value = aff.value
+                    if isinstance(value, dict) and "screw-hole" in value:
+                        hole = value["screw-hole"]
+                        item = {"id": str(hole["id"]), "p": [round(float(v), 4) for v in hole["p"][:3]]}
+                        if hole.get("n") is not None:
+                            item["n"] = [round(float(v), 4) for v in hole["n"][:3]]
+                        out.append(item)
         return out
 
     def _visible(self, obb, cam_inv: dict, cam_p: np.ndarray, half_h: float, half_v: float,
@@ -1395,25 +1736,48 @@ class WorldSim:
                 return
 
     def _render_now(self, camera: str | dict, width: int, height: int, fmt: str = "png") -> bytes:
-        with self.lock:
-            key = (width, height)
-            if key not in self._renderers:
-                self._renderers[key] = mujoco.Renderer(self.model, height, width)
-            renderer = self._renderers[key]
-            if isinstance(camera, dict):
-                hidden = self.cutaway_walls(camera)
-                saved = {gid: int(self.model.geom_group[gid]) for gid in hidden}
-                try:
-                    for gid in hidden:
-                        self.model.geom_group[gid] = HIDDEN_GROUP
-                    renderer.update_scene(self.data, camera=free_camera(camera))
+        if _assembly_enabled():
+            with self.lock:
+                key = (width, height)
+                if key not in self._renderers:
+                    self._renderers[key] = mujoco.Renderer(self.model, height, width)
+                renderer = self._renderers[key]
+                if isinstance(camera, dict):
+                    hidden = self.cutaway_walls(camera)
+                    saved = {gid: int(self.model.geom_group[gid]) for gid in hidden}
+                    try:
+                        for gid in hidden:
+                            self.model.geom_group[gid] = HIDDEN_GROUP
+                        # Free cameras are observer views; named (robot/overview) cameras keep the fixed jaws.
+                        with shown_fingers(self.model, self.data, self.finger_display()):
+                            renderer.update_scene(self.data, camera=free_camera(camera))
+                        self._shade(renderer)
+                    finally:
+                        for gid, group in saved.items():
+                            self.model.geom_group[gid] = group
+                else:
+                    renderer.update_scene(self.data, camera=camera)
                     self._shade(renderer)
-                finally:
-                    for gid, group in saved.items():
-                        self.model.geom_group[gid] = group
-            else:
-                renderer.update_scene(self.data, camera=camera)
-                self._shade(renderer)
+        else:
+            with self.lock:
+                key = (width, height)
+                if key not in self._renderers:
+                    self._renderers[key] = mujoco.Renderer(self.model, height, width)
+                renderer = self._renderers[key]
+                if isinstance(camera, dict):
+                    hidden = self.cutaway_walls(camera)
+                    saved = {gid: int(self.model.geom_group[gid]) for gid in hidden}
+                    try:
+                        for gid in hidden:
+                            self.model.geom_group[gid] = HIDDEN_GROUP
+                        renderer.update_scene(self.data, camera=free_camera(camera))
+                        self._shade(renderer)
+                    finally:
+                        for gid, group in saved.items():
+                            self.model.geom_group[gid] = group
+                else:
+                    renderer.update_scene(self.data, camera=camera)
+                    self._shade(renderer)
         return encode_image(renderer.render(), fmt)
 
     def _shade(self, renderer: mujoco.Renderer) -> None:

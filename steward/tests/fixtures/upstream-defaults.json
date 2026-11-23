@@ -1,0 +1,4972 @@
+{
+  "source": "upstream default reference snapshot",
+  "values": {
+    "robot": {
+      "id": "w:template",
+      "role": "robot",
+      "category": {
+        "value": "steward-bot"
+      },
+      "pose": {
+        "value": {
+          "p": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "q": [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "body": {
+        "kind": "rigid",
+        "root": {
+          "value": "planar"
+        },
+        "links": [
+          {
+            "id": "base",
+            "name": "base",
+            "geometry": {
+              "collision": [
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.5,
+                    0.44,
+                    0.28
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.16
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.2,
+                    0.32,
+                    0.55,
+                    1.0
+                  ]
+                }
+              ],
+              "visual": [
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.5,
+                    0.44,
+                    0.28
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.16
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.2,
+                    0.32,
+                    0.55,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.05,
+                    0.05,
+                    1.15
+                  ],
+                  "pose": {
+                    "p": [
+                      0.18,
+                      0.0,
+                      0.87
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.7,
+                    0.72,
+                    0.75,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.05,
+                    0.05,
+                    1.1
+                  ],
+                  "pose": {
+                    "p": [
+                      -0.12,
+                      0.0,
+                      0.85
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.7,
+                    0.72,
+                    0.75,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 60.0
+              }
+            },
+            "affordances": []
+          },
+          {
+            "id": "head",
+            "name": "head",
+            "geometry": {
+              "visual": [
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.08,
+                    0.16,
+                    0.08
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.0
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.15,
+                    0.15,
+                    0.15,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 0.5
+              }
+            },
+            "affordances": [],
+            "sensors": [
+              {
+                "id": "head_camera",
+                "kind": "rgbd",
+                "mount": {
+                  "p": [
+                    0.05,
+                    0.0,
+                    0.0
+                  ],
+                  "q": [
+                    0.9659258262890683,
+                    0.0,
+                    0.25881904510252074,
+                    0.0
+                  ]
+                },
+                "intrinsics": {
+                  "width": 2560,
+                  "height": 1920,
+                  "fovy": 60.0
+                },
+                "rateHz": 10
+              },
+              {
+                "id": "wide_camera",
+                "kind": "rgbd",
+                "mount": {
+                  "p": [
+                    0.05,
+                    0.0,
+                    -0.05
+                  ],
+                  "q": [
+                    0.9238795325112867,
+                    0.0,
+                    0.3826834323650898,
+                    0.0
+                  ]
+                },
+                "intrinsics": {
+                  "width": 480,
+                  "height": 360,
+                  "fovy": 100.0
+                },
+                "rateHz": 10
+              }
+            ]
+          },
+          {
+            "id": "carriage",
+            "name": "carriage",
+            "geometry": {
+              "visual": [
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.08,
+                    0.16,
+                    0.05
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.0
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.7,
+                    0.72,
+                    0.75,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 2.0
+              }
+            },
+            "affordances": []
+          },
+          {
+            "id": "arm",
+            "name": "arm",
+            "geometry": {
+              "visual": [
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.5,
+                    0.04,
+                    0.03
+                  ],
+                  "pose": {
+                    "p": [
+                      -0.25,
+                      0.0,
+                      0.0
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.85,
+                    0.55,
+                    0.15,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 1.5
+              }
+            },
+            "affordances": []
+          },
+          {
+            "id": "wrist",
+            "name": "wrist",
+            "geometry": {
+              "visual": [
+                {
+                  "kind": "primitive",
+                  "shape": "cylinder",
+                  "size": [
+                    0.02,
+                    0.03
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.0
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.7,
+                    0.72,
+                    0.75,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 0.1
+              }
+            },
+            "affordances": []
+          },
+          {
+            "id": "hand",
+            "name": "hand",
+            "geometry": {
+              "visual": [
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.03,
+                    0.03,
+                    0.03
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.0
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.7,
+                    0.72,
+                    0.75,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 0.1
+              }
+            },
+            "affordances": []
+          },
+          {
+            "id": "gripper",
+            "name": "gripper",
+            "geometry": {
+              "visual": [
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.06,
+                    0.012,
+                    0.05
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.045,
+                      0.0
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.1,
+                    0.1,
+                    0.1,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.06,
+                    0.012,
+                    0.05
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      -0.045,
+                      0.0
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.1,
+                    0.1,
+                    0.1,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.02,
+                    0.1,
+                    0.03
+                  ],
+                  "pose": {
+                    "p": [
+                      -0.03,
+                      0.0,
+                      0.0
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.1,
+                    0.1,
+                    0.1,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 0.5
+              }
+            },
+            "affordances": [
+              {
+                "value": "grasp-point"
+              }
+            ]
+          }
+        ],
+        "joints": [
+          {
+            "id": "head_mount",
+            "parent": "base",
+            "child": "head",
+            "type": {
+              "value": "fixed"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.16,
+                  0.0,
+                  1.5
+                ],
+                "q": [
+                  1.0,
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            },
+            "q": {
+              "value": []
+            },
+            "qd": {
+              "value": []
+            }
+          },
+          {
+            "id": "lift",
+            "parent": "base",
+            "child": "carriage",
+            "type": {
+              "value": "prismatic"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.22,
+                  0.0,
+                  0.0
+                ],
+                "q": [
+                  1.0,
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            },
+            "axis": {
+              "value": [
+                0.0,
+                0.0,
+                1.0
+              ]
+            },
+            "limits": {
+              "value": {
+                "lo": 0.0,
+                "hi": 1.3
+              }
+            },
+            "q": {
+              "value": [
+                0.6
+              ]
+            },
+            "qd": {
+              "value": [
+                0.0
+              ]
+            },
+            "dynamics": {
+              "value": {
+                "damping": 250.0
+              }
+            },
+            "actuator": {
+              "kind": "position",
+              "limits": {
+                "effort": 1600.0,
+                "velocity": 1.2
+              },
+              "gains": {
+                "kp": 6000.0
+              }
+            }
+          },
+          {
+            "id": "reach",
+            "parent": "carriage",
+            "child": "arm",
+            "type": {
+              "value": "prismatic"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "q": [
+                  1.0,
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            },
+            "axis": {
+              "value": [
+                1.0,
+                0.0,
+                0.0
+              ]
+            },
+            "limits": {
+              "value": {
+                "lo": 0.05,
+                "hi": 0.7
+              }
+            },
+            "q": {
+              "value": [
+                0.1
+              ]
+            },
+            "qd": {
+              "value": [
+                0.0
+              ]
+            },
+            "dynamics": {
+              "value": {
+                "damping": 150.0
+              }
+            },
+            "actuator": {
+              "kind": "position",
+              "limits": {
+                "effort": 800.0,
+                "velocity": 1.2
+              },
+              "gains": {
+                "kp": 2500.0
+              }
+            }
+          },
+          {
+            "id": "gripper_mount",
+            "parent": "arm",
+            "child": "wrist",
+            "type": {
+              "value": "fixed"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.04,
+                  0.0,
+                  0.0
+                ],
+                "q": [
+                  1.0,
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            },
+            "q": {
+              "value": []
+            },
+            "qd": {
+              "value": []
+            }
+          },
+          {
+            "id": "wrist_yaw",
+            "parent": "wrist",
+            "child": "hand",
+            "type": {
+              "value": "revolute"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "q": [
+                  1.0,
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            },
+            "axis": {
+              "value": [
+                0.0,
+                0.0,
+                1.0
+              ]
+            },
+            "limits": {
+              "value": {
+                "lo": -3.141592653589793,
+                "hi": 3.141592653589793
+              }
+            },
+            "q": {
+              "value": [
+                0.0
+              ]
+            },
+            "qd": {
+              "value": [
+                0.0
+              ]
+            },
+            "dynamics": {
+              "value": {
+                "damping": 2.0
+              }
+            },
+            "actuator": {
+              "kind": "position",
+              "limits": {
+                "effort": 40.0,
+                "velocity": 6.0
+              },
+              "gains": {
+                "kp": 40.0,
+                "armature": 0.02
+              }
+            }
+          },
+          {
+            "id": "wrist_roll",
+            "parent": "hand",
+            "child": "gripper",
+            "type": {
+              "value": "revolute"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "q": [
+                  1.0,
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            },
+            "axis": {
+              "value": [
+                1.0,
+                0.0,
+                0.0
+              ]
+            },
+            "limits": {
+              "value": {
+                "lo": -3.2,
+                "hi": 3.2
+              }
+            },
+            "q": {
+              "value": [
+                0.0
+              ]
+            },
+            "qd": {
+              "value": [
+                0.0
+              ]
+            },
+            "dynamics": {
+              "value": {
+                "damping": 2.0
+              }
+            },
+            "actuator": {
+              "kind": "position",
+              "limits": {
+                "effort": 40.0,
+                "velocity": 6.0
+              },
+              "gains": {
+                "kp": 40.0,
+                "armature": 0.02
+              }
+            }
+          }
+        ],
+        "rootActuator": {
+          "kind": "position",
+          "limits": {
+            "effort": [
+              3600.0,
+              3600.0,
+              1000.0
+            ],
+            "velocity": [
+              2.0,
+              2.0,
+              4.0
+            ]
+          },
+          "gains": {
+            "kp": [
+              8000.0,
+              8000.0,
+              900.0
+            ],
+            "damping": [
+              1500.0,
+              1500.0,
+              130.0
+            ]
+          }
+        }
+      },
+      "stateVars": {
+        "gripper": {
+          "value": "open"
+        }
+      },
+      "existence": 1.0
+    },
+    "cobot": {
+      "id": "w:template",
+      "role": "robot",
+      "category": {
+        "value": "cobot-magic"
+      },
+      "pose": {
+        "value": {
+          "p": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "q": [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "body": {
+        "kind": "rigid",
+        "root": {
+          "value": "planar"
+        },
+        "links": [
+          {
+            "id": "base",
+            "name": "tracer chassis",
+            "geometry": {
+              "collision": [
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.685,
+                    0.57,
+                    0.155
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.0775
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.2,
+                    0.32,
+                    0.55,
+                    1.0
+                  ]
+                }
+              ],
+              "visual": [
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.685,
+                    0.57,
+                    0.155
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.0775
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.2,
+                    0.32,
+                    0.55,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.05,
+                    0.05,
+                    1.345
+                  ],
+                  "pose": {
+                    "p": [
+                      0.12,
+                      0.0,
+                      0.8275
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.7,
+                    0.72,
+                    0.75,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 30.0
+              }
+            },
+            "material": {
+              "value": {
+                "friction": 0.1
+              }
+            },
+            "affordances": []
+          },
+          {
+            "id": "frame",
+            "name": "cobot magic lift carriage",
+            "geometry": {
+              "collision": [
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.12,
+                    0.492,
+                    0.28
+                  ],
+                  "pose": {
+                    "p": [
+                      0.013999999999999985,
+                      0.0,
+                      0.21800000000000003
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.2,
+                    0.32,
+                    0.55,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 40.0
+              }
+            },
+            "affordances": []
+          },
+          {
+            "id": "head",
+            "name": "head",
+            "geometry": {
+              "visual": [
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.08,
+                    0.16,
+                    0.08
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.0
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.15,
+                    0.15,
+                    0.15,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 0.5
+              }
+            },
+            "affordances": [],
+            "sensors": [
+              {
+                "id": "head_camera",
+                "kind": "rgbd",
+                "mount": {
+                  "p": [
+                    0.05,
+                    0.0,
+                    0.0
+                  ],
+                  "q": [
+                    0.9659258262890683,
+                    0.0,
+                    0.25881904510252074,
+                    0.0
+                  ]
+                },
+                "intrinsics": {
+                  "width": 2560,
+                  "height": 1920,
+                  "fovy": 60.0
+                },
+                "rateHz": 10
+              },
+              {
+                "id": "wide_camera",
+                "kind": "rgbd",
+                "mount": {
+                  "p": [
+                    0.05,
+                    0.0,
+                    -0.05
+                  ],
+                  "q": [
+                    0.9238795325112867,
+                    0.0,
+                    0.3826834323650898,
+                    0.0
+                  ]
+                },
+                "intrinsics": {
+                  "width": 480,
+                  "height": 360,
+                  "fovy": 100.0
+                },
+                "rateHz": 10
+              }
+            ]
+          },
+          {
+            "id": "L_arm_base",
+            "name": "L arm_base",
+            "geometry": {
+              "collision": [
+                {
+                  "kind": "primitive",
+                  "shape": "capsule",
+                  "size": [
+                    0.05,
+                    0.123
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.0615
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.85,
+                    0.55,
+                    0.15,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 1.2
+              }
+            },
+            "affordances": []
+          },
+          {
+            "id": "L_link1",
+            "name": "L link1",
+            "geometry": {
+              "collision": [
+                {
+                  "kind": "primitive",
+                  "shape": "sphere",
+                  "size": [
+                    0.05
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.0
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.85,
+                    0.55,
+                    0.15,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 0.9
+              }
+            },
+            "affordances": []
+          },
+          {
+            "id": "L_link2",
+            "name": "L link2",
+            "geometry": {
+              "collision": [
+                {
+                  "kind": "primitive",
+                  "shape": "capsule",
+                  "size": [
+                    0.045,
+                    0.28503122544030157
+                  ],
+                  "pose": {
+                    "p": [
+                      0.14179,
+                      0.014363,
+                      0.0
+                    ],
+                    "q": [
+                      0.7071067811865476,
+                      -0.0712635935413297,
+                      0.7035065744082112,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.85,
+                    0.55,
+                    0.15,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 0.9
+              }
+            },
+            "affordances": []
+          },
+          {
+            "id": "L_link3",
+            "name": "L link3",
+            "geometry": {
+              "collision": [
+                {
+                  "kind": "primitive",
+                  "shape": "capsule",
+                  "size": [
+                    0.04,
+                    0.25171383016433563
+                  ],
+                  "pose": {
+                    "p": [
+                      -0.121105,
+                      0.034257,
+                      0.0
+                    ],
+                    "q": [
+                      0.7071067811865476,
+                      -0.1924674300755976,
+                      -0.6804089126107145,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.85,
+                    0.55,
+                    0.15,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 0.7
+              }
+            },
+            "affordances": []
+          },
+          {
+            "id": "L_link4",
+            "name": "L link4",
+            "geometry": {
+              "collision": [
+                {
+                  "kind": "primitive",
+                  "shape": "sphere",
+                  "size": [
+                    0.035
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.0
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.85,
+                    0.55,
+                    0.15,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 0.5
+              }
+            },
+            "affordances": []
+          },
+          {
+            "id": "L_link5",
+            "name": "L link5",
+            "geometry": {
+              "collision": [
+                {
+                  "kind": "primitive",
+                  "shape": "capsule",
+                  "size": [
+                    0.03,
+                    0.09101102390507428
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0455,
+                      0.00070825
+                    ],
+                    "q": [
+                      0.7125882572035734,
+                      -0.7015824796098986,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.85,
+                    0.55,
+                    0.15,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 0.4
+              }
+            },
+            "affordances": []
+          },
+          {
+            "id": "L_link6",
+            "name": "L link6",
+            "geometry": {
+              "visual": [
+                {
+                  "kind": "primitive",
+                  "shape": "cylinder",
+                  "size": [
+                    0.027,
+                    0.025
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.0125
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.85,
+                    0.55,
+                    0.15,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.138,
+                    0.048,
+                    0.044
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.041
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.1,
+                    0.1,
+                    0.1,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.138,
+                    0.024,
+                    0.008
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.067
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.7,
+                    0.72,
+                    0.75,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 0.35
+              }
+            },
+            "affordances": [
+              {
+                "value": "grasp-point"
+              },
+              {
+                "value": {
+                  "tcp-offset": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.13503
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  }
+                }
+              }
+            ],
+            "sensors": [
+              {
+                "id": "L_wrist_camera",
+                "kind": "rgbd",
+                "mount": {
+                  "p": [
+                    0.0,
+                    0.075,
+                    0.03
+                  ],
+                  "q": [
+                    0.6994450614237633,
+                    0.10562663504969944,
+                    -0.10571078187807806,
+                    0.6988882962338909
+                  ]
+                },
+                "intrinsics": {
+                  "width": 640,
+                  "height": 400,
+                  "fovy": 45.3
+                },
+                "rateHz": 10
+              }
+            ]
+          },
+          {
+            "id": "L_link7",
+            "name": "L finger 7",
+            "geometry": {
+              "visual": [
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.028,
+                    0.014,
+                    0.022
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      -0.064,
+                      -0.011
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.1,
+                    0.1,
+                    0.1,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.024,
+                    0.064,
+                    0.01
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      -0.027,
+                      -0.008
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.7,
+                    0.72,
+                    0.75,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.02,
+                    0.026,
+                    0.003
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      -0.008,
+                      -0.0015
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.1,
+                    0.1,
+                    0.1,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 0.06
+              }
+            },
+            "affordances": []
+          },
+          {
+            "id": "L_link8",
+            "name": "L finger 8",
+            "geometry": {
+              "visual": [
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.028,
+                    0.014,
+                    0.022
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.064,
+                      -0.011
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.1,
+                    0.1,
+                    0.1,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.024,
+                    0.064,
+                    0.01
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.027,
+                      -0.008
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.7,
+                    0.72,
+                    0.75,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.02,
+                    0.026,
+                    0.003
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.008,
+                      -0.0015
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.1,
+                    0.1,
+                    0.1,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 0.06
+              }
+            },
+            "affordances": []
+          },
+          {
+            "id": "R_arm_base",
+            "name": "R arm_base",
+            "geometry": {
+              "collision": [
+                {
+                  "kind": "primitive",
+                  "shape": "capsule",
+                  "size": [
+                    0.05,
+                    0.123
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.0615
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.85,
+                    0.55,
+                    0.15,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 1.2
+              }
+            },
+            "affordances": []
+          },
+          {
+            "id": "R_link1",
+            "name": "R link1",
+            "geometry": {
+              "collision": [
+                {
+                  "kind": "primitive",
+                  "shape": "sphere",
+                  "size": [
+                    0.05
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.0
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.85,
+                    0.55,
+                    0.15,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 0.9
+              }
+            },
+            "affordances": []
+          },
+          {
+            "id": "R_link2",
+            "name": "R link2",
+            "geometry": {
+              "collision": [
+                {
+                  "kind": "primitive",
+                  "shape": "capsule",
+                  "size": [
+                    0.045,
+                    0.28503122544030157
+                  ],
+                  "pose": {
+                    "p": [
+                      0.14179,
+                      0.014363,
+                      0.0
+                    ],
+                    "q": [
+                      0.7071067811865476,
+                      -0.0712635935413297,
+                      0.7035065744082112,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.85,
+                    0.55,
+                    0.15,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 0.9
+              }
+            },
+            "affordances": []
+          },
+          {
+            "id": "R_link3",
+            "name": "R link3",
+            "geometry": {
+              "collision": [
+                {
+                  "kind": "primitive",
+                  "shape": "capsule",
+                  "size": [
+                    0.04,
+                    0.25171383016433563
+                  ],
+                  "pose": {
+                    "p": [
+                      -0.121105,
+                      0.034257,
+                      0.0
+                    ],
+                    "q": [
+                      0.7071067811865476,
+                      -0.1924674300755976,
+                      -0.6804089126107145,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.85,
+                    0.55,
+                    0.15,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 0.7
+              }
+            },
+            "affordances": []
+          },
+          {
+            "id": "R_link4",
+            "name": "R link4",
+            "geometry": {
+              "collision": [
+                {
+                  "kind": "primitive",
+                  "shape": "sphere",
+                  "size": [
+                    0.035
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.0
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.85,
+                    0.55,
+                    0.15,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 0.5
+              }
+            },
+            "affordances": []
+          },
+          {
+            "id": "R_link5",
+            "name": "R link5",
+            "geometry": {
+              "collision": [
+                {
+                  "kind": "primitive",
+                  "shape": "capsule",
+                  "size": [
+                    0.03,
+                    0.09101102390507428
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0455,
+                      0.00070825
+                    ],
+                    "q": [
+                      0.7125882572035734,
+                      -0.7015824796098986,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.85,
+                    0.55,
+                    0.15,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 0.4
+              }
+            },
+            "affordances": []
+          },
+          {
+            "id": "R_link6",
+            "name": "R link6",
+            "geometry": {
+              "visual": [
+                {
+                  "kind": "primitive",
+                  "shape": "cylinder",
+                  "size": [
+                    0.027,
+                    0.025
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.0125
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.85,
+                    0.55,
+                    0.15,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.138,
+                    0.048,
+                    0.044
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.041
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.1,
+                    0.1,
+                    0.1,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.138,
+                    0.024,
+                    0.008
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.067
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.7,
+                    0.72,
+                    0.75,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 0.35
+              }
+            },
+            "affordances": [
+              {
+                "value": "grasp-point"
+              },
+              {
+                "value": {
+                  "tcp-offset": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.13503
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  }
+                }
+              }
+            ],
+            "sensors": [
+              {
+                "id": "R_wrist_camera",
+                "kind": "rgbd",
+                "mount": {
+                  "p": [
+                    0.0,
+                    0.075,
+                    0.03
+                  ],
+                  "q": [
+                    0.6994450614237633,
+                    0.10562663504969944,
+                    -0.10571078187807806,
+                    0.6988882962338909
+                  ]
+                },
+                "intrinsics": {
+                  "width": 640,
+                  "height": 400,
+                  "fovy": 45.3
+                },
+                "rateHz": 10
+              }
+            ]
+          },
+          {
+            "id": "R_link7",
+            "name": "R finger 7",
+            "geometry": {
+              "visual": [
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.028,
+                    0.014,
+                    0.022
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      -0.064,
+                      -0.011
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.1,
+                    0.1,
+                    0.1,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.024,
+                    0.064,
+                    0.01
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      -0.027,
+                      -0.008
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.7,
+                    0.72,
+                    0.75,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.02,
+                    0.026,
+                    0.003
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      -0.008,
+                      -0.0015
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.1,
+                    0.1,
+                    0.1,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 0.06
+              }
+            },
+            "affordances": []
+          },
+          {
+            "id": "R_link8",
+            "name": "R finger 8",
+            "geometry": {
+              "visual": [
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.028,
+                    0.014,
+                    0.022
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.064,
+                      -0.011
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.1,
+                    0.1,
+                    0.1,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.024,
+                    0.064,
+                    0.01
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.027,
+                      -0.008
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.7,
+                    0.72,
+                    0.75,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.02,
+                    0.026,
+                    0.003
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.008,
+                      -0.0015
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.1,
+                    0.1,
+                    0.1,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 0.06
+              }
+            },
+            "affordances": []
+          }
+        ],
+        "joints": [
+          {
+            "id": "head_mount",
+            "parent": "base",
+            "child": "head",
+            "type": {
+              "value": "fixed"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.16,
+                  0.0,
+                  1.5
+                ],
+                "q": [
+                  1.0,
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            },
+            "q": {
+              "value": []
+            },
+            "qd": {
+              "value": []
+            }
+          },
+          {
+            "id": "lift",
+            "parent": "base",
+            "child": "frame",
+            "type": {
+              "value": "prismatic"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.22448,
+                  0.0,
+                  0.8352297980457545
+                ],
+                "q": [
+                  1.0,
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            },
+            "axis": {
+              "value": [
+                0.0,
+                0.0,
+                1.0
+              ]
+            },
+            "limits": {
+              "value": {
+                "lo": 0.0,
+                "hi": 0.6
+              }
+            },
+            "q": {
+              "value": [
+                0.0
+              ]
+            },
+            "qd": {
+              "value": [
+                0.0
+              ]
+            },
+            "dynamics": {
+              "value": {
+                "damping": 3000.0
+              }
+            },
+            "actuator": {
+              "kind": "position",
+              "limits": {
+                "effort": 4000.0,
+                "velocity": 0.3
+              },
+              "gains": {
+                "kp": 120000.0
+              }
+            }
+          },
+          {
+            "id": "L_mount",
+            "parent": "frame",
+            "child": "L_arm_base",
+            "type": {
+              "value": "fixed"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.144,
+                  0.306,
+                  0.138
+                ],
+                "q": [
+                  1.0,
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            },
+            "q": {
+              "value": []
+            },
+            "qd": {
+              "value": []
+            }
+          },
+          {
+            "id": "L_joint1",
+            "parent": "L_arm_base",
+            "child": "L_link1",
+            "type": {
+              "value": "revolute"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.0,
+                  0.0,
+                  0.123
+                ],
+                "q": [
+                  0.7071054996854185,
+                  0.0,
+                  0.0,
+                  -0.7071080626853542
+                ]
+              }
+            },
+            "axis": {
+              "value": [
+                0.0,
+                0.0,
+                1.0
+              ]
+            },
+            "limits": {
+              "value": {
+                "lo": -2.618,
+                "hi": 2.618
+              }
+            },
+            "q": {
+              "value": [
+                0.0
+              ]
+            },
+            "qd": {
+              "value": [
+                0.0
+              ]
+            },
+            "dynamics": {
+              "value": {
+                "damping": 60.0
+              }
+            },
+            "actuator": {
+              "kind": "position",
+              "limits": {
+                "effort": 100.0,
+                "velocity": 3.0
+              },
+              "gains": {
+                "kp": 1500.0
+              }
+            }
+          },
+          {
+            "id": "L_joint2",
+            "parent": "L_link1",
+            "child": "L_link2",
+            "type": {
+              "value": "revolute"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "q": [
+                  0.5086483707565626,
+                  0.49119753240546676,
+                  -0.5086519470563886,
+                  -0.49119753240546676
+                ]
+              }
+            },
+            "axis": {
+              "value": [
+                0.0,
+                0.0,
+                1.0
+              ]
+            },
+            "limits": {
+              "value": {
+                "lo": 0.0,
+                "hi": 3.14
+              }
+            },
+            "q": {
+              "value": [
+                0.0
+              ]
+            },
+            "qd": {
+              "value": [
+                0.0
+              ]
+            },
+            "dynamics": {
+              "value": {
+                "damping": 60.0
+              }
+            },
+            "actuator": {
+              "kind": "position",
+              "limits": {
+                "effort": 100.0,
+                "velocity": 3.0
+              },
+              "gains": {
+                "kp": 1500.0
+              }
+            }
+          },
+          {
+            "id": "L_joint3",
+            "parent": "L_link2",
+            "child": "L_link3",
+            "type": {
+              "value": "revolute"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.28358,
+                  0.028726,
+                  0.0
+                ],
+                "q": [
+                  0.999454833135398,
+                  0.0,
+                  0.0,
+                  0.03301570114800073
+                ]
+              }
+            },
+            "axis": {
+              "value": [
+                0.0,
+                0.0,
+                1.0
+              ]
+            },
+            "limits": {
+              "value": {
+                "lo": -2.697,
+                "hi": 0.0
+              }
+            },
+            "q": {
+              "value": [
+                0.0
+              ]
+            },
+            "qd": {
+              "value": [
+                0.0
+              ]
+            },
+            "dynamics": {
+              "value": {
+                "damping": 60.0
+              }
+            },
+            "actuator": {
+              "kind": "position",
+              "limits": {
+                "effort": 100.0,
+                "velocity": 3.0
+              },
+              "gains": {
+                "kp": 1500.0
+              }
+            }
+          },
+          {
+            "id": "L_joint4",
+            "parent": "L_link3",
+            "child": "L_link4",
+            "type": {
+              "value": "revolute"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  -0.24221,
+                  0.068514,
+                  0.0
+                ],
+                "q": [
+                  0.5447667057260289,
+                  -0.5447686727259625,
+                  -0.4508091654950425,
+                  0.4508075263950978
+                ]
+              }
+            },
+            "axis": {
+              "value": [
+                0.0,
+                0.0,
+                1.0
+              ]
+            },
+            "limits": {
+              "value": {
+                "lo": -1.832,
+                "hi": 1.832
+              }
+            },
+            "q": {
+              "value": [
+                0.0
+              ]
+            },
+            "qd": {
+              "value": [
+                0.0
+              ]
+            },
+            "dynamics": {
+              "value": {
+                "damping": 60.0
+              }
+            },
+            "actuator": {
+              "kind": "position",
+              "limits": {
+                "effort": 100.0,
+                "velocity": 3.0
+              },
+              "gains": {
+                "kp": 1500.0
+              }
+            }
+          },
+          {
+            "id": "L_joint5",
+            "parent": "L_link4",
+            "child": "L_link5",
+            "type": {
+              "value": "revolute"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "q": [
+                  0.7071054996854185,
+                  0.7071080626853542,
+                  0.0,
+                  0.0
+                ]
+              }
+            },
+            "axis": {
+              "value": [
+                0.0,
+                0.0,
+                1.0
+              ]
+            },
+            "limits": {
+              "value": {
+                "lo": -1.22,
+                "hi": 1.22
+              }
+            },
+            "q": {
+              "value": [
+                0.0
+              ]
+            },
+            "qd": {
+              "value": [
+                0.0
+              ]
+            },
+            "dynamics": {
+              "value": {
+                "damping": 60.0
+              }
+            },
+            "actuator": {
+              "kind": "position",
+              "limits": {
+                "effort": 100.0,
+                "velocity": 3.0
+              },
+              "gains": {
+                "kp": 1500.0
+              }
+            }
+          },
+          {
+            "id": "L_joint6",
+            "parent": "L_link5",
+            "child": "L_link6",
+            "type": {
+              "value": "revolute"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.0,
+                  0.091,
+                  0.0014165
+                ],
+                "q": [
+                  0.49999819699840115,
+                  -0.49999998509834787,
+                  -0.49999998509834787,
+                  -0.5000018327982928
+                ]
+              }
+            },
+            "axis": {
+              "value": [
+                0.0,
+                0.0,
+                1.0
+              ]
+            },
+            "limits": {
+              "value": {
+                "lo": -3.14,
+                "hi": 3.14
+              }
+            },
+            "q": {
+              "value": [
+                0.0
+              ]
+            },
+            "qd": {
+              "value": [
+                0.0
+              ]
+            },
+            "dynamics": {
+              "value": {
+                "damping": 60.0
+              }
+            },
+            "actuator": {
+              "kind": "position",
+              "limits": {
+                "effort": 100.0,
+                "velocity": 3.0
+              },
+              "gains": {
+                "kp": 1500.0
+              }
+            }
+          },
+          {
+            "id": "L_joint7",
+            "parent": "L_link6",
+            "child": "L_link7",
+            "type": {
+              "value": "prismatic"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.0,
+                  0.0,
+                  0.13503
+                ],
+                "q": [
+                  0.49999819699840115,
+                  0.49999998509834787,
+                  0.5000018327982928,
+                  0.49999998509834787
+                ]
+              }
+            },
+            "axis": {
+              "value": [
+                0.0,
+                0.0,
+                -1.0
+              ]
+            },
+            "limits": {
+              "value": {
+                "lo": 0.0,
+                "hi": 0.05
+              }
+            },
+            "q": {
+              "value": [
+                0.05
+              ]
+            },
+            "qd": {
+              "value": [
+                0.0
+              ]
+            },
+            "dynamics": {
+              "value": {
+                "damping": 5.0
+              }
+            },
+            "actuator": {
+              "kind": "position",
+              "limits": {
+                "effort": 100.0,
+                "velocity": 1.0
+              },
+              "gains": {
+                "kp": 100.0
+              }
+            }
+          },
+          {
+            "id": "L_joint8",
+            "parent": "L_link6",
+            "child": "L_link8",
+            "type": {
+              "value": "prismatic"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.0,
+                  0.0,
+                  0.13503
+                ],
+                "q": [
+                  0.49999819699840115,
+                  -0.49999998509834787,
+                  -0.5000018327982928,
+                  0.49999998509834787
+                ]
+              }
+            },
+            "axis": {
+              "value": [
+                0.0,
+                0.0,
+                1.0
+              ]
+            },
+            "limits": {
+              "value": {
+                "lo": -0.05,
+                "hi": 0.0
+              }
+            },
+            "q": {
+              "value": [
+                -0.05
+              ]
+            },
+            "qd": {
+              "value": [
+                0.0
+              ]
+            },
+            "dynamics": {
+              "value": {
+                "damping": 5.0
+              }
+            },
+            "actuator": {
+              "kind": "position",
+              "limits": {
+                "effort": 100.0,
+                "velocity": 1.0
+              },
+              "gains": {
+                "kp": 100.0
+              }
+            }
+          },
+          {
+            "id": "R_mount",
+            "parent": "frame",
+            "child": "R_arm_base",
+            "type": {
+              "value": "fixed"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.144,
+                  -0.306,
+                  0.138
+                ],
+                "q": [
+                  1.0,
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            },
+            "q": {
+              "value": []
+            },
+            "qd": {
+              "value": []
+            }
+          },
+          {
+            "id": "R_joint1",
+            "parent": "R_arm_base",
+            "child": "R_link1",
+            "type": {
+              "value": "revolute"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.0,
+                  0.0,
+                  0.123
+                ],
+                "q": [
+                  0.7071054996854185,
+                  0.0,
+                  0.0,
+                  -0.7071080626853542
+                ]
+              }
+            },
+            "axis": {
+              "value": [
+                0.0,
+                0.0,
+                1.0
+              ]
+            },
+            "limits": {
+              "value": {
+                "lo": -2.618,
+                "hi": 2.618
+              }
+            },
+            "q": {
+              "value": [
+                0.0
+              ]
+            },
+            "qd": {
+              "value": [
+                0.0
+              ]
+            },
+            "dynamics": {
+              "value": {
+                "damping": 60.0
+              }
+            },
+            "actuator": {
+              "kind": "position",
+              "limits": {
+                "effort": 100.0,
+                "velocity": 3.0
+              },
+              "gains": {
+                "kp": 1500.0
+              }
+            }
+          },
+          {
+            "id": "R_joint2",
+            "parent": "R_link1",
+            "child": "R_link2",
+            "type": {
+              "value": "revolute"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "q": [
+                  0.5086483707565626,
+                  0.49119753240546676,
+                  -0.5086519470563886,
+                  -0.49119753240546676
+                ]
+              }
+            },
+            "axis": {
+              "value": [
+                0.0,
+                0.0,
+                1.0
+              ]
+            },
+            "limits": {
+              "value": {
+                "lo": 0.0,
+                "hi": 3.14
+              }
+            },
+            "q": {
+              "value": [
+                0.0
+              ]
+            },
+            "qd": {
+              "value": [
+                0.0
+              ]
+            },
+            "dynamics": {
+              "value": {
+                "damping": 60.0
+              }
+            },
+            "actuator": {
+              "kind": "position",
+              "limits": {
+                "effort": 100.0,
+                "velocity": 3.0
+              },
+              "gains": {
+                "kp": 1500.0
+              }
+            }
+          },
+          {
+            "id": "R_joint3",
+            "parent": "R_link2",
+            "child": "R_link3",
+            "type": {
+              "value": "revolute"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.28358,
+                  0.028726,
+                  0.0
+                ],
+                "q": [
+                  0.999454833135398,
+                  0.0,
+                  0.0,
+                  0.03301570114800073
+                ]
+              }
+            },
+            "axis": {
+              "value": [
+                0.0,
+                0.0,
+                1.0
+              ]
+            },
+            "limits": {
+              "value": {
+                "lo": -2.697,
+                "hi": 0.0
+              }
+            },
+            "q": {
+              "value": [
+                0.0
+              ]
+            },
+            "qd": {
+              "value": [
+                0.0
+              ]
+            },
+            "dynamics": {
+              "value": {
+                "damping": 60.0
+              }
+            },
+            "actuator": {
+              "kind": "position",
+              "limits": {
+                "effort": 100.0,
+                "velocity": 3.0
+              },
+              "gains": {
+                "kp": 1500.0
+              }
+            }
+          },
+          {
+            "id": "R_joint4",
+            "parent": "R_link3",
+            "child": "R_link4",
+            "type": {
+              "value": "revolute"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  -0.24221,
+                  0.068514,
+                  0.0
+                ],
+                "q": [
+                  0.5447667057260289,
+                  -0.5447686727259625,
+                  -0.4508091654950425,
+                  0.4508075263950978
+                ]
+              }
+            },
+            "axis": {
+              "value": [
+                0.0,
+                0.0,
+                1.0
+              ]
+            },
+            "limits": {
+              "value": {
+                "lo": -1.832,
+                "hi": 1.832
+              }
+            },
+            "q": {
+              "value": [
+                0.0
+              ]
+            },
+            "qd": {
+              "value": [
+                0.0
+              ]
+            },
+            "dynamics": {
+              "value": {
+                "damping": 60.0
+              }
+            },
+            "actuator": {
+              "kind": "position",
+              "limits": {
+                "effort": 100.0,
+                "velocity": 3.0
+              },
+              "gains": {
+                "kp": 1500.0
+              }
+            }
+          },
+          {
+            "id": "R_joint5",
+            "parent": "R_link4",
+            "child": "R_link5",
+            "type": {
+              "value": "revolute"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "q": [
+                  0.7071054996854185,
+                  0.7071080626853542,
+                  0.0,
+                  0.0
+                ]
+              }
+            },
+            "axis": {
+              "value": [
+                0.0,
+                0.0,
+                1.0
+              ]
+            },
+            "limits": {
+              "value": {
+                "lo": -1.22,
+                "hi": 1.22
+              }
+            },
+            "q": {
+              "value": [
+                0.0
+              ]
+            },
+            "qd": {
+              "value": [
+                0.0
+              ]
+            },
+            "dynamics": {
+              "value": {
+                "damping": 60.0
+              }
+            },
+            "actuator": {
+              "kind": "position",
+              "limits": {
+                "effort": 100.0,
+                "velocity": 3.0
+              },
+              "gains": {
+                "kp": 1500.0
+              }
+            }
+          },
+          {
+            "id": "R_joint6",
+            "parent": "R_link5",
+            "child": "R_link6",
+            "type": {
+              "value": "revolute"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.0,
+                  0.091,
+                  0.0014165
+                ],
+                "q": [
+                  0.49999819699840115,
+                  -0.49999998509834787,
+                  -0.49999998509834787,
+                  -0.5000018327982928
+                ]
+              }
+            },
+            "axis": {
+              "value": [
+                0.0,
+                0.0,
+                1.0
+              ]
+            },
+            "limits": {
+              "value": {
+                "lo": -3.14,
+                "hi": 3.14
+              }
+            },
+            "q": {
+              "value": [
+                0.0
+              ]
+            },
+            "qd": {
+              "value": [
+                0.0
+              ]
+            },
+            "dynamics": {
+              "value": {
+                "damping": 60.0
+              }
+            },
+            "actuator": {
+              "kind": "position",
+              "limits": {
+                "effort": 100.0,
+                "velocity": 3.0
+              },
+              "gains": {
+                "kp": 1500.0
+              }
+            }
+          },
+          {
+            "id": "R_joint7",
+            "parent": "R_link6",
+            "child": "R_link7",
+            "type": {
+              "value": "prismatic"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.0,
+                  0.0,
+                  0.13503
+                ],
+                "q": [
+                  0.49999819699840115,
+                  0.49999998509834787,
+                  0.5000018327982928,
+                  0.49999998509834787
+                ]
+              }
+            },
+            "axis": {
+              "value": [
+                0.0,
+                0.0,
+                -1.0
+              ]
+            },
+            "limits": {
+              "value": {
+                "lo": 0.0,
+                "hi": 0.05
+              }
+            },
+            "q": {
+              "value": [
+                0.05
+              ]
+            },
+            "qd": {
+              "value": [
+                0.0
+              ]
+            },
+            "dynamics": {
+              "value": {
+                "damping": 5.0
+              }
+            },
+            "actuator": {
+              "kind": "position",
+              "limits": {
+                "effort": 100.0,
+                "velocity": 1.0
+              },
+              "gains": {
+                "kp": 100.0
+              }
+            }
+          },
+          {
+            "id": "R_joint8",
+            "parent": "R_link6",
+            "child": "R_link8",
+            "type": {
+              "value": "prismatic"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.0,
+                  0.0,
+                  0.13503
+                ],
+                "q": [
+                  0.49999819699840115,
+                  -0.49999998509834787,
+                  -0.5000018327982928,
+                  0.49999998509834787
+                ]
+              }
+            },
+            "axis": {
+              "value": [
+                0.0,
+                0.0,
+                1.0
+              ]
+            },
+            "limits": {
+              "value": {
+                "lo": -0.05,
+                "hi": 0.0
+              }
+            },
+            "q": {
+              "value": [
+                -0.05
+              ]
+            },
+            "qd": {
+              "value": [
+                0.0
+              ]
+            },
+            "dynamics": {
+              "value": {
+                "damping": 5.0
+              }
+            },
+            "actuator": {
+              "kind": "position",
+              "limits": {
+                "effort": 100.0,
+                "velocity": 1.0
+              },
+              "gains": {
+                "kp": 100.0
+              }
+            }
+          }
+        ],
+        "rootActuator": {
+          "kind": "position",
+          "limits": {
+            "effort": [
+              1200.0,
+              1200.0,
+              700.0
+            ],
+            "velocity": [
+              0.5,
+              0.5,
+              1.0
+            ]
+          },
+          "gains": {
+            "kp": [
+              10000.0,
+              10000.0,
+              3500.0
+            ],
+            "damping": [
+              1800.0,
+              1800.0,
+              500.0
+            ]
+          }
+        }
+      },
+      "stateVars": {
+        "gripper_left": {
+          "value": "open"
+        },
+        "gripper_right": {
+          "value": "open"
+        }
+      },
+      "existence": 1.0
+    },
+    "runtime": {
+      "perception_hz": 10.0,
+      "telemetry_hz": 2.0,
+      "appearance_cell_m": 0.002,
+      "appearance_max_m": 0.6,
+      "appearance_range_m": 1.5,
+      "detail_px": 24,
+      "appearance_interval_s": 0.5,
+      "appearance_poll_s": 1.0,
+      "appearance_min_coverage": 0.25,
+      "max_risk": 0.35,
+      "max_pick_risk": 0.6,
+      "relocate_max_jump_m": 0.35,
+      "relocate_min_points": 30,
+      "relocate_fallback_m": 0.6,
+      "relocate_fallback_score": 0.55,
+      "relocate_max_dz_m": 0.12,
+      "fresh_look_every_s": 10.0,
+      "redock_max_m": 0.12,
+      "keyframe_move_m": 0.15,
+      "keyframe_turn_rad": 0.1,
+      "keyframe_arm_turn_rad": 0.3,
+      "keyframe_min_s": 0.0,
+      "keyframe_max_s": 4.0,
+      "keyframe_still_s": 0.4,
+      "keyframe_arm_m": 0.05,
+      "hold_renew_s": 0.5,
+      "perception_rows_per_degree": 8.0,
+      "depth_join": 0.02,
+      "cameras": null,
+      "near_camera": null,
+      "near_range_m": 1.5,
+      "handoff_margin": 0.05,
+      "esim": {
+        "capture_radius": 0.05,
+        "hole_fit_tolerance_m": 0.003,
+        "hole_assignment_limit": 4096,
+        "handle_probes_along_m": [
+          0.04,
+          0.08,
+          0.12,
+          -0.05,
+          -0.09
+        ],
+        "handle_probes_side_m": [
+          0.06,
+          -0.06
+        ],
+        "rim_clearance": 0.05,
+        "edge_grasp_min_m": 0.25,
+        "edge_grasp_inset": 0.008,
+        "edge_grasp_depth": 0.008,
+        "edge_grasp_first": false,
+        "flip_in_air": false,
+        "flip_pitch_min": 1.0,
+        "flip_turn_above": 0.2,
+        "flip_drop_max": 0.2,
+        "elevated_grasp_floor": 0.72,
+        "min_require_tilt": 0.35,
+        "tilted_carry_floor": 0.95,
+        "receipt_ttl": 60.0,
+        "dock_gap": 0.07,
+        "predock_backoff": 0.35,
+        "dock_backoff_step": 0.05,
+        "reach_min": 0.08,
+        "reach_max": 0.65,
+        "lift_min": 0.0,
+        "lift_max": 1.28,
+        "place_edge_margin": 0.1,
+        "place_clearance": 0.18,
+        "spot_shift_max": 0.3,
+        "spot_shift_step": 0.01,
+        "nav_margin": 0.03,
+        "floor_furniture_height": 0.35,
+        "handle_reach": 0.18,
+        "drawer_pull": 0.3,
+        "drawer_pull_max": 0.33,
+        "drawer_viewing_backoff": 0.55,
+        "nest_fit": 0.92,
+        "floor_carry_lift": 0.05,
+        "floor_lift_max_m": 0.3,
+        "floor_release_gap": 0.015,
+        "carry_retreat_max": 1.2,
+        "park_keep_clear": 0.9,
+        "park_spacing": 0.5,
+        "blind_support_risk": 0.15,
+        "phantom_pick_cost": 0.5,
+        "nesting_risk_each": 0.15,
+        "nesting_risk_cap": 0.35,
+        "graspable_max_m": 0.35,
+        "miscategorised_risk": 0.15,
+        "wrist_yaw_max": 3.1,
+        "wrist_roll_max": 3.141592653589793,
+        "pour_roll": 1.9,
+        "pour_roll_min": 1.7,
+        "pour_check_step": 0.1,
+        "wrist_check_step": 0.1,
+        "lift_check_step": 0.05,
+        "dock_reach_margin": 0.04,
+        "retract_floor": 0.1,
+        "retract_step": 0.05,
+        "pour_clearance": 0.02,
+        "pour_spill_sizes": 2.0,
+        "pour_hold_s": 1.5,
+        "pour_rise": 0.06,
+        "drive_approach_clearance": 0.1,
+        "drive_press_clearance": 0.015,
+        "drive_hold_s": 1.5,
+        "drive_stand_roll": 1.5707963267948966,
+        "insert_max_attempts": 3
+      },
+      "motion": {
+        "linear_speed": 1.4,
+        "angular_speed": 3.6,
+        "look_angular_speed": 1.0,
+        "gentle_speed": 0.3,
+        "gentle_turn_speed": 0.5,
+        "gentle_lift_speed": 0.1,
+        "arm_speed": null,
+        "wrist_pitch_speed": 1.0,
+        "wrist_pitch_max": 0.0,
+        "drawer_speed": 0.35,
+        "position_tol": 0.03,
+        "yaw_tol": 0.04,
+        "joint_tol": 0.01,
+        "wrist_pitch_tol": 0.25,
+        "tick_s": 0.04,
+        "retract_reach": 0.1,
+        "failure_raise": 0.08,
+        "reach_max": 0.7,
+        "stow_lift": 0.6,
+        "tilted_exit_lift": 1.05,
+        "untilted_exit_lift": 0.85,
+        "tilted_carry_floor": 0.95,
+        "exit_retilt_min": 0.6,
+        "handle_lift_floor": 0.65,
+        "tool_down_reach_mid": 0.36,
+        "working_lift": 0.85,
+        "working_reach": 0.4,
+        "dock_tol": 0.06,
+        "dock_position_tol": 0.01,
+        "dock_yaw_tol": 0.12,
+        "align_min": 0.01,
+        "align_max": 0.15,
+        "stall_s": 2.0,
+        "grasp_probe_xy": [
+          0.035,
+          -0.035
+        ],
+        "grasp_probe_z": [
+          -0.025,
+          0.025
+        ],
+        "settle_s": 0.4,
+        "grasp_wait_s": 0.1,
+        "release_wait_s": 0.15,
+        "release_joint_tol": 0.002,
+        "release_settle_s": 0.6,
+        "insert_release_wait_s": 0.75,
+        "insert_clear_dz": 0.05,
+        "handle_release_wait_s": 0.08,
+        "look_dwell_s": 0.6,
+        "inspect_closed_drawers": false,
+        "drawer_look_s": 4.5,
+        "drawer_peek_m": 0.3,
+        "look_into_opened_drawers": true,
+        "wrist_turn_s": 0.6,
+        "pour_tip_s": 2.5
+      },
+      "roles": {
+        "singletons": [
+          "table",
+          "sideboard",
+          "cabinet",
+          "counter"
+        ],
+        "confusable": [
+          [
+            "table",
+            "sideboard",
+            "cabinet",
+            "counter"
+          ],
+          [
+            "mug",
+            "cup"
+          ],
+          [
+            "bowl",
+            "plate"
+          ]
+        ],
+        "min_probability": 0.08,
+        "drawer_evidence": 2.5,
+        "min_existence": 0.5,
+        "nested_evidence": 3.0,
+        "stored_in_drawer": 0.2,
+        "stickiness": 1.5
+      },
+      "reflection": {
+        "candidate_limit": 6,
+        "doubt_confidence": 0.6,
+        "size_tolerance": 0.6,
+        "size_scale": 0.35,
+        "size_under_weight": 0.25,
+        "hidden_gap_m": 0.02,
+        "shared_word_score": 0.8,
+        "candidate_causes": [
+          "perception-missing",
+          "out-of-reach",
+          "low-confidence",
+          "grasp-miss",
+          "support-unknown",
+          "unknown"
+        ],
+        "min_alternative": 0.05
+      }
+    },
+    "fasten": {
+      "radial": 0.02,
+      "gap": 0.003,
+      "angle": 0.20943951023931956,
+      "tip_distance": 0.015,
+      "dwell": 0.2,
+      "engagement": 0.001,
+      "driver_angle": 0.4363323129985824,
+      "mode": "off",
+      "seat_linear_speed": 0.01,
+      "seat_angular_speed": 0.1
+    },
+    "sideboard": {
+      "id": "w:template",
+      "role": "object",
+      "category": {
+        "value": "sideboard"
+      },
+      "pose": {
+        "value": {
+          "p": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "q": [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "body": {
+        "kind": "rigid",
+        "root": {
+          "value": "fixed"
+        },
+        "links": [
+          {
+            "id": "body",
+            "name": "sideboard",
+            "geometry": {
+              "collision": [
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.41000000000000003,
+                    1.3599999999999999,
+                    0.06
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.03
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.27,
+                    0.16,
+                    0.09,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.45,
+                    1.4,
+                    0.54
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.33
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.36,
+                    0.22,
+                    0.13,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.47000000000000003,
+                    1.42,
+                    0.03
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.835
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.27,
+                    0.16,
+                    0.09,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.45,
+                    0.44999999999999996,
+                    0.22
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.475,
+                      0.71
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.36,
+                    0.22,
+                    0.13,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.45,
+                    0.44999999999999996,
+                    0.22
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      -0.475,
+                      0.71
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.36,
+                    0.22,
+                    0.13,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.02,
+                    0.5,
+                    0.22
+                  ],
+                  "pose": {
+                    "p": [
+                      -0.215,
+                      0.0,
+                      0.71
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.36,
+                    0.22,
+                    0.13,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "affordances": [
+              {
+                "value": "support-surface"
+              }
+            ]
+          },
+          {
+            "id": "drawer",
+            "name": "drawer",
+            "geometry": {
+              "collision": [
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.41,
+                    0.45,
+                    0.01
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.0,
+                      0.005
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.8,
+                    0.67,
+                    0.5,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.02,
+                    0.458,
+                    0.2
+                  ],
+                  "pose": {
+                    "p": [
+                      0.205,
+                      0.0,
+                      0.1
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.8,
+                    0.67,
+                    0.5,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.012,
+                    0.45,
+                    0.13999999999999999
+                  ],
+                  "pose": {
+                    "p": [
+                      -0.205,
+                      0.0,
+                      0.06999999999999999
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.8,
+                    0.67,
+                    0.5,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.41,
+                    0.012,
+                    0.13999999999999999
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      0.219,
+                      0.06999999999999999
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.8,
+                    0.67,
+                    0.5,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.41,
+                    0.012,
+                    0.13999999999999999
+                  ],
+                  "pose": {
+                    "p": [
+                      0.0,
+                      -0.219,
+                      0.06999999999999999
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.8,
+                    0.67,
+                    0.5,
+                    1.0
+                  ]
+                },
+                {
+                  "kind": "primitive",
+                  "shape": "box",
+                  "size": [
+                    0.03,
+                    0.12,
+                    0.02
+                  ],
+                  "pose": {
+                    "p": [
+                      0.22999999999999998,
+                      0.0,
+                      0.1
+                    ],
+                    "q": [
+                      1.0,
+                      0.0,
+                      0.0,
+                      0.0
+                    ]
+                  },
+                  "rgba": [
+                    0.7,
+                    0.72,
+                    0.75,
+                    1.0
+                  ]
+                }
+              ]
+            },
+            "inertial": {
+              "value": {
+                "mass": 1.5
+              }
+            },
+            "affordances": [
+              {
+                "value": "pullable"
+              },
+              {
+                "value": "graspable-handle"
+              },
+              {
+                "value": "container"
+              }
+            ]
+          }
+        ],
+        "joints": [
+          {
+            "id": "drawer_slide",
+            "parent": "body",
+            "child": "drawer",
+            "type": {
+              "value": "prismatic"
+            },
+            "origin": {
+              "value": {
+                "p": [
+                  0.015,
+                  0.0,
+                  0.606
+                ],
+                "q": [
+                  1.0,
+                  0.0,
+                  0.0,
+                  0.0
+                ]
+              }
+            },
+            "axis": {
+              "value": [
+                1.0,
+                0.0,
+                0.0
+              ]
+            },
+            "limits": {
+              "value": {
+                "lo": 0.0,
+                "hi": 0.3485
+              }
+            },
+            "q": {
+              "value": [
+                0.0
+              ]
+            },
+            "qd": {
+              "value": [
+                0.0
+              ]
+            },
+            "dynamics": {
+              "value": {
+                "damping": 8.0,
+                "friction": 0.5
+              }
+            }
+          }
+        ]
+      },
+      "stateVars": {},
+      "existence": 1.0
+    }
+  },
+  "drive_trace": [
+    [
+      [
+        "_dock",
+        [
+          {
+            "spot": [
+              0.1,
+              0.2
+            ],
+            "gripSpot": [
+              0.11,
+              0.22
+            ],
+            "lift": 0.9,
+            "pressLift": 0.85,
+            "wristYaw": 0.5,
+            "wristRoll": -1.5707963267948966,
+            "driveS": 1.5,
+            "target": "screw",
+            "object": "driver"
+          }
+        ]
+      ],
+      [
+        "_align_lateral",
+        [
+          [
+            0.11,
+            0.22
+          ]
+        ]
+      ],
+      [
+        "_restore_planned_reach",
+        [
+          {
+            "spot": [
+              0.1,
+              0.2
+            ],
+            "gripSpot": [
+              0.11,
+              0.22
+            ],
+            "lift": 0.9,
+            "pressLift": 0.85,
+            "wristYaw": 0.5,
+            "wristRoll": -1.5707963267948966,
+            "driveS": 1.5,
+            "target": "screw",
+            "object": "driver"
+          },
+          [
+            0.11,
+            0.22
+          ]
+        ]
+      ],
+      [
+        "_ramp_joint",
+        [
+          "wrist_yaw",
+          0.5,
+          0.6
+        ]
+      ],
+      [
+        "_ramp_joint",
+        [
+          "wrist_roll",
+          -1.5707963267948966,
+          0.6
+        ]
+      ],
+      [
+        "_set_joint",
+        [
+          "lift",
+          0.9
+        ]
+      ],
+      [
+        "_reach_out",
+        [
+          [
+            0.11,
+            0.22
+          ],
+          null
+        ]
+      ],
+      [
+        "_align_lateral",
+        [
+          [
+            0.11,
+            0.22
+          ]
+        ]
+      ],
+      [
+        "_set_joint",
+        [
+          "wrist_yaw",
+          0.5
+        ]
+      ],
+      [
+        "_set_joint",
+        [
+          "wrist_roll",
+          -1.5707963267948966
+        ]
+      ],
+      [
+        "_set_joint",
+        [
+          "lift",
+          0.85
+        ]
+      ],
+      [
+        "_wait",
+        [
+          1.5
+        ]
+      ],
+      [
+        "_set_joint",
+        [
+          "lift",
+          0.9
+        ]
+      ],
+      [
+        "_exit_long_reach",
+        [
+          {
+            "spot": [
+              0.1,
+              0.2
+            ],
+            "gripSpot": [
+              0.11,
+              0.22
+            ],
+            "lift": 0.9,
+            "pressLift": 0.85,
+            "wristYaw": 0.5,
+            "wristRoll": -1.5707963267948966,
+            "driveS": 1.5,
+            "target": "screw",
+            "object": "driver"
+          }
+        ]
+      ],
+      [
+        "_backoff",
+        [
+          {
+            "spot": [
+              0.1,
+              0.2
+            ],
+            "gripSpot": [
+              0.11,
+              0.22
+            ],
+            "lift": 0.9,
+            "pressLift": 0.85,
+            "wristYaw": 0.5,
+            "wristRoll": -1.5707963267948966,
+            "driveS": 1.5,
+            "target": "screw",
+            "object": "driver"
+          }
+        ]
+      ]
+    ],
+    [
+      "stood screwdriver bit-down (roll=-1.57)",
+      "drove screw with driver"
+    ],
+    "drove screw with driver"
+  ],
+  "default_ast_sha256": {
+    "steward/src/steward/assets/generators.py": "8f1dcabc6c98f74b17329aa50480131d1ff5ff71372f96e4fcaece5b8629fb1e",
+    "steward/src/steward/authoring/service.py": "d61f64594581431da972d096c06a4f6fc0478cdd001ee921fb7c46fcceb5ebe2",
+    "steward/src/steward/chores.py": "bb6531b2012ba2b820cbd2fb40212ea34811118df92061331c77b595c66caa00",
+    "steward/src/steward/diagnosis.py": "86a18143a7bf69c0a8513a1bde4ee633c13576cfd153c5ac7421ea328d4aeb4b",
+    "steward/src/steward/ego/assemble.py": "cdc5ef9abe6cd873bc5b130ce6732d62273db88ed7d77f8c3ccacbabfbbda87a",
+    "steward/src/steward/ego/assembly_motion.py": "8c0a85381311d2a2b98d5624e0759c2cd4f27ee7789904c0c6718b61665c97c3",
+    "steward/src/steward/ego/classify.py": "775df9643f963ecd0b5e2c3714e3bd12f748bb30b2cc34d4982da194029fa076",
+    "steward/src/steward/ego/cobot_arm.py": "4a41f886be669b2e82474dbb4355b3c1e520082231c279a63871f2d496f36f3f",
+    "steward/src/steward/ego/cobot_skills.py": "7e7cb4d1223d5896e64b2da529a194c87f7f4dff7648adeee83654fe06a45033",
+    "steward/src/steward/ego/esim.py": "527d2278920ccc5fdc402805dc005c563299a0bd6bc216fb8f1a3d9c05de58d6",
+    "steward/src/steward/ego/estimator.py": "c5f93885af483fbc01cfa074b983f1cf72d436ee9b9b18d3ef23af86dee32379",
+    "steward/src/steward/ego/fasten.py": "22dc14409249d15522e71e9fe668e56d92ed3861ccbf97a7f277675aa590b2db",
+    "steward/src/steward/ego/fasten_geometry.py": "31393cfcb888fa266e2c179507f218b3be1ff760d2e63ab4fae4c3b0e4e4051e",
+    "steward/src/steward/ego/fasten_plan.py": "7f662a28466884a38e5db5b107f6f02333148170206ef62dabd81008e0357b83",
+    "steward/src/steward/ego/fasten_release.py": "308a79f7bbe247f3044033899c997db662ad453a9165798859a857a34a1910f4",
+    "steward/src/steward/ego/fasten_simple.py": "ada5b6bf86d8ae4966ee432778bb0e9987ce1d22aaa331703c90bc694706a43b",
+    "steward/src/steward/ego/kinematics.py": "116ffc3a912156b510a68184917b70b428620397d819e01799578a673de8f813",
+    "steward/src/steward/ego/priors.py": "4b3793c187d0ba7a81c33bc05bc49104c4fbdbc30205b52de38cf1cd2ccf56aa",
+    "steward/src/steward/ego/providers/geometric_masks.py": "c86d674fa06cca6c3562af28323550d9ac25ead73cecef0489af8b3485894cf4",
+    "steward/src/steward/ego/runtime.py": "8cc50a3368a8a45c61fc385de8adda98ecf48e1e12858a5891dfc7f4c667f2c9",
+    "steward/src/steward/ego/segmenter.py": "d6ab627f2be0ef76c52dc34478b6b7820a3bf5b52f0708e3b89878def40f486d",
+    "steward/src/steward/ego/server.py": "4f6b1bf254fa18067b843d44168bd1f64ccee5b6f1e2ddead7c140e87569da9b",
+    "steward/src/steward/ego/skills.py": "e5ce0ab7ae1a5a9cd62d37d1f5eb1e4c6eaef2e9bbfae9f6d1e03d1d76c767b2",
+    "steward/src/steward/ego/stationary_assembly.py": "5a44e53ed3d6acf879bede6694bd0294d418fb6b904ebda0185db94a332cbdb0",
+    "steward/src/steward/net.py": "3514a0d95b5654f4ea43b846a8f04313fc08c08f582c861e8fb4caa1b5a33d51",
+    "steward/src/steward/scene/mjcf.py": "f4fc4fe532aa4ed3e264363fa616cf76bd0603a5afcd0402089e491cc374d46f",
+    "steward/src/steward/world/chat.py": "c8c6dee6080c5fd8eb4ac957e76a9841767862f4b4929f8755cb66a2f0218ed4",
+    "steward/src/steward/world/fastening.py": "ece7576844ef6a6db57467bcf94ee9ca66985c26615a6d21ee1f1e23552aa4ed",
+    "steward/src/steward/world/sensor_cameras.py": "131f092df91b9ac2ce06700027e9b391c6031f7c3ed0d7356a004e94efd210dd",
+    "steward/src/steward/world/sim.py": "488f65847832e528bd633d81e580bfbbc779864c65824e92892664a5b0ff992f",
+    "steward/src/steward/world/world_view.py": "66e653ac4a137d341cb2bbbe3d7fec50e5e128c7660e611bb96363719d696be9"
+  },
+  "harness": {
+    "tools": [
+      {
+        "name": "ego_state",
+        "description": "Read your current understanding of the world: your own position, what you are holding, the skill in progress, and every object you have perceived with its estimated position, position uncertainty in metres, size, what it rests on, and when you last saw it. Objects you have not seen are absent, and positions are estimates. orientation explains whether yawDeg is only a box axis: front/back and near-square axes may be ambiguous. screwHoles includes source and frame. Outline-compatible priors retain source=prior; positionsByRegistration lists alternative entity-frame positions (one shared index for all holes on an object). orientation.holeRegistration explains compatibility and unresolved half turns. Unregistered templates cannot drive alignment: reobserve dimensions/features or use ordinary placement. A label alone is not registration. appearance says what you remember of an object's top face: how long ago you saw it, the share seen, plain / interiorColors (plain true or interiorColors under about 20: a cardboard back; do not use spread alone — lighting makes a plain back look varied) and stale (put down since, look again); ego_match_face compares remembered faces.",
+        "parameters": {},
+        "schema": {
+          "type": "json"
+        }
+      },
+      {
+        "name": "ego_query",
+        "description": "Find perceived objects by category (for example \"cup\", \"table\") and/or near another object. Matching uses each object's role (the scene-level reading of what it is) and then its category probabilities, best match first, so a sideboard partly seen and labelled \"counter\" is still found.",
+        "parameters": {
+          "category": {
+            "type": "string",
+            "description": "Object category or role to look for."
+          },
+          "near": {
+            "type": "string",
+            "description": "Id of an object whose surroundings to search, for example \"e:3\"."
+          },
+          "radius": {
+            "type": "number",
+            "description": "Search radius in metres around `near` (default 1)."
+          }
+        },
+        "schema": {
+          "type": "json"
+        }
+      },
+      {
+        "name": "ego_observe",
+        "description": "Report what your available cameras detect right now (categories, distances, which camera, and screwHoles on parts that show mating holes). Your world model also updates continuously; use ego_state for the accumulated picture, including screwHoles once a detection has been fused.",
+        "parameters": {},
+        "schema": {
+          "type": "json"
+        }
+      },
+      {
+        "name": "ego_capture_cameras",
+        "description": "Capture your left, original and right RGB cameras at one sensor timestamp without moving. Saves three JPEG images and a manifest in your workspace and returns their paths, pixel intrinsics K, and fixed camera_to_reference calibration in OpenCV axes, metres, relative to the original head camera. Includes gripper_pose from the same encoder timestamp, with gripper_to_camera transforms for all three views. Works independently of the console camera display mode. No absolute camera poses or synthesized views are provided.",
+        "parameters": {},
+        "schema": {
+          "type": "json"
+        }
+      },
+      {
+        "name": "ego_rgb_recording_start",
+        "description": "Start background RGB recording at a simulation-clock FPS. Records only head_camera. with same-timestamp measured odometry, encoders and calibration. Does not move the robot. Start before issuing navigation with skill_run wait=false; let this recorder sample independently of model/tool latency, then stop after navigation completes. Do not approximate 2 FPS by repeatedly calling ego_capture_cameras. Recording stops at max_frames or fails visibly on missed samples.",
+        "parameters": {
+          "fps": {
+            "type": "number",
+            "description": "Simulation-time FPS, default 2."
+          },
+          "max_frames": {
+            "type": "number",
+            "description": "Recording frame bound, default 256; provider bounds apply."
+          },
+          "request_key": {
+            "type": "string",
+            "required": true,
+            "description": "Stable 8–128 character recording-start key; reuse after lost responses."
+          }
+        },
+        "schema": {
+          "type": "json"
+        }
+      },
+      {
+        "name": "ego_rgb_recording_status",
+        "description": "Inspect recording status, actual sensor counts, simulation timestamps and errors. Does not command motion.",
+        "parameters": {
+          "recording_id": {
+            "type": "string",
+            "required": true,
+            "description": "Actual rgb_ recording identity."
+          }
+        },
+        "schema": {
+          "type": "json"
+        }
+      },
+      {
+        "name": "ego_rgb_recording_stop",
+        "description": "Stop sampling and finalize all queued RGB evidence from the selected recording cameras; cancel=true explicitly discards the recording. If status is finalizing, query status until terminal. Does not stop or start robot motion.",
+        "parameters": {
+          "recording_id": {
+            "type": "string",
+            "required": true,
+            "description": "Actual recording identity."
+          },
+          "cancel": {
+            "type": "boolean",
+            "description": "Default false: preserve evidence. True cancels recording."
+          }
+        },
+        "schema": {
+          "type": "json"
+        }
+      },
+      {
+        "name": "ego_camera_calibration",
+        "description": "Read fixed RGB camera intrinsics and camera_to_reference transforms into the middle head_camera frame (OpenCV x right, y down, z forward; translation in metres) without images or motion. Each camera has pixel K and dimensions. No absolute camera pose is provided.",
+        "parameters": {},
+        "schema": {
+          "type": "json"
+        }
+      },
+      {
+        "name": "ego_gripper_pose",
+        "description": "Read your gripper-link pose relative to your base and the robot cameras from current joint encoders, your body model and fixed camera calibration. No motion or image capture. gripper_to_camera maps gripper-local points (x forward, y left, z up) into each OpenCV camera frame (x right, y down, z forward), translations in metres. The gripper frame is the gripper link origin. Includes sensor timestamp, measured lift/reach and gripper_to_base. For a pose synchronized to images, use ego_capture_cameras and its embedded gripper_pose instead of combining separate calls.",
+        "parameters": {},
+        "schema": {
+          "type": "json"
+        }
+      },
+      {
+        "name": "ego_explore",
+        "description": "Turn in place through a full circle to perceive your surroundings. Use it first in a new place or when an object you need is not in ego_state.",
+        "parameters": {
+          "timeoutS": {
+            "type": "number",
+            "description": "Maximum seconds to wait for completion (default 120)."
+          }
+        },
+        "schema": {
+          "type": "json"
+        }
+      },
+      {
+        "name": "ego_predict",
+        "description": "Predict the consequences of a skill before doing it. Returns a receipt with a risk score, the issues found (for example a target whose position is too uncertain to grasp reliably), and the planned motion. For a component that must be fastened, prefer \"fasten_onto\"; use \"assemble_onto\" for placement only onto a stationary supported body: params {part: ego id, body: ego id, hole?: complete body feature prefix, heldHole?: complete component prefix}. Start empty-handed. The skill actively obtains close views aimed at the body with independent camera baselines, then freezes the registered body frame. If baselines are insufficient it can use checked single/two-view geometry at low confidence; registrationAttempts reports sample rejection reasons. It picks only the loose part while retaining its pre-grasp heading, fits the complete interfaces, places, retreats and reobserves all released components. Call predict then skill_run with the receipt and wait for the terminal job before calling again. Reuse the original body id while that body stays stationary. When a released component becomes the next supporting body, use postcondition.releasedReference.entity: its raised frame is propagated from registered grasp geometry and the executed release, explicitly low confidence with assumed settling height. A lost/merged mask is not a new observation. The staged receipt is admission to the controller: each motion has its own fresh risk check; later stages can fail. Do not repeat a part if postcondition.releaseExecuted is true, even if retreat failed. postcondition reports registrationEvidence (source, confidence, views), samples with relative poses and planarPassed, plus stableObserved; passed=null means full verification is unresolved, especially directed yaw or uprightness. Release execution is not assembly success or fastening. orientation.stationaryAssembly exposes frozen registration time, raw observations, released parts and invalidation. Missing/merged detections do not invalidate a stationary frame; a body/support grasp or clear motion does. Keep the body stationary during each registered placement and do not pick installed components. A wider part can rest on a narrow body when its centre is supported; this does not certify static stability. Use the manual to select the supporting side and complete interface groups, compare relative heights and top/underside features after settling, and report unknown orientation or fastening honestly. Follow the operator/manual task order. Complete required body/tool pose preparation before freezing a frame; a later required pose change invalidates it and requires fresh observations and registration. Never relabel a merged object to bypass refusal. Other skills: \"navigate\" (needs x, y, optional yaw in radians), \"pick\" (needs target; a pourable container is picked with what lies in it once nothing lies on top of it), \"place\" (needs on: a surface, a part that has screw holes to mate onto, an open drawer to put the object into, or a larger bowl to nest a bowl in; optional offset; or at: [x, y] to put it down on the floor; when the held part and the mate both have screw holes, place seats those holes (on the mate itself, or on a surface with alignTo naming the mate; optional hole and heldHole select observed or outline-registered feature ids or prefixes; ambiguous fits list candidate world yaw (radians) and offset in the on-surface frame, ranked against the pre-transport estimated heading when available. assemble_onto and place perform placement only. fasten_onto {part,body,hole?,heldHole?,drive?} adds deterministic screw seating, optional driving and perceptual verification. The default drive=false selects seating; request drive=true when powered driving is required; it does not read or change environment mode. Follow the task-required component order, tool orientation and body orientation. Attempt fixation and inspect independent evidence. Missing optional measurements produce warnings and catalogue/grasp estimates; continue feasible stages and report unverified attachment separately from action execution. seat_screw {part,body,hole,method?} defaults to ordinary pick/place at the just-released component holes, propagated from grasp-relative geometry and release encoders, then checks independent screw geometry. fasten_onto batches the ordinary releases before a shared view. Failed or unknown landings share at most two replays per job; this posterior recovery is independent of correctOnce and wingRetry; method=\"contact\" selects the previous endpoint controller; hole must be one exact body hole id. regrasp_upright {target,on?} stands any elongated tool on a perceived support and regrips it from above. drive_screw {screw} (or {body,hole} / target: a seated toy_screw): tipSource must be observed — call ego_observe / ego_screw_holes first; grips a perceived powered driver, turns its estimated tip down, contacts the best screw-head estimate and holds. Missing endpoints use catalogue geometry transported from grasp with encoders. flip_assembly {body,turnOver?} lifts, checks independent following, places the load and registers its best estimated face. turnOver defaults to true; false performs a lift/set-down following check. Loose components without confirmed screw landings produce an advisory warning before flipping; the pinch targets the body outside their volumes. fasten_onto continues through the first screw attempts, but fails if any requested landing remains failed or unknown after recovery. Read postcondition.confirmedSeatedScrews and requestedScrews; a confirmed landing is independent visual placement evidence, not mechanical attachment. Each starts with an empty hand. hole/heldHole accept actual feature ids or shared id prefixes from screwHoles; the group metadata string is not itself a selector. For fitting a multi-hole interface use its complete group/prefix; only seat_screw subsequently selects a single aligned hole. Do not use a single pair to bypass a failed fit: one pair cannot constrain rotation. Register each part independently: box yaw is the measured box axis, not a shared design heading. Derive the relative axes from the hole templates and outline registration; do not copy the body yaw or add a guessed quarter turn. Record the clean pre-pick frame before any parking or regrasp. Grasp heading ranks equivalent fits and cancels transport; it does not prove the initial heading was correct. Ties use stable template/feature order. After release, retract and move to a clear, different view; require fresh observations of BOTH parts after releasedAt, not the commanded spot or a merged family box. Compare the relative centre and visible features with each template hypothesis, including measurement uncertainty. Correct only when new evidence rejects the current hypothesis and supports another: re-identify the loose part, pick it, predict with the supported candidate yaw/offset, release and remeasure. If a half turn leaves the outline and features identical, relative centres cannot distinguish it: retain unknown directed yaw and do not alternate blindly. A noncentral feature on the mate does not make a symmetric held part directional. During planar mating keep the registered body stable and supported, moving only the loose component. Within the task-required order, keep the next interface visible and reachable. Required changes of body pose are separate operations: use observed support and orientation, reobserve after the change, and discard the old registration. Do not balance it on a loose component or treat a combined mask as evidence of attachment. Check the release height and approach clearance as well as XY: alignTo does not plan insertion underneath a body, and a table-height fallback at its centre may collide with it. Side/underside interfaces need observed geometry in their new pose; the planar skill cannot validate arbitrary 3D insertion. Report an unsupported step rather than guessing. Check top/side features, vertical extent and support before grasping and releasing; avoid wrist roll/flip during planar mating. orientation.posture reports a shape alarm, not a measured upright angle: unknown or dimensionsCompatible does not prove uprightness. Read orientation.stationaryAssembly after assemble_onto: status=frozen retains the pre-addition frame independently of merged masks. For low-level place, orientation.assembly contains envelope corroboration only. Do not re-register holes against the combined outer axis or relabel the body to bypass a refusal. envelope_observed only corroborates the envelope; geometry_observed corroborates a separate component box; neither verifies directed yaw, uprightness or fastening. If that evidence is unresolved, obtain a new clear view. If the body appears tipped or a change is unexplained by the ledger, stop mating. Park the loose part on a separate clear stable surface. Recover the body only when independent side/top observations establish its tilt and a supported recovery motion is feasible; otherwise report posture unresolved. Do not use a guessed roll or alignHoles:false on the suspect body to bypass the refusal. A planar fit does not establish seating or attachment. Keep a ledger of released parts, their source positions, occupied interfaces and verification evidence. Do not pick an aligned, released and verified part again. Exclude all installed parts from loose-part selection, including after track renumbering. Before moving a body or support, explicitly list the completed relations that this would invalidate and a plan to reverify them; a merged perception label is not a mechanical attachment. After every addition, wait for the running skill to become terminal, retract and observe the stationary body and released component. Complete and verify any task-required fixation before selecting the next loose part. Use a complete compatible prefix on each side, predict again from the current state, and run that feasible receipt without adding a guessed yaw. After every addition, recheck earlier relations and the stationary body. Keep released-unverified, verified and invalidated entries distinct. Before declaring completion, observe all required relations together after settling from more than one clear view; do not proceed to unrelated work once the requested subset is independently verified. A succeeded release alone never completes a relation. Catalogue group/mates data restrict default interface pairing; explicit hole/heldHole override it. Supply yaw to choose a candidate; if several offsets remain, also supply offset. Base the choice on camera evidence and verify after release; alignHoles: false keeps a manual offset). Ordinary planar placement of an interface part also restores its grasp heading when yaw is omitted; explicit yaw overrides it. Check the predicted spot against the intended feature: ordinary placement can move an occupied spot and provides no precision mating guarantee; optional roll in radians tips it about the arm before release, e.g. π/2 = 90° to set a flat object down on its side; not together with flip), \"insert_screw_into_hole\" (needs a held toy_screw and on: the part with screw holes; optional hole / maxAttempts; places the screw tip-down into the hole, senses that it stands head-up in the hole, and re-picks / retries if it falls or misses), \"pour\" (the held object must be pourable; needs on: a surface; tips it over the spot so its contents slide out there in a heap, then holds it upright again, still in the gripper; the spot keeps the contents' slide from every edge so nothing falls off; count the contents before pouring, since flat ones can land wholly hidden under one another), \"open\" / \"close\" (needs target: a drawer; the robot pulls or pushes its handle and ends standing back so the inside is in view). Objects lying on the floor, such as chairs or a dropped flat piece, are picked from beside them; look at one first from where it is in view (ego_inspect's hint says how far back), since docked beside it the cameras no longer see it. Small ones are lifted clear and carried like objects taken off a table; large ones are carried a few centimetres above the floor in front of the robot, and put down with at; while carrying them the robot needs more room to turn. Objects inside a drawer are only seen while it is open. If the risk is too high or the skill is infeasible, follow the issues (for example move closer and observe, or choose another spot) and predict again. An infeasible receipt lists blockers: entities in the way, whether they can be moved, and parking spots (parkAt) out of the way; clear a movable blocker first (pick it, place it at a parking spot), then predict the original skill again. A receipt can be run once and expires. For a yaw-controlled placement, postcondition.orientation reports the independently observed outer-axis error after release; null directedDeltaDeg means front/back is still unknown. If unknown, obtain a fresh unobstructed camera view and reread ego_state placementEvidence. A correction proposal keeps the measured centre: re-identify the object, predict pick, then predict the supplied place parameters and reobserve. Confirm asymmetric features before accepting a directed orientation.",
+        "parameters": {
+          "skill": {
+            "type": "string",
+            "enum": [
+              "regrasp_upright",
+              "assemble_onto",
+              "fasten_onto",
+              "seat_screw",
+              "drive_screw",
+              "flip_assembly",
+              "insert_screw_into_hole",
+              "navigate",
+              "pick",
+              "place",
+              "pour",
+              "open",
+              "close"
+            ],
+            "required": true,
+            "description": "Skill to predict."
+          },
+          "turnOver": {
+            "type": "boolean",
+            "description": "flip_assembly: turn the assembly over (default true); false lifts and sets down to inspect following."
+          },
+          "drive": {
+            "type": "boolean",
+            "description": "fasten_onto: false seats screws without using a powered driver; default false; explicitly set true to drive. Action choice only, independent of environment mode."
+          },
+          "correctOnce": {
+            "type": "boolean",
+            "description": "Simple seating: observe and compensate a fresh out-of-capture landing error (default true)."
+          },
+          "stageScrews": {
+            "type": "boolean",
+            "description": "Optional pre-staging; default false. Adds extra transfers before component placement."
+          },
+          "closeRelease": {
+            "type": "boolean",
+            "description": "Optional smaller estimated release gap; default false."
+          },
+          "recoverDropped": {
+            "type": "boolean",
+            "description": "Optional bounded re-placement after an observed drop; default false."
+          },
+          "wingRetry": {
+            "type": "boolean",
+            "description": "Optional changed-station component retry and extra measured fastener correction; default false."
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "simple",
+              "contact"
+            ],
+            "description": "seat_screw/drive_screw/fasten_onto: simple ordinary manipulation (default), or legacy contact controller."
+          },
+          "screw": {
+            "type": "string",
+            "description": "drive_screw: robot-perceived screw id returned by seat_screw."
+          },
+          "part": {
+            "type": "string",
+            "description": "assemble_onto/fasten_onto: perceived loose component id; seat_screw: the already aligned, released component id."
+          },
+          "body": {
+            "type": "string",
+            "description": "assembly/fastening/flip_assembly: supported body id; for a newly released body use releasedReference.entity and inspect its low-confidence frame."
+          },
+          "target": {
+            "type": "string",
+            "description": "pick: id of the object to grasp; open/close: id of the drawer; drive_screw: id of the seated toy_screw to tighten."
+          },
+          "on": {
+            "type": "string",
+            "description": "place / insert_screw_into_hole: id of the surface, screw-hole part, open drawer or larger bowl to put the held object on or in; pour: id of the surface."
+          },
+          "offset": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "description": "place, pour: [dx, dy] of the spot from the surface centre in the surface frame, metres; without it the free spot nearest you. If something already lies at the requested spot, the free spot nearest it is used instead and the issues say where (the receipt plan.spot holds the spot used). During hole alignment, selects a fitted candidate offset within sensor tolerance; incompatible offsets are rejected, never substituted for the hole fit."
+          },
+          "alignTo": {
+            "type": "string",
+            "description": "place: id of the part whose screw holes the held part should seat on. Use when on is a table or other surface and the mate is another object on it; omit when on itself is the mate."
+          },
+          "hole": {
+            "type": "string",
+            "description": "place/assemble_onto/fasten_onto: mate hole id or complete prefix; seat_screw/drive_screw: one exact body hole id. Overrides catalogue interface pairing; ambiguous geometry still returns a default plan and alternatives for post-release verification."
+          },
+          "heldHole": {
+            "type": "string",
+            "description": "place/assemble_onto: observed or registered prior held-object hole id or prefix to use; with no selectors, catalogue-compatible complete groups are tried; without group data all held holes must fit. Explicit selection overrides catalogue pairing."
+          },
+          "alignHoles": {
+            "type": "boolean",
+            "description": "place: seat screw holes when both parts have them (default true when on is the mate or alignTo is set). Set false to keep a manual offset."
+          },
+          "maxAttempts": {
+            "type": "number",
+            "description": "insert_screw_into_hole: how many place+verify cycles to try if the screw falls or misses (default 3, max 8)."
+          },
+          "at": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "description": "place on the floor: [x, y] in metres."
+          },
+          "x": {
+            "type": "number",
+            "description": "navigate: goal x in metres."
+          },
+          "y": {
+            "type": "number",
+            "description": "navigate: goal y in metres."
+          },
+          "yaw": {
+            "type": "number",
+            "description": "navigate: goal heading; place: optional absolute world yaw of the held object's estimated frame (as ego_state yawDeg reports it), in radians, not a relative wrist turn. A single hole does not constrain yaw: omitting it restores the estimated world heading recorded at grasp, cancelling transport rotation (falls back to the current held heading if no grasp snapshot exists). This preserves initial orientation uncertainty; supply a visually grounded yaw to change orientation. For circular or near-square objects the frame may have no observable physical direction, so this command cannot certify a semantic front. Verify asymmetric features after release. If template holes are unregistered, yaw alone does not register them; use observed features or explicit ordinary placement with alignHoles=false and offset."
+          },
+          "flip": {
+            "type": "boolean",
+            "description": "place: turn the held object upside down before setting it down. pick: take it so that it can be turned over later; some arms take it tilted for that, and a place with flip says when the object must be picked again with flip."
+          },
+          "roll": {
+            "type": "number",
+            "description": "place: tip the held object about the arm before setting it down, radians (π/2 = 90° onto its side). Not together with flip. drive_screw: optional stand angle (default ±π/2, bit down)."
+          },
+          "clearance": {
+            "type": "number",
+            "description": "place, pour: least gap in metres kept to objects already on the surface (default 0.015). With an offset, 0 allows contact or overlap (interlocking pieces, stacking): the spot is used exactly as requested, never shifted aside. Screw-hole alignment always uses 0."
+          }
+        },
+        "schema": {
+          "type": "json"
+        }
+      },
+      {
+        "name": "ego_screw_holes",
+        "description": "Locate the screw holes on a part in the world frame and report whether each faces up. Pulls a fresh camera frame first. Returns tipSource (only \"observed\" is trustworthy — never trust a place wristRoll alone), tipRollDeg, each hole's bodyP/worldP/worldN/upDot/facing, and holesFaceUp. holesFaceUp is true only when tipSource is observed and a mount faces up. If false or tipSource is unknown, tip with place roll=±π/2, wait for the cameras, and call again before picking a wheel.",
+        "parameters": {
+          "entity": {
+            "type": "string",
+            "required": true,
+            "description": "Id of the part whose screw holes to locate."
+          }
+        },
+        "schema": {
+          "type": "json"
+        }
+      },
+      {
+        "name": "ego_inspect",
+        "description": "Look closely at the top face of an object with one fresh frame of each camera, read from the camera that sees most of it: its colours on a px x px grid. rows is in the object's own frame (row 0 is its +y edge, column 0 its -x edge, as seen from above with its heading yawDeg). worldRows is the same face as seen from above with the map's +y up and +x to the right: rows turned worldTurnDeg counter-clockwise (yawDeg rounded to a quarter turn), so faces of objects lying at different headings compare directly in worldRows. Putting an object down with place yaw = its current yawDeg + k x 90 degrees (given in radians) turns its face k quarter turns counter-clockwise as seen from above. Each cell is [r, g, b] or null where the face is out of view or hidden. Stand within about a metre with the object in front of you. You have two cameras on your head: head_camera looks ahead and sees a surface only from some way ahead of it; wide_camera, a short-focal-length camera tilted further down, also sees the strip of a table next to the edge you stand at and the gripper at work, in less detail. When part of the face is unseen, hint says why (too close below the view, beside or behind it, too far, hidden) and how to move. Use it to compare printed or patterned faces, read which side of a flat object is up, or tell similar objects apart. A printed flat object lying with its plain back up: use plain === true or interiorColors (under about 20). Do not use spread / interiorSpread alone — table lighting makes cardboard look variegated in RGB even when it is one colour. Turn it over (place with flip) and look again. Flat objects lying on or against each other hide parts of their faces and can be perceived as one object, and one lying on another can hide it wholly: set them apart on free space first, looking again where each one lay after picking it up. The object frame stays fixed to the object between views and while it is carried, so one inspection before picking it tells which place yaw turns its face as you want.",
+        "parameters": {
+          "entity": {
+            "type": "string",
+            "required": true,
+            "description": "Id of the object to inspect."
+          },
+          "px": {
+            "type": "number",
+            "description": "Grid size, 4 to 128 (default 24). Raise it when sourcePx is large and you need pattern detail."
+          }
+        },
+        "schema": {
+          "type": "json"
+        }
+      },
+      {
+        "name": "ego_match_face",
+        "description": "Find where the top faces of objects appear on the top face of a reference object printed at the same scale (puzzle pieces on the picture of their box, tiles on a pattern sheet). It works from the faces you remember: the robot remembers the top face of every object up to about 0.6 m that it sees within 1.5 m (ego_state appearance says how much and how long ago), and refreshes the ones in view first; a face put down since it was last seen must be looked at again. Match all objects of a task in one call. For each it compares the colours of every placement and quarter turn and returns the best few: offsetM is where the face centre belongs on the reference, in the reference frame from its centre; turnDeg is how far the face must turn counter-clockwise to line up with the reference; placeYawDeg is the heading (degrees; place takes radians) that lines it up with the reference as the reference lies now. To build the picture elsewhere at heading H, put each object at centre + offsetM turned by H, with place yaw = H + turnDeg. score is a correlation (1 = identical); a best score barely above the second is ambiguous, so look closer (raise px toward 32) and match again. offsetM is good to about one cell (cellM): when you know the layout (for example a grid of equal pieces), snap it to the nearest slot. plain / interiorColors (under about 20) means a cardboard back facing up; do not trust spread alone. An entry with error says what to look at.",
+        "parameters": {
+          "entities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "required": true,
+            "description": "Ids of the objects whose faces are sought."
+          },
+          "reference": {
+            "type": "string",
+            "required": true,
+            "description": "Id of the object showing the whole picture."
+          },
+          "px": {
+            "type": "number",
+            "description": "Cells across each object's shorter side, 4 to 32 (default 24)."
+          }
+        },
+        "schema": {
+          "type": "json"
+        }
+      },
+      {
+        "name": "ego_annotate",
+        "description": "Record what you have identified an object to be when the perceived category is wrong or unknown (for example \"unknown\" for a box or a puzzle piece). Your label replaces its category, and the affordances you name replace the category's defaults, so prediction and planning treat it accordingly: graspable (can be picked), support-surface (things can be put on it), receptacle (things can be put in it), container, pourable (can be carried with its contents and poured), flat.",
+        "parameters": {
+          "entity": {
+            "type": "string",
+            "required": true,
+            "description": "Id of the object."
+          },
+          "label": {
+            "type": "string",
+            "description": "Category name to use for it."
+          },
+          "affordances": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Its affordances, replacing the defaults."
+          }
+        },
+        "schema": {
+          "type": "json"
+        }
+      },
+      {
+        "name": "ego_forget",
+        "description": "Remove an object from the Ego State as a false perception. Use it only for an object that is physically implausible (marked `unsupported`: floating with nothing under it, or inside another solid object) and that you looked for again, with ego_observe from a place where its spot is in view, without perceiving it (its lastSeenAgoS keeps growing). The robot refuses an object it holds or perceived in the last few seconds.",
+        "parameters": {
+          "entity": {
+            "type": "string",
+            "required": true,
+            "description": "Id of the object."
+          },
+          "reason": {
+            "type": "string",
+            "required": true,
+            "description": "Why it is implausible and how you looked for it again."
+          }
+        },
+        "schema": {
+          "type": "json"
+        }
+      },
+      {
+        "name": "ego_candidates",
+        "description": "Find the objects that could be what the instruction calls something when perception names it differently: the segmenter names things by appearance (a lid printed with a picture can be \"picture\"), and the classifier only knows the shapes of its categories. Ranks objects by how well their perceived category alternatives, segmenter names and size fit `name` and `size`; without either, lists the objects whose current name is doubtful. Each carries `doubts` and the evidence behind its name. Confirm with ego_inspect or a closer look, then ego_annotate.",
+        "parameters": {
+          "name": {
+            "type": "string",
+            "description": "What you are looking for, as a category word, for example \"box\" or \"lid\"."
+          },
+          "size": {
+            "type": "array",
+            "items": {
+              "type": "number"
+            },
+            "description": "One to three approximate dimensions in metres from the instruction or your expectation."
+          },
+          "exclude": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Object ids to leave out."
+          },
+          "limit": {
+            "type": "number",
+            "description": "Maximum number of candidates."
+          }
+        },
+        "schema": {
+          "type": "json"
+        }
+      },
+      {
+        "name": "skill_run",
+        "description": "Execute the plan of a receipt from ego_predict. Waits for the skill to finish unless wait is false. Staged assembly skills can take tens of minutes: a wait timeout leaves the job running. Poll its status; keep each run_code wait at most 240 seconds and do not body_stop just because a poll times out. While such a skill runs the robot may leave the table, change viewpoints and fetch parts on its own; a status that stays running or docked for many minutes is normal. Interrupting a running assembly skill usually leaves the part placed but not fastened. When it ends, confirm with ego_state that the part is on its body before the next step. If one sub-goal shows no real progress after three high-level attempts, switch to another sub-goal and return to it later. The robot refuses receipts that are infeasible, expired, already used, or above the risk limit.",
+        "parameters": {
+          "receipt": {
+            "type": "string",
+            "required": true,
+            "description": "Receipt id returned by ego_predict."
+          },
+          "wait": {
+            "type": "boolean",
+            "description": "Wait for completion (default true)."
+          },
+          "timeoutS": {
+            "type": "number",
+            "description": "Maximum seconds to wait (default 180)."
+          }
+        },
+        "schema": {
+          "type": "json"
+        }
+      },
+      {
+        "name": "skill_status",
+        "description": "Read the state of a running or finished skill.",
+        "parameters": {
+          "job": {
+            "type": "string",
+            "required": true,
+            "description": "Job id from skill_run."
+          }
+        },
+        "schema": {
+          "type": "json"
+        }
+      },
+      {
+        "name": "body_stop",
+        "description": "Stop all motion immediately and hold the current pose.",
+        "parameters": {},
+        "schema": {
+          "type": "json"
+        }
+      },
+      {
+        "name": "report_problem",
+        "description": "Alert the operator that you hit a situation you cannot resolve by yourself: an unexpected error, a skill that keeps failing, or a task that cannot be done from here. Before calling, review your own tool calls in this turn and diagnose: which prediction or skill failed, the error text, how often it repeated, where you were, and how it relates to blockers, uncertainty, or missing or duplicate objects in the ego state. The operator console shows the report as an alert. Call it once, then stop.",
+        "parameters": {
+          "goal": {
+            "type": "string",
+            "required": true,
+            "description": "What you are trying to achieve."
+          },
+          "step": {
+            "type": "string",
+            "required": true,
+            "description": "The step you were carrying out when you got stuck."
+          },
+          "diagnosis": {
+            "type": "string",
+            "required": true,
+            "description": "The cause you diagnosed from your tool log and the evidence for it."
+          },
+          "message": {
+            "type": "string",
+            "required": true,
+            "description": "What happened, what you tried, and what you need from the operator."
+          }
+        },
+        "schema": {
+          "type": "json"
+        }
+      }
+    ],
+    "outputs": {
+      "ego_state": [
+        {
+          "type": "text",
+          "text": "{\n \"objects\": [],\n \"held\": null\n}"
+        }
+      ],
+      "ego_predict": [
+        {
+          "type": "text",
+          "text": "{\n \"receipt\": \"receipt\",\n \"skill\": \"fasten_onto\",\n \"feasible\": true,\n \"risk\": 0.1,\n \"maxRisk\": 0.35,\n \"withinRiskLimit\": true,\n \"issues\": [],\n \"expiresAt\": 12,\n \"plan\": {\n  \"drive\": \"none\",\n  \"target\": \"part\",\n  \"support\": \"table\",\n  \"reach\": 0.3,\n  \"pathLength\": 2\n }\n}"
+        }
+      ],
+      "skill_status": [
+        {
+          "type": "text",
+          "text": "{\n \"job\": \"job\",\n \"skill\": \"fasten_onto\",\n \"state\": \"succeeded\",\n \"message\": \"executed\",\n \"log\": [\n  \"one\",\n  \"two\"\n ],\n \"postcondition\": {\n  \"executed\": true,\n  \"verified\": false,\n  \"released\": 1,\n  \"confirmed\": 0,\n  \"required\": 2,\n  \"actionStatus\": \"continue\",\n  \"nextAction\": {\n   \"skill\": \"fasten_onto\"\n  },\n  \"holeProgress\": [\n   {\n    \"hole\": \"h1\",\n    \"screw\": \"s1\",\n    \"released\": true,\n    \"status\": \"executed_unverified\"\n   }\n  ]\n }\n}"
+        }
+      ],
+      "skill_run": [
+        {
+          "type": "text",
+          "text": "{\n \"job\": \"job\",\n \"skill\": \"fasten_onto\",\n \"state\": \"succeeded\",\n \"message\": \"executed\",\n \"log\": [\n  \"one\",\n  \"two\"\n ],\n \"postcondition\": {\n  \"executed\": true,\n  \"verified\": false,\n  \"released\": 1,\n  \"confirmed\": 0,\n  \"required\": 2,\n  \"actionStatus\": \"continue\",\n  \"nextAction\": {\n   \"skill\": \"fasten_onto\"\n  },\n  \"holeProgress\": [\n   {\n    \"hole\": \"h1\",\n    \"screw\": \"s1\",\n    \"released\": true,\n    \"status\": \"executed_unverified\"\n   }\n  ]\n }\n}"
+        }
+      ]
+    },
+    "calibration": {
+      "reference_camera": "head_camera",
+      "calibration_source": "rig_calibration",
+      "camera_axes": "opencv_x_right_y_down_z_forward",
+      "views": {
+        "head_camera": {
+          "width": 640,
+          "height": 480,
+          "K": [
+            [
+              500,
+              0,
+              320
+            ],
+            [
+              0,
+              500,
+              240
+            ],
+            [
+              0,
+              0,
+              1
+            ]
+          ],
+          "camera_to_reference": [
+            [
+              1,
+              0,
+              0,
+              0
+            ],
+            [
+              0,
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              0,
+              1,
+              0
+            ],
+            [
+              0,
+              0,
+              0,
+              1
+            ]
+          ]
+        },
+        "wide_camera": {
+          "width": 640,
+          "height": 480,
+          "K": [
+            [
+              500,
+              0,
+              320
+            ],
+            [
+              0,
+              500,
+              240
+            ],
+            [
+              0,
+              0,
+              1
+            ]
+          ],
+          "camera_to_reference": [
+            [
+              1,
+              0,
+              0,
+              0
+            ],
+            [
+              0,
+              1,
+              0,
+              0
+            ],
+            [
+              0,
+              0,
+              1,
+              0
+            ],
+            [
+              0,
+              0,
+              0,
+              1
+            ]
+          ]
+        }
+      }
+    }
+  }
+}

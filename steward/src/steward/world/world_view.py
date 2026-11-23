@@ -8,6 +8,9 @@ method must run on one thread, the view loop's, which owns the OpenGL renderers.
 
 from __future__ import annotations
 
+from steward.assembly_profile import enabled as _assembly_enabled
+
+
 import copy
 from collections.abc import Callable
 
@@ -15,7 +18,10 @@ import mujoco
 
 from steward.glrender import close_renderer, encode_image, free_camera
 from steward.viewloop import ViewSettings
-from steward.world.sim import HIDDEN_GROUP, WorldSim
+if _assembly_enabled():
+    from steward.world.sim import HIDDEN_GROUP, WorldSim, shown_fingers
+else:
+    from steward.world.sim import HIDDEN_GROUP, WorldSim
 
 
 class WorldViewRenderer:
@@ -37,26 +43,48 @@ class WorldViewRenderer:
         sim = self._sim()
         if sim is None:
             raise RuntimeError("no episode is loaded")
-        with sim.lock:
-            if self._source is not sim.model:
-                self.close()
-                self._model = copy.deepcopy(sim.model)
-                self._data = mujoco.MjData(self._model)
-                self._source = sim.model
-            mujoco.mj_copyData(self._data, self._model, sim.data)
-            hidden = sim.cutaway_walls(settings.camera)
-            t = sim.time
+        if _assembly_enabled():
+            with sim.lock:
+                if self._source is not sim.model:
+                    self.close()
+                    self._model = copy.deepcopy(sim.model)
+                    self._data = mujoco.MjData(self._model)
+                    self._source = sim.model
+                mujoco.mj_copyData(self._data, self._model, sim.data)
+                hidden = sim.cutaway_walls(settings.camera)
+                fingers = sim.finger_display()
+                t = sim.time
+        else:
+            with sim.lock:
+                if self._source is not sim.model:
+                    self.close()
+                    self._model = copy.deepcopy(sim.model)
+                    self._data = mujoco.MjData(self._model)
+                    self._source = sim.model
+                mujoco.mj_copyData(self._data, self._model, sim.data)
+                hidden = sim.cutaway_walls(settings.camera)
+                t = sim.time
         key = (settings.width, settings.height)
         if key not in self._renderers:
             self._renderers[key] = mujoco.Renderer(self._model, settings.height, settings.width)
         saved = {gid: int(self._model.geom_group[gid]) for gid in hidden}
-        try:
-            for gid in hidden:
-                self._model.geom_group[gid] = HIDDEN_GROUP
-            self._renderers[key].update_scene(self._data, camera=free_camera(settings.camera))
-        finally:
-            for gid, group in saved.items():
-                self._model.geom_group[gid] = group
+        if _assembly_enabled():
+            try:
+                for gid in hidden:
+                    self._model.geom_group[gid] = HIDDEN_GROUP
+                with shown_fingers(self._model, self._data, fingers):
+                    self._renderers[key].update_scene(self._data, camera=free_camera(settings.camera))
+            finally:
+                for gid, group in saved.items():
+                    self._model.geom_group[gid] = group
+        else:
+            try:
+                for gid in hidden:
+                    self._model.geom_group[gid] = HIDDEN_GROUP
+                self._renderers[key].update_scene(self._data, camera=free_camera(settings.camera))
+            finally:
+                for gid, group in saved.items():
+                    self._model.geom_group[gid] = group
         return encode_image(self._renderers[key].render(), "jpeg"), "image/jpeg", {"t": round(t, 3)}
 
     def close(self) -> None:

@@ -54,3 +54,19 @@ def box_depth():
 @pytest.fixture
 def kitchen_scene(kitchen_root) -> dict:
     return AuthoringService(kitchen_root).load_scenario("phase0-kitchen")["sceneState"]
+
+
+def pytest_ignore_collect(collection_path, config):
+    """Collect assembly extension tests only with their process profile enabled.
+
+    The tests import profile-specific classes and functions, so selection must
+    happen before module imports rather than marking already collected items.
+    """
+    import json
+    from pathlib import Path
+    from steward.assembly_profile import enabled
+
+    if enabled():
+        return None
+    files = set(json.loads(Path(__file__).with_name("assembly_profile_tests.json").read_text()))
+    return True if collection_path.name in files else None

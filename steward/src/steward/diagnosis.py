@@ -8,6 +8,8 @@ objects in its Ego-State), never from the World State.
 
 from __future__ import annotations
 
+from steward.assembly_profile import enabled as _assembly_enabled
+
 import math
 import re
 from collections import Counter
@@ -16,17 +18,30 @@ from dataclasses import dataclass
 TABLEWARE = frozenset({"bowl", "cup", "mug", "plate", "wine_glass"})
 COLOR_ZH = {"red": "红色", "green": "绿色", "blue": "蓝色", "black": "黑色", "white": "白色", "gray": "灰色",
             "clear": "透明", "brown": "棕色", "beige": "米色", "yellow": "黄色"}
-CATEGORY_ZH = {"table": "餐桌", "counter": "操作台", "cabinet": "柜子", "sideboard": "餐边柜", "cup": "杯子", "bowl": "碗",
-               "plate": "盘子", "drawer": "抽屉", "wine_glass": "高脚杯", "mug": "咖啡杯", "teddy_bear": "玩具熊",
-               "scissors": "剪刀", "chair": "椅子", "wall": "墙", "unknown": "未知物体", "toy_airplane": "玩具飞机",
-               "airplane_fuselage": "飞机身体", "airplane_wing": "飞机翅膀", "airplane_propeller": "螺旋桨",
-               "airplane_landing_gear": "起落架", "car_body": "汽车身体", "car_wheel": "车轮",
-               "toy_screw": "螺丝", "screw_board": "螺丝板", "electric_screwdriver": "电动螺丝刀",
-               "manual": "说明书",
-               "picture": "参考图", "pistol": "手枪", "pill_bottle": "药瓶", "perfume_bottle": "香水瓶",
-               "plant": "绿植"}
-SKILL_ZH = {"pick": "抓取", "place": "放置", "navigate": "导航", "open": "打开", "close": "关上",
-            "drive_screw": "拧螺丝", "insert_screw_into_hole": "插入螺丝", "pour": "倾倒"}
+if _assembly_enabled():
+    CATEGORY_ZH = {"table": "餐桌", "counter": "操作台", "cabinet": "柜子", "sideboard": "餐边柜", "cup": "杯子", "bowl": "碗",
+                   "plate": "盘子", "drawer": "抽屉", "wine_glass": "高脚杯", "mug": "咖啡杯", "teddy_bear": "玩具熊",
+                   "scissors": "剪刀", "chair": "椅子", "wall": "墙", "unknown": "未知物体", "toy_airplane": "玩具飞机",
+                   "airplane_fuselage": "飞机身体", "airplane_wing": "飞机翅膀", "airplane_propeller": "螺旋桨",
+                   "airplane_landing_gear": "起落架", "car_body": "汽车身体", "car_wheel": "车轮",
+                   "toy_screw": "螺丝", "electric_screwdriver": "电动螺丝刀", "manual": "说明书",
+                   "picture": "参考图", "pistol": "手枪", "pill_bottle": "药瓶", "perfume_bottle": "香水瓶",
+                   "plant": "绿植"}
+else:
+    CATEGORY_ZH = {"table": "餐桌", "counter": "操作台", "cabinet": "柜子", "sideboard": "餐边柜", "cup": "杯子", "bowl": "碗",
+                   "plate": "盘子", "drawer": "抽屉", "wine_glass": "高脚杯", "mug": "咖啡杯", "teddy_bear": "玩具熊",
+                   "scissors": "剪刀", "chair": "椅子", "wall": "墙", "unknown": "未知物体", "toy_airplane": "玩具飞机",
+                   "airplane_fuselage": "飞机身体", "airplane_wing": "飞机翅膀", "airplane_propeller": "螺旋桨",
+                   "airplane_landing_gear": "起落架", "car_body": "汽车身体", "car_wheel": "车轮",
+                   "toy_screw": "螺丝", "screw_board": "螺丝板", "electric_screwdriver": "电动螺丝刀",
+                   "manual": "说明书",
+                   "picture": "参考图", "pistol": "手枪", "pill_bottle": "药瓶", "perfume_bottle": "香水瓶",
+                   "plant": "绿植"}
+if _assembly_enabled():
+    SKILL_ZH = {"pick": "抓取", "place": "放置", "navigate": "导航", "open": "打开", "close": "关上"}
+else:
+    SKILL_ZH = {"pick": "抓取", "place": "放置", "navigate": "导航", "open": "打开", "close": "关上",
+                "drive_screw": "拧螺丝", "insert_screw_into_hole": "插入螺丝", "pour": "倾倒"}
 
 
 def describe(obj: dict) -> str:
@@ -34,7 +49,7 @@ def describe(obj: dict) -> str:
     category), id.
 
     :param obj: an object of the Ego API summary.
-    :returns: for example ``白色碗 e:16``.
+    :returns: the localized colour and object name followed by its id.
     """
     kind = obj.get("role") or obj["category"]
     color = COLOR_ZH.get(obj.get("color") or "", "") if kind in TABLEWARE else ""
@@ -190,22 +205,39 @@ def _motion_findings(failures: list[dict], summary: dict | None) -> list[str]:
     return out
 
 
-def _failed_target_findings(failures: list[dict], summary: dict | None) -> list[str]:
-    """Each object the failed actions worked on, named, with what was tried and why it failed."""
-    names = {o["id"]: describe(o) for o in (summary or {}).get("objects", [])}
-    grouped: dict[str, list[dict]] = {}
-    for f in failures:
-        target = next(iter(re.findall(r"e:\d+", f.get("step") or "")), None) or next(iter(re.findall(r"e:\d+", f["message"])), "—")
-        grouped.setdefault(target, []).append(f)
-    out = []
-    for target, items in grouped.items():
-        skill = re.match(r"(pick|place|navigate|open|close|drive_screw|insert_screw_into_hole|pour)\b",
-                         items[-1]["message"])
-        action = SKILL_ZH[skill[1]] if skill else "处理"
-        reasons = list(dict.fromkeys(explain(f["message"], summary) for f in items))
-        what = names.get(target, target) if target != "—" else "（未指明对象）"
-        out.append(f"{action} {what} 失败 {len(items)} 次：" + "；".join(reasons[:2]))
-    return out
+if _assembly_enabled():
+    def _failed_target_findings(failures: list[dict], summary: dict | None) -> list[str]:
+        """Each object the failed actions worked on, named, with what was tried and why it failed."""
+        names = {o["id"]: describe(o) for o in (summary or {}).get("objects", [])}
+        grouped: dict[str, list[dict]] = {}
+        for f in failures:
+            target = next(iter(re.findall(r"e:\d+", f.get("step") or "")), None) or next(iter(re.findall(r"e:\d+", f["message"])), "—")
+            grouped.setdefault(target, []).append(f)
+        out = []
+        for target, items in grouped.items():
+            skill = re.match(r"(pick|place|navigate|open|close)\b", items[-1]["message"])
+            action = SKILL_ZH[skill[1]] if skill else "处理"
+            reasons = list(dict.fromkeys(explain(f["message"], summary) for f in items))
+            what = names.get(target, target) if target != "—" else "（未指明对象）"
+            out.append(f"{action} {what} 失败 {len(items)} 次：" + "；".join(reasons[:2]))
+        return out
+else:
+    def _failed_target_findings(failures: list[dict], summary: dict | None) -> list[str]:
+        """Each object the failed actions worked on, named, with what was tried and why it failed."""
+        names = {o["id"]: describe(o) for o in (summary or {}).get("objects", [])}
+        grouped: dict[str, list[dict]] = {}
+        for f in failures:
+            target = next(iter(re.findall(r"e:\d+", f.get("step") or "")), None) or next(iter(re.findall(r"e:\d+", f["message"])), "—")
+            grouped.setdefault(target, []).append(f)
+        out = []
+        for target, items in grouped.items():
+            skill = re.match(r"(pick|place|navigate|open|close|drive_screw|insert_screw_into_hole|pour)\b",
+                             items[-1]["message"])
+            action = SKILL_ZH[skill[1]] if skill else "处理"
+            reasons = list(dict.fromkeys(explain(f["message"], summary) for f in items))
+            what = names.get(target, target) if target != "—" else "（未指明对象）"
+            out.append(f"{action} {what} 失败 {len(items)} 次：" + "；".join(reasons[:2]))
+        return out
 
 
 def _blocker_findings(failures: list[dict], summary: dict) -> list[str]:

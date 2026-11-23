@@ -18,6 +18,9 @@ their own targets, not for the solver's residual.
 """
 
 from __future__ import annotations
+from steward.assembly_profile import enabled as _assembly_enabled
+
+
 
 import math
 import threading
@@ -77,11 +80,12 @@ class PiperArmConfig:
     # laterally held bit stands onto −z. Larger rolls (pour / turn-over) and pitched tools roll
     # about tool +z — including ``_approached`` steps that still hold a pour roll while pitch
     # climbs from zero (those must not switch to +x mid-ramp).
-    roll_about_x_pitch: float = 0.35
-    roll_about_x_max: float = math.pi / 2 + 0.12
-    # Piper IK often misses a full ±π/2 tip about tool +x; a slightly smaller tip already stands
-    # the bit (world-up · bit < −0.7). Soften |wrist_roll| toward this floor before OutOfReach.
-    drive_tip_roll_floor: float = 1.05
+    if not _assembly_enabled():
+        roll_about_x_pitch: float = 0.35
+        roll_about_x_max: float = math.pi / 2 + 0.12
+        # Piper IK often misses a full ±π/2 tip about tool +x; a slightly smaller tip already stands
+        # the bit (world-up · bit < −0.7). Soften |wrist_roll| toward this floor before OutOfReach.
+        drive_tip_roll_floor: float = 1.05
     # Holding something, a small step of the grasp point (a ramp, a tip) that the solver can only
     # follow by turning the wrist over to another posture -- a joint moving this far, or the pinch
     # point leaving the step by this much halfway between the two postures -- is refused: the arm
@@ -281,15 +285,22 @@ class PiperArm(Arm):
                 pitch = 0.0
         m_yaw = m @ matrix_from_quat(quat_from_axis_angle([0.0, 1.0, 0.0], pitch))
         yaw = math.atan2(m_yaw[1, 0], m_yaw[0, 0])
-        unyawed = (down.T @ matrix_from_quat(quat_from_axis_angle([0.0, 1.0, 0.0], pitch))
-                   @ matrix_from_quat(quat_from_axis_angle([0.0, 0.0, 1.0], -yaw)) @ r_tcp)
-        # Match :meth:`_solve_from` / :meth:`_roll_about_tool_x`.
-        if self._roll_about_tool_x(pitch, self._target["wrist_roll"] if self._target is not None else 0.0):
-            roll = -math.atan2(unyawed[2, 1], unyawed[1, 1])
+        if _assembly_enabled():
+            rolled = (down.T @ matrix_from_quat(quat_from_axis_angle([0.0, 1.0, 0.0], pitch))
+                      @ matrix_from_quat(quat_from_axis_angle([0.0, 0.0, 1.0], -yaw)) @ r_tcp)
+            return {"lift": float(tcp["p"][2]), "reach": float(tcp["p"][0]) - self.geometry.tool_offset,
+                    "wrist_yaw": yaw, "wrist_roll": math.atan2(rolled[1, 0], rolled[0, 0]),
+                    "wrist_pitch": pitch}
         else:
-            roll = math.atan2(unyawed[1, 0], unyawed[0, 0])
-        return {"lift": float(tcp["p"][2]), "reach": float(tcp["p"][0]) - self.geometry.tool_offset,
-                "wrist_yaw": yaw, "wrist_roll": roll, "wrist_pitch": pitch}
+            unyawed = (down.T @ matrix_from_quat(quat_from_axis_angle([0.0, 1.0, 0.0], pitch))
+                       @ matrix_from_quat(quat_from_axis_angle([0.0, 0.0, 1.0], -yaw)) @ r_tcp)
+            # Match :meth:`_solve_from` / :meth:`_roll_about_tool_x`.
+            if self._roll_about_tool_x(pitch, self._target["wrist_roll"] if self._target is not None else 0.0):
+                roll = -math.atan2(unyawed[2, 1], unyawed[1, 1])
+            else:
+                roll = math.atan2(unyawed[1, 0], unyawed[0, 0])
+            return {"lift": float(tcp["p"][2]), "reach": float(tcp["p"][0]) - self.geometry.tool_offset,
+                    "wrist_yaw": yaw, "wrist_roll": roll, "wrist_pitch": pitch}
 
 
     # ----------------------------------------------------------- commanding
@@ -309,75 +320,110 @@ class PiperArm(Arm):
         from the target alone, as :meth:`turn_over` planned, and lets the arm go there in one move
         while it holds something."""
         joints = self._last.get("joints") or {}
-        with self._lock:
-            target = dict(self._target) if self._target is not None else None
-            if target is None:
-                if not all(n in joints for n in self.names) or "lift" not in joints:
-                    raise SkillFailed("the arm's encoders have not been read yet")
-                # PARK rest FK is ~1.74 m lift / ~0 reach — a wrist-only first command used to seed
-                # that tip into `_target` and every later reach inherit an unreachable height. Start
-                # from the caller's lift/reach (or a hole-free working band) and seed IK from HOME,
-                # not from the folded PARK encoders (a singularity with no useful gradient).
-                g = self.geometry
-                seed_lift = float(wanted["lift"]) if "lift" in wanted else max(g.lift_min, min(g.lift_max, 0.85))
-                seed_reach = float(wanted["reach"]) if "reach" in wanted else max(g.reach_min, 0.28)
-                target = {"lift": min(max(seed_lift, g.lift_min), g.lift_max),
-                          "reach": min(max(seed_reach, g.reach_min), g.reach_max),
-                          "wrist_yaw": 0.0, "wrist_roll": 0.0,
-                          "wrist_pitch": float(wanted.get("wrist_pitch", 0.0))}
-                joints = {"lift": float(joints.get("lift", LIFT_HOME)),
-                          **{n: float(h) for n, h in zip(self.names, HOME, strict=True)}}
-            previous, prior = dict(target), self._solved
-            target.update(wanted)
-            holding = ((self._last.get("grippers") or {}).get(self.geometry.gripper) or {}).get("holding")
-            continuous = bool(holding and prior is not None and not turn_over and self._step(previous, target))
-            solved, last = self._solve_tip(target, joints, prior, turn_over=turn_over, continuous=continuous)
-            if solved is not None and continuous and self._jumps(prior, solved):
-                raise SkillFailed(f"the {self.config.arm} arm would have to turn its wrist over to follow its gripper "
-                                  f"{target['reach']:.2f} m ahead at {target['lift']:.2f} m (yaw {target['wrist_yaw']:.2f}, "
-                                  f"roll {target['wrist_roll']:.2f}, "
-                                  f"pitch {target['wrist_pitch']:.2f}); stopped before it swings what it holds")
-            if solved is not None:
-                self._target, self._solved = target, solved
-                return solved
+        if _assembly_enabled():
+            with self._lock:
+                target = dict(self._target) if self._target is not None else None
+                if target is None:
+                    if not all(n in joints for n in self.names) or "lift" not in joints:
+                        raise SkillFailed("the arm's encoders have not been read yet")
+                    # PARK rest FK is ~1.74 m lift / ~0 reach — a wrist-only first command used to seed
+                    # that tip into `_target` and every later reach inherit an unreachable height. Start
+                    # from the caller's lift/reach (or a hole-free working band) and seed IK from HOME,
+                    # not from the folded PARK encoders (a singularity with no useful gradient).
+                    g = self.geometry
+                    seed_lift = float(wanted["lift"]) if "lift" in wanted else max(g.lift_min, min(g.lift_max, 0.85))
+                    seed_reach = float(wanted["reach"]) if "reach" in wanted else max(g.reach_min, 0.28)
+                    target = {"lift": min(max(seed_lift, g.lift_min), g.lift_max),
+                              "reach": min(max(seed_reach, g.reach_min), g.reach_max),
+                              "wrist_yaw": 0.0, "wrist_roll": 0.0,
+                              "wrist_pitch": float(wanted.get("wrist_pitch", 0.0))}
+                    joints = {"lift": float(joints.get("lift", LIFT_HOME)),
+                              **{n: float(h) for n, h in zip(self.names, HOME, strict=True)}}
+                previous, prior = dict(target), self._solved
+                target.update(wanted)
+                holding = ((self._last.get("grippers") or {}).get(self.geometry.gripper) or {}).get("holding")
+                continuous = bool(holding and prior is not None and not turn_over and self._step(previous, target))
+                solved, last = (self._ik(target, {}) if turn_over else
+                                self._ik(target, joints, prior, continuous=continuous))
+                if solved is not None and continuous and self._jumps(prior, solved):
+                    raise SkillFailed(f"the {self.config.arm} arm would have to turn its wrist over to follow its gripper "
+                                      f"{target['reach']:.2f} m ahead at {target['lift']:.2f} m (yaw {target['wrist_yaw']:.2f}, "
+                                      f"roll {target['wrist_roll']:.2f}, "
+                                      f"pitch {target['wrist_pitch']:.2f}); stopped before it swings what it holds")
+                if solved is not None:
+                    self._target, self._solved = target, solved
+                    return solved
+        else:
+            with self._lock:
+                target = dict(self._target) if self._target is not None else None
+                if target is None:
+                    if not all(n in joints for n in self.names) or "lift" not in joints:
+                        raise SkillFailed("the arm's encoders have not been read yet")
+                    # PARK rest FK is ~1.74 m lift / ~0 reach — a wrist-only first command used to seed
+                    # that tip into `_target` and every later reach inherit an unreachable height. Start
+                    # from the caller's lift/reach (or a hole-free working band) and seed IK from HOME,
+                    # not from the folded PARK encoders (a singularity with no useful gradient).
+                    g = self.geometry
+                    seed_lift = float(wanted["lift"]) if "lift" in wanted else max(g.lift_min, min(g.lift_max, 0.85))
+                    seed_reach = float(wanted["reach"]) if "reach" in wanted else max(g.reach_min, 0.28)
+                    target = {"lift": min(max(seed_lift, g.lift_min), g.lift_max),
+                              "reach": min(max(seed_reach, g.reach_min), g.reach_max),
+                              "wrist_yaw": 0.0, "wrist_roll": 0.0,
+                              "wrist_pitch": float(wanted.get("wrist_pitch", 0.0))}
+                    joints = {"lift": float(joints.get("lift", LIFT_HOME)),
+                              **{n: float(h) for n, h in zip(self.names, HOME, strict=True)}}
+                previous, prior = dict(target), self._solved
+                target.update(wanted)
+                holding = ((self._last.get("grippers") or {}).get(self.geometry.gripper) or {}).get("holding")
+                continuous = bool(holding and prior is not None and not turn_over and self._step(previous, target))
+                solved, last = self._solve_tip(target, joints, prior, turn_over=turn_over, continuous=continuous)
+                if solved is not None and continuous and self._jumps(prior, solved):
+                    raise SkillFailed(f"the {self.config.arm} arm would have to turn its wrist over to follow its gripper "
+                                      f"{target['reach']:.2f} m ahead at {target['lift']:.2f} m (yaw {target['wrist_yaw']:.2f}, "
+                                      f"roll {target['wrist_roll']:.2f}, "
+                                      f"pitch {target['wrist_pitch']:.2f}); stopped before it swings what it holds")
+                if solved is not None:
+                    self._target, self._solved = target, solved
+                    return solved
         raise OutOfReach(f"the {self.config.arm} arm cannot put its gripper {target['reach']:.2f} m ahead at "
                           f"{target['lift']:.2f} m height (wrist yaw {target['wrist_yaw']:.2f}, roll "
                           f"{target['wrist_roll']:.2f}, pitch {target['wrist_pitch']:.2f}) at any torso height: {last}")
 
-    def _solve_tip(self, target: dict, joints: dict, prior: tuple[float, list[float]] | None, *,
-                   turn_over: bool, continuous: bool
-                   ) -> tuple[tuple[float, list[float]] | None, IkError | None]:
-        """IK for ``target``, softening a near-vertical drive tip if full ±π/2 is out of reach.
+    if not _assembly_enabled():
+        def _solve_tip(self, target: dict, joints: dict, prior: tuple[float, list[float]] | None, *,
+                       turn_over: bool, continuous: bool
+                       ) -> tuple[tuple[float, list[float]] | None, IkError | None]:
+            """IK for ``target``, softening a near-vertical drive tip if full ±π/2 is out of reach.
 
-        Mutates ``target['wrist_roll']`` to the softened value when a lesser tip succeeds, so the
-        stored command matches the posture the arm actually holds.
-        """
-        solved, last = (self._ik(target, {}) if turn_over else
-                        self._ik(target, joints, prior, continuous=continuous))
-        if solved is not None:
-            return solved, last
-        pitch = float(target.get("wrist_pitch", 0.0))
-        roll = float(target.get("wrist_roll", 0.0))
-        floor = self.config.drive_tip_roll_floor
-        if not self._roll_about_tool_x(pitch, roll) or abs(roll) <= floor + 1e-9:
-            return None, last
-        sign = math.copysign(1.0, roll if abs(roll) > 1e-9 else -1.0)
-        for mag in (1.45, 1.35, 1.25, 1.15, floor):
-            if mag >= abs(roll) - 1e-9:
-                continue
-            softened = {**target, "wrist_roll": sign * mag}
-            solved, err = (self._ik(softened, {}) if turn_over else
-                           self._ik(softened, joints, prior, continuous=continuous))
-            if err is not None:
-                last = err
+            Mutates ``target['wrist_roll']`` to the softened value when a lesser tip succeeds, so the
+            stored command matches the posture the arm actually holds.
+            """
+            solved, last = (self._ik(target, {}) if turn_over else
+                            self._ik(target, joints, prior, continuous=continuous))
             if solved is not None:
-                target["wrist_roll"] = sign * mag
-                return solved, None
-        return None, last
+                return solved, last
+            pitch = float(target.get("wrist_pitch", 0.0))
+            roll = float(target.get("wrist_roll", 0.0))
+            floor = self.config.drive_tip_roll_floor
+            if not self._roll_about_tool_x(pitch, roll) or abs(roll) <= floor + 1e-9:
+                return None, last
+            sign = math.copysign(1.0, roll if abs(roll) > 1e-9 else -1.0)
+            for mag in (1.45, 1.35, 1.25, 1.15, floor):
+                if mag >= abs(roll) - 1e-9:
+                    continue
+                softened = {**target, "wrist_roll": sign * mag}
+                solved, err = (self._ik(softened, {}) if turn_over else
+                               self._ik(softened, joints, prior, continuous=continuous))
+                if err is not None:
+                    last = err
+                if solved is not None:
+                    target["wrist_roll"] = sign * mag
+                    return solved, None
+            return None, last
 
-    def _roll_about_tool_x(self, pitch: float, roll: float) -> bool:
-        """Whether ``wrist_roll`` tips about tool +x (drive bit-down) rather than tool +z."""
-        return abs(pitch) < self.config.roll_about_x_pitch and abs(roll) <= self.config.roll_about_x_max
+        def _roll_about_tool_x(self, pitch: float, roll: float) -> bool:
+            """Whether ``wrist_roll`` tips about tool +x (drive bit-down) rather than tool +z."""
+            return abs(pitch) < self.config.roll_about_x_pitch and abs(roll) <= self.config.roll_about_x_max
 
     def _step(self, a: dict, b: dict) -> bool:
         """Whether virtual-joint targets ``b`` lie a small step from ``a``."""
@@ -488,11 +534,15 @@ class PiperArm(Arm):
         # that tips a cup or turns a box over about the approach. Rx uses the flipped sign so the
         # same ±π/2 values as the kitchen robot still map gripper +y → world −z.
         pitched = quat_mul(quat_from_axis_angle([0.0, 1.0, 0.0], -target["wrist_pitch"]), TOOL_DOWN)
-        if self._roll_about_tool_x(target["wrist_pitch"], target["wrist_roll"]):
-            rolled = quat_mul(pitched, quat_from_axis_angle([1.0, 0.0, 0.0], -target["wrist_roll"]))
+        if _assembly_enabled():
+            tool = quat_mul(quat_from_axis_angle([0.0, 0.0, 1.0], target["wrist_yaw"]),
+                            quat_mul(pitched, quat_from_axis_angle([0.0, 0.0, 1.0], target["wrist_roll"])))
         else:
-            rolled = quat_mul(pitched, quat_from_axis_angle([0.0, 0.0, 1.0], target["wrist_roll"]))
-        tool = quat_mul(quat_from_axis_angle([0.0, 0.0, 1.0], target["wrist_yaw"]), rolled)
+            if self._roll_about_tool_x(target["wrist_pitch"], target["wrist_roll"]):
+                rolled = quat_mul(pitched, quat_from_axis_angle([1.0, 0.0, 0.0], -target["wrist_roll"]))
+            else:
+                rolled = quat_mul(pitched, quat_from_axis_angle([0.0, 0.0, 1.0], target["wrist_roll"]))
+            tool = quat_mul(quat_from_axis_angle([0.0, 0.0, 1.0], target["wrist_yaw"]), rolled)
         last: IkError | None = None
         for lift, q in seeds:
             try:

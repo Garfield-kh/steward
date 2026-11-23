@@ -35,7 +35,7 @@ export interface JsonObject {
 }
 
 /** Skills the Ego Runtime can predict and run. */
-export type EgoSkill = 'regrasp_upright' | 'assemble_onto' | 'fasten_onto' | 'seat_screw' | 'drive_screw' | 'flip_assembly' | 'insert_screw_into_hole' | 'navigate' | 'pick' | 'place' | 'pour' | 'open' | 'close'
+export type EgoSkill = 'complete_assembly' | 'regrasp_upright' | 'assemble_onto' | 'fasten_onto' | 'seat_screw' | 'drive_screw' | 'flip_assembly' | 'insert_screw_into_hole' | 'navigate' | 'pick' | 'place' | 'pour' | 'open' | 'close'
 
 /** The top face of an Ego-State object as the robot camera that sees most of it shows it now. */
 export interface InspectResult {
@@ -252,6 +252,7 @@ export interface SkillJob {
   state: 'running' | 'succeeded' | 'failed' | 'stopped'
   message: string
   log: string[]
+  phaseTiming?: JsonObject
   timing?: JsonObject[]
   /** Sensor evidence for the requested result; execution success alone does not verify it. */
   postcondition?: JsonObject
@@ -272,6 +273,14 @@ export class EgoError extends Error {
 export abstract class EgoService extends Service {
   constructor(ctx: Context) {
     super(ctx, 'ego')
+  }
+
+  /**
+   * Resolve the connected runtime's assembly profile before registering tools.
+   * @returns the runtime profile; local providers may use the launch environment.
+   */
+  async assemblyProfile(): Promise<'off' | 'toy'> {
+    return process.env.STEWARD_ASSEMBLY_PROFILE === 'toy' ? 'toy' : 'off'
   }
 
   /**
@@ -301,7 +310,7 @@ export abstract class EgoService extends Service {
    * @param signal - caller cancellation.
    * @returns the started job.
    */
-  abstract explore(signal?: AbortSignal): Promise<SkillJob>
+  abstract explore(signal?: AbortSignal, timeoutS?: number): Promise<SkillJob>
 
   /**
    * Ask ESim to predict a skill and obtain a receipt.

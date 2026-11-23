@@ -1,46 +1,97 @@
 """Robot-side contact geometry from segmented RGB-D, never world fastener metadata."""
+
+from steward.assembly_profile import enabled as _assembly_enabled
+
 from copy import deepcopy
 import math
 import numpy as np
 
 
-def directed_tool(points, category, stamp):
-    """Resolve a shaft's end polarity by measured endpoint width; refuse ambiguous masks.
+if _assembly_enabled():
+    def directed_tool(points, category, stamp, diagnostics=None):
+        """Resolve a shaft's end polarity by measured endpoint width; refuse ambiguous masks.
 
-    The wide end is the screw head / driver handle. These are shape hypotheses,
-    not calibrated metrology. Full-resolution points are required (not 1 cm voxels).
-    """
-    if category not in ('toy_screw', 'electric_screwdriver'):
-        return None
-    p = np.asarray(points, float)
-    if p.ndim != 2 or p.shape[1] != 3 or len(p) < 30 or not np.isfinite(p).all():
-        return None
-    centre = np.median(p, axis=0)
-    _, values, axes = np.linalg.svd(p-centre, full_matrices=False)
-    if values[0] < 1.25*values[1]:
-        return None
-    axis = axes[0]
-    along = (p-centre) @ axis
-    lo, hi = np.quantile(along, [.01, .99])
-    length = hi-lo
-    if not (.012 <= length <= .035 if category == 'toy_screw' else .10 <= length <= .23):
-        return None
-    radial = p-centre-along[:, None]*axis
-    ends = [radial[along <= lo+.22*length], radial[along >= hi-.22*length]]
-    if min(map(len, ends)) < 6:
-        return None
-    widths = [float(np.quantile(np.linalg.norm(e-np.median(e, axis=0), axis=1), .9)) for e in ends]
-    if max(widths) < 1.35*max(min(widths), .001) or abs(widths[1]-widths[0]) < .0015:
-        return None
-    endpoints = [centre+lo*axis+np.median(ends[0], axis=0),
-                 centre+hi*axis+np.median(ends[1], axis=0)]
-    wide = int(widths[1] > widths[0])
-    head, tip = endpoints[wide], endpoints[1-wide]
-    direction = (head-tip)/np.linalg.norm(head-tip)
-    return {'tip': tip.tolist(), 'head': head.tolist(),
-            'axis': (direction if category == 'toy_screw' else -direction).tolist(),
-            'lengthM': float(np.linalg.norm(head-tip)), 'radiusM': max(widths),
-            'stamp': float(stamp), 'source': 'rgbd_endpoint_width', 'polarityObserved': True}
+        The wide end is the screw head / driver handle. These are shape hypotheses,
+        not calibrated metrology. Full-resolution points are required (not 1 cm voxels).
+        """
+        diag = diagnostics if diagnostics is not None else {}
+        diag.update(called=True, category=category, stamp=float(stamp), reason='unsupported_category')
+        if category not in ('toy_screw', 'electric_screwdriver'):
+            return None
+        p = np.asarray(points, float)
+        diag.update(pointCount=len(p) if p.ndim else 0, reason='invalid_points')
+        if p.ndim != 2 or p.shape[1] != 3 or len(p) < 30 or not np.isfinite(p).all():
+            return None
+        centre = np.median(p, axis=0)
+        _, values, axes = np.linalg.svd(p-centre, full_matrices=False)
+        diag.update(singularValues=values.tolist(), principalAxis=axes[0].tolist(),
+                    visibleExtentM=np.ptp(p, axis=0).tolist(), reason='axis_not_elongated')
+        if values[0] < 1.25*values[1]:
+            return None
+        axis = axes[0]
+        along = (p-centre) @ axis
+        lo, hi = np.quantile(along, [.01, .99])
+        length = hi-lo
+        diag.update(axialLengthM=float(length), reason='length_out_of_range')
+        if not (.012 <= length <= .035 if category == 'toy_screw' else .10 <= length <= .23):
+            return None
+        radial = p-centre-along[:, None]*axis
+        ends = [radial[along <= lo+.22*length], radial[along >= hi-.22*length]]
+        diag.update(endpointPointCounts=list(map(len, ends)), reason='insufficient_endpoint_points')
+        if min(map(len, ends)) < 6:
+            return None
+        widths = [float(np.quantile(np.linalg.norm(e-np.median(e, axis=0), axis=1), .9)) for e in ends]
+        diag.update(endpointRadiiM=widths, reason='endpoint_width_ambiguous')
+        if max(widths) < 1.35*max(min(widths), .001) or abs(widths[1]-widths[0]) < .0015:
+            return None
+        endpoints = [centre+lo*axis+np.median(ends[0], axis=0),
+                     centre+hi*axis+np.median(ends[1], axis=0)]
+        wide = int(widths[1] > widths[0])
+        head, tip = endpoints[wide], endpoints[1-wide]
+        direction = (head-tip)/np.linalg.norm(head-tip)
+        diag['reason'] = 'observed'
+        return {'tip': tip.tolist(), 'head': head.tolist(),
+                'axis': (direction if category == 'toy_screw' else -direction).tolist(),
+                'lengthM': float(np.linalg.norm(head-tip)), 'radiusM': max(widths),
+                'stamp': float(stamp), 'source': 'rgbd_endpoint_width', 'polarityObserved': True}
+else:
+    def directed_tool(points, category, stamp):
+        """Resolve a shaft's end polarity by measured endpoint width; refuse ambiguous masks.
+
+        The wide end is the screw head / driver handle. These are shape hypotheses,
+        not calibrated metrology. Full-resolution points are required (not 1 cm voxels).
+        """
+        if category not in ('toy_screw', 'electric_screwdriver'):
+            return None
+        p = np.asarray(points, float)
+        if p.ndim != 2 or p.shape[1] != 3 or len(p) < 30 or not np.isfinite(p).all():
+            return None
+        centre = np.median(p, axis=0)
+        _, values, axes = np.linalg.svd(p-centre, full_matrices=False)
+        if values[0] < 1.25*values[1]:
+            return None
+        axis = axes[0]
+        along = (p-centre) @ axis
+        lo, hi = np.quantile(along, [.01, .99])
+        length = hi-lo
+        if not (.012 <= length <= .035 if category == 'toy_screw' else .10 <= length <= .23):
+            return None
+        radial = p-centre-along[:, None]*axis
+        ends = [radial[along <= lo+.22*length], radial[along >= hi-.22*length]]
+        if min(map(len, ends)) < 6:
+            return None
+        widths = [float(np.quantile(np.linalg.norm(e-np.median(e, axis=0), axis=1), .9)) for e in ends]
+        if max(widths) < 1.35*max(min(widths), .001) or abs(widths[1]-widths[0]) < .0015:
+            return None
+        endpoints = [centre+lo*axis+np.median(ends[0], axis=0),
+                     centre+hi*axis+np.median(ends[1], axis=0)]
+        wide = int(widths[1] > widths[0])
+        head, tip = endpoints[wide], endpoints[1-wide]
+        direction = (head-tip)/np.linalg.norm(head-tip)
+        return {'tip': tip.tolist(), 'head': head.tolist(),
+                'axis': (direction if category == 'toy_screw' else -direction).tolist(),
+                'lengthM': float(np.linalg.norm(head-tip)), 'radiusM': max(widths),
+                'stamp': float(stamp), 'source': 'rgbd_endpoint_width', 'polarityObserved': True}
 
 
 def nominal_tool(category, centre, size, rotation, stamp):
@@ -55,7 +106,11 @@ def nominal_tool(category, centre, size, rotation, stamp):
         return None
     dims = np.asarray(SHAPES[category]['dims'])
     length = float(max(dims))
-    local = np.eye(3)[int(np.argmax(size))]
+    if _assembly_enabled():
+        size = np.asarray(size, float)
+        local = np.eye(3)[2 if size[2] >= .6*length else int(np.argmax(size[:2]))]
+    else:
+        local = np.eye(3)[int(np.argmax(size))]
     axis = np.asarray(rotation) @ local
     centre = np.asarray(centre)
     direction = axis if category == 'toy_screw' else -axis

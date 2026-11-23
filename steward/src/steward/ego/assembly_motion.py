@@ -1,4 +1,7 @@
 """Motion targets from robot-owned registrations, actions and RGB-D only."""
+
+from steward.assembly_profile import enabled as _assembly_enabled
+
 from copy import deepcopy
 from itertools import product
 import math
@@ -181,6 +184,14 @@ def released_record(record, spot, table, delta, stamp, view=None):
         ref['heightSource'] = 'commanded_bearing_stack_catalogue'
     if view:
         new['releaseObservation'] = {k:deepcopy(v) for k,v in view.items() if k != 'points'}
+    if _assembly_enabled():
+        from steward.ego import edge_retention
+        if edge_retention.enabled() and record.get('contactReference'):
+            contact = new['contactReference']; previous = record['contactReference']
+            contact['position'] = (position+delta @ (np.asarray(previous['position'])-old['position'])).tolist()
+            axis = delta @ matrix_from_quat(quat_from_yaw(previous['yaw']))[:,0]
+            contact['yaw'] = math.atan2(axis[1], axis[0])
+            contact['transportedAt'] = stamp
     r1 = matrix_from_quat(quat_from_yaw(yaw))
     for h in ref['holes']:
         points = h.get('positionsByRegistration', [h['p']])

@@ -8,10 +8,21 @@ footprint center, so a placement pose only needs x, y and yaw.
 
 from __future__ import annotations
 
+from steward.assembly_profile import enabled as _assembly_enabled
+
+
+if _assembly_enabled():
+    from steward.ego import capabilities
+
 import math
+if _assembly_enabled():
+    import os
 from collections.abc import Callable
 
-from steward.math3d import quat_from_axis_angle, quat_from_yaw
+if _assembly_enabled():
+    from steward.math3d import quat_from_axis_angle, quat_from_yaw, quat_mul
+else:
+    from steward.math3d import quat_from_axis_angle, quat_from_yaw
 from steward.scene.schema import Entity, Est, Joint, Link, RigidTree, exact, pose, primitive
 
 TEMPLATE_ID = "w:template"
@@ -353,16 +364,22 @@ def _hole(p: list[float], radius: float = 0.006, depth: float = 0.005, axis=None
     return primitive("cylinder", [radius, depth], pose(list(p), q), HOLE)
 
 
-def _hole_affordance(hole_id: str, p: list[float], n: list[float] | None = None, *,
-                     axis=None, entry=None, depth: float | None = None) -> Est:
-    """Screw-hole marker: body-frame centre ``p``, outward normal ``n`` (or ``axis``), optional entry/depth."""
-    normal = list(n if n is not None else (axis if axis is not None else [0.0, 0.0, 1.0]))
-    ax = list(axis) if axis is not None else list(normal)
-    hole: dict = {"id": hole_id, "p": list(p), "n": normal, "axis": ax}
-    hole["entry"] = list(entry) if entry is not None else [p[i] + 0.0025 * ax[i] for i in range(3)]
-    if depth is not None:
-        hole["depth"] = depth
-    return exact({"screw-hole": hole})
+if _assembly_enabled():
+    def _hole_affordance(hole_id: str, p: list[float], *, axis=None, entry=None, depth: float = 0.005) -> Est:
+        axis = axis or [0, 0, 1]
+        entry = entry or [p[i] + 0.0025 * axis[i] for i in range(3)]
+        return exact({"screw-hole": {"id": hole_id, "p": list(p), "axis": axis, "entry": entry, "depth": depth}})
+else:
+    def _hole_affordance(hole_id: str, p: list[float], n: list[float] | None = None, *,
+                         axis=None, entry=None, depth: float | None = None) -> Est:
+        """Screw-hole marker: body-frame centre ``p``, outward normal ``n`` (or ``axis``), optional entry/depth."""
+        normal = list(n if n is not None else (axis if axis is not None else [0.0, 0.0, 1.0]))
+        ax = list(axis) if axis is not None else list(normal)
+        hole: dict = {"id": hole_id, "p": list(p), "n": normal, "axis": ax}
+        hole["entry"] = list(entry) if entry is not None else [p[i] + 0.0025 * ax[i] for i in range(3)]
+        if depth is not None:
+            hole["depth"] = depth
+        return exact({"screw-hole": hole})
 
 
 def airplane_fuselage(length: float = 0.18, width: float = 0.045, height: float = 0.04, mass: float = 0.08) -> Entity:
@@ -448,60 +465,84 @@ def car_body(length: float = 0.16, width: float = 0.10, height: float = 0.045, m
 
 
 def car_wheel(radius: float = 0.025, thickness: float = 0.016, mass: float = 0.02) -> Entity:
-    """Toy car wheel with a centre through-hole for the axle screw."""
-    geoms = [
-        primitive("cylinder", [radius, thickness], pose([0, 0, thickness / 2]), BLACK),
-        primitive("cylinder", [radius * 0.45, thickness * 1.05], pose([0, 0, thickness / 2]), SCREW_STEEL),
-        _hole([0.0, 0.0, thickness - 0.002], radius=0.006),
-        _hole([0.0, 0.0, 0.002], radius=0.006),
-    ]
-    # Through-hole: either face accepts the screw when the axis is vertical. ``n`` is the top-face
-    # outward (+z); facing uses |upDot| so a flat wheel is insertable without flipping.
-    hub = {"id": "hub", "p": [0.0, 0.0, thickness / 2], "n": [0.0, 0.0, 1.0], "through": True}
-    link = Link(id="body", name="car wheel", geometry={"collision": geoms}, inertial=exact({"mass": mass}),
-                material=exact({"friction": 0.95, "fragility": 0.05}),
-                affordances=[exact("graspable"), exact({"screw-hole": {
-                    "id": "hub", "p": [0.0, 0.0, thickness / 2], "n": [0.0, 0.0, 1.0],
-                    "through": True, "axis": [0.0, 0.0, 1.0],
-                    "entry": [0, 0, thickness + 0.0005], "depth": thickness * 1.025 + 0.0005}})])
+    if _assembly_enabled():
+        """Toy car wheel with a centre screw hole."""
+        geoms = [
+            primitive("cylinder", [radius, thickness], pose([0, 0, thickness / 2]), BLACK),
+            primitive("cylinder", [radius * 0.45, thickness * 1.05], pose([0, 0, thickness / 2]), SCREW_STEEL),
+            _hole([0.0, 0.0, thickness - 0.002], radius=0.006),
+        ]
+        link = Link(id="body", name="car wheel", geometry={"collision": geoms}, inertial=exact({"mass": mass}),
+                    material=exact({"friction": 0.95, "fragility": 0.05}),
+                    affordances=[exact("graspable"), _hole_affordance("hub", [0.0, 0.0, thickness / 2],
+                                                                entry=[0, 0, thickness + 0.0005], depth=thickness * 1.025 + 0.0005)])
+    else:
+        """Toy car wheel with a centre through-hole for the axle screw."""
+        geoms = [
+            primitive("cylinder", [radius, thickness], pose([0, 0, thickness / 2]), BLACK),
+            primitive("cylinder", [radius * 0.45, thickness * 1.05], pose([0, 0, thickness / 2]), SCREW_STEEL),
+            _hole([0.0, 0.0, thickness - 0.002], radius=0.006),
+            _hole([0.0, 0.0, 0.002], radius=0.006),
+        ]
+        # Through-hole: either face accepts the screw when the axis is vertical. ``n`` is the top-face
+        # outward (+z); facing uses |upDot| so a flat wheel is insertable without flipping.
+        hub = {"id": "hub", "p": [0.0, 0.0, thickness / 2], "n": [0.0, 0.0, 1.0], "through": True}
+        link = Link(id="body", name="car wheel", geometry={"collision": geoms}, inertial=exact({"mass": mass}),
+                    material=exact({"friction": 0.95, "fragility": 0.05}),
+                    affordances=[exact("graspable"), exact({"screw-hole": {
+                        "id": "hub", "p": [0.0, 0.0, thickness / 2], "n": [0.0, 0.0, 1.0],
+                        "through": True, "axis": [0.0, 0.0, 1.0],
+                        "entry": [0, 0, thickness + 0.0005], "depth": thickness * 1.025 + 0.0005}})])
     return _entity("car_wheel", "object", "free", [link])
 
 
 def toy_screw(length: float = 0.022, shaft: float = 0.004, head: float = 0.008, mass: float = 0.008) -> Entity:
-    """Machine screw: graspable head on +z, tip near z=0. Defaults match toy-airplane fasteners;
-    pass larger ``length``/``shaft``/``head`` for the oversized screw-board parts."""
-    head_h = min(0.012, length * 0.35)
-    geoms = [
-        primitive("cylinder", [head, head_h], pose([0, 0, length - head_h / 2]), SCREW_STEEL),
-        primitive("cylinder", [shaft, length - head_h], pose([0, 0, (length - head_h) / 2]), SCREW_STEEL),
-    ]
-    # Tip marker for place-align (p/n only). Omitting axis/entry/depth keeps fastening's
-    # feature inventory from treating the tip as a bore that can mate with itself.
-    tip_z = min(0.006, length * 0.25)
-    tip = {"id": "tip", "p": [0.0, 0.0, tip_z], "n": [0.0, 0.0, -1.0]}
-    link = Link(id="body", name="screw", geometry={"collision": geoms}, inertial=exact({"mass": mass}),
-                material=exact({"friction": 0.7, "fragility": 0.0}),
-                affordances=[exact("graspable"),
-                             exact({"screw": {"axis": [0, 0, 1], "tip": [0, 0, 0],
-                    "head": [0, 0, length], "seat": [0, 0, length - min(0.004, length * 0.2)]}}),
-                             exact({"screw-hole": tip})])
+    if _assembly_enabled():
+        """Short machine screw: a gripable head and a short shaft that matches the toy screw holes."""
+        geoms = [
+            primitive("cylinder", [head, 0.004], pose([0, 0, length - 0.002]), SCREW_STEEL),
+            primitive("cylinder", [shaft, length - 0.004], pose([0, 0, (length - 0.004) / 2]), SCREW_STEEL),
+        ]
+        link = Link(id="body", name="screw", geometry={"collision": geoms}, inertial=exact({"mass": mass}),
+                    material=exact({"friction": 0.7, "fragility": 0.0}),
+                    affordances=[exact("graspable"), exact({"screw": {"axis": [0, 0, 1], "tip": [0, 0, 0],
+                        "head": [0, 0, length], "seat": [0, 0, length - 0.004]}})])
+    else:
+        """Machine screw: graspable head on +z, tip near z=0. Defaults match toy-airplane fasteners;
+        pass larger ``length``/``shaft``/``head`` for the oversized screw-board parts."""
+        head_h = min(0.012, length * 0.35)
+        geoms = [
+            primitive("cylinder", [head, head_h], pose([0, 0, length - head_h / 2]), SCREW_STEEL),
+            primitive("cylinder", [shaft, length - head_h], pose([0, 0, (length - head_h) / 2]), SCREW_STEEL),
+        ]
+        # Tip marker for place-align (p/n only). Omitting axis/entry/depth keeps fastening's
+        # feature inventory from treating the tip as a bore that can mate with itself.
+        tip_z = min(0.006, length * 0.25)
+        tip = {"id": "tip", "p": [0.0, 0.0, tip_z], "n": [0.0, 0.0, -1.0]}
+        link = Link(id="body", name="screw", geometry={"collision": geoms}, inertial=exact({"mass": mass}),
+                    material=exact({"friction": 0.7, "fragility": 0.0}),
+                    affordances=[exact("graspable"),
+                                 exact({"screw": {"axis": [0, 0, 1], "tip": [0, 0, 0],
+                        "head": [0, 0, length], "seat": [0, 0, length - min(0.004, length * 0.2)]}}),
+                                 exact({"screw-hole": tip})])
     return _entity("toy_screw", "object", "free", [link])
 
 
-def screw_board(width: float = 0.28, depth: float = 0.20, thickness: float = 0.018, mass: float = 0.35) -> Entity:
-    """Wooden board with four top-face screw holes in a rectangle (for the screw-board scenario)."""
-    # Hole centres in the body frame (metres): 2×2 grid on the top face.
-    # Hole radius is 3× the original (0.007→0.021) so oversized screws seat more easily.
-    holes_xy = ((0.07, 0.05), (0.07, -0.05), (-0.07, 0.05), (-0.07, -0.05))
-    top_z = thickness - 0.002
-    geoms = [primitive("box", [width, depth, thickness], pose([0, 0, thickness / 2]), BIRCH)]
-    affordances = [exact("graspable"), exact("flat")]
-    for i, (x, y) in enumerate(holes_xy):
-        geoms.append(_hole([x, y, top_z], radius=0.021, depth=0.012))
-        affordances.append(_hole_affordance(f"hole_{i}", [x, y, thickness / 2], [0.0, 0.0, 1.0]))
-    link = Link(id="body", name="screw board", geometry={"collision": geoms}, inertial=exact({"mass": mass}),
-                material=exact({"friction": 0.9, "fragility": 0.05}), affordances=affordances)
-    return _entity("screw_board", "object", "free", [link])
+if not _assembly_enabled():
+    def screw_board(width: float = 0.28, depth: float = 0.20, thickness: float = 0.018, mass: float = 0.35) -> Entity:
+        """Wooden board with four top-face screw holes in a rectangle (for the screw-board scenario)."""
+        # Hole centres in the body frame (metres): 2×2 grid on the top face.
+        # Hole radius is 3× the original (0.007→0.021) so oversized screws seat more easily.
+        holes_xy = ((0.07, 0.05), (0.07, -0.05), (-0.07, 0.05), (-0.07, -0.05))
+        top_z = thickness - 0.002
+        geoms = [primitive("box", [width, depth, thickness], pose([0, 0, thickness / 2]), BIRCH)]
+        affordances = [exact("graspable"), exact("flat")]
+        for i, (x, y) in enumerate(holes_xy):
+            geoms.append(_hole([x, y, top_z], radius=0.021, depth=0.012))
+            affordances.append(_hole_affordance(f"hole_{i}", [x, y, thickness / 2], [0.0, 0.0, 1.0]))
+        link = Link(id="body", name="screw board", geometry={"collision": geoms}, inertial=exact({"mass": mass}),
+                    material=exact({"friction": 0.9, "fragility": 0.05}), affordances=affordances)
+        return _entity("screw_board", "object", "free", [link])
 
 
 def electric_screwdriver(length: float = 0.16, grip: float = 0.035, mass: float = 0.18) -> Entity:
@@ -636,19 +677,52 @@ def steward_bot(camera_pitch_deg: float = 30.0, camera_fovy_deg: float = 60.0, w
         inertial=exact({"mass": 60.0}),
     )
     head = head_link(camera_pitch_deg, camera_fovy_deg, wide_camera, wide_pitch_deg, wide_fovy_deg, wide_size, head_size)
-    carriage = Link(id="carriage", name="carriage",
-                    geometry={"visual": [primitive("box", [0.08, 0.16, 0.05], None, STEEL)]},
-                    inertial=exact({"mass": 2.0}))
-    arm = Link(id="arm", name="arm",
-               geometry={"visual": [primitive("box", [0.5, 0.04, 0.03], pose([-0.25, 0, 0]), ROBOT_ARM)]},
-               inertial=exact({"mass": 1.5}))
-    gripper = Link(id="gripper", name="gripper",
-                   geometry={"visual": [
-                       primitive("box", [0.06, 0.012, 0.05], pose([0.0, 0.045, 0]), [0.1, 0.1, 0.1, 1.0]),
-                       primitive("box", [0.06, 0.012, 0.05], pose([0.0, -0.045, 0]), [0.1, 0.1, 0.1, 1.0]),
-                       primitive("box", [0.02, 0.10, 0.03], pose([-0.03, 0, 0]), [0.1, 0.1, 0.1, 1.0]),
-                   ]},
-                   inertial=exact({"mass": 0.5}), affordances=[exact("grasp-point")])
+    if _assembly_enabled():
+        carriage = Link(id="carriage", name="carriage",
+                        geometry={"visual": [primitive("box", [0.08, 0.16, 0.14], pose([0, 0, .055]), STEEL)]},
+                        inertial=exact({"mass": 2.0}))
+        arm = Link(id="arm", name="arm",
+                   geometry={"visual": [primitive("box", [0.42, 0.04, 0.03], pose([-.29, 0, .086]), ROBOT_ARM)]},
+                   inertial=exact({"mass": 1.5}))
+        gripper = Link(id="gripper", name="gripper",
+                       geometry={"visual": [
+                           # pincer_geometry: tip pads first, followed by two rear/up shanks.
+                           # Inner faces remain +/-39 mm; the grasp-point and all
+                           # joint origins stay put. No transverse bar near TCP.
+                           primitive("box", [.012, .004, .006], pose([0, .041, .003]), BLACK),
+                           primitive("box", [.012, .004, .006], pose([0, -.041, .003]), BLACK),
+                           *[primitive("box", [math.hypot(.114, .060), .004, .004],
+                               pose([-.063, side*.041, .036],
+                                    quat_from_axis_angle([0, 1, 0], math.atan2(.060, .114))), BLACK)
+                             for side in (1, -1)],
+                           primitive("box", [.020, .086, .012], pose([-.12, 0, .072]), BLACK),
+                       ]},
+                       inertial=exact({"mass": 0.5}), affordances=[exact("grasp-point")])
+        if capabilities.get("STEWARD_WRIST_CAMERA") != "0":
+            # wrist_optics: lower front view clears the wrist bottom at an 18 mm tip drop.
+            optics = capabilities.get("STEWARD_WRIST_OPTICS") != "0"
+            gripper.sensors.append({
+                "id": "wrist_camera", "kind": "rgbd",
+                "mount": pose([.12, 0, -.010 if optics else .02], quat_from_axis_angle([0, 1, 0], math.radians(156 if optics else 145))),
+                "intrinsics": {"width": 848, "height": 480, "fovy": 58},
+                "rateHz": 0, "onDemand": True, "depthRangeM": [.02 if optics else .07, .50],
+                **({"renderNearM": .02, "housingSizeM": [.016, .016, .012],
+                    "tipPlaneClearanceM": .009} if optics else {}),
+            })
+    else:
+        carriage = Link(id="carriage", name="carriage",
+                        geometry={"visual": [primitive("box", [0.08, 0.16, 0.05], None, STEEL)]},
+                        inertial=exact({"mass": 2.0}))
+        arm = Link(id="arm", name="arm",
+                   geometry={"visual": [primitive("box", [0.5, 0.04, 0.03], pose([-0.25, 0, 0]), ROBOT_ARM)]},
+                   inertial=exact({"mass": 1.5}))
+        gripper = Link(id="gripper", name="gripper",
+                       geometry={"visual": [
+                           primitive("box", [0.06, 0.012, 0.05], pose([0.0, 0.045, 0]), [0.1, 0.1, 0.1, 1.0]),
+                           primitive("box", [0.06, 0.012, 0.05], pose([0.0, -0.045, 0]), [0.1, 0.1, 0.1, 1.0]),
+                           primitive("box", [0.02, 0.10, 0.03], pose([-0.03, 0, 0]), [0.1, 0.1, 0.1, 1.0]),
+                       ]},
+                       inertial=exact({"mass": 0.5}), affordances=[exact("grasp-point")])
     joints = [
         _fixed("head_mount", "base", "head", pose([0.16, 0, HEAD_HEIGHT_M])),
         Joint(id="lift", parent="base", child="carriage", type=exact("prismatic"), origin=exact(pose([0.22, 0, 0])),
@@ -676,45 +750,115 @@ def steward_bot(camera_pitch_deg: float = 30.0, camera_fovy_deg: float = 60.0, w
         "limits": {"effort": [3600.0, 3600.0, 1000.0], "velocity": [2.0, 2.0, 4.0]},
         "gains": {"kp": [8000.0, 8000.0, 900.0], "damping": [1500.0, 1500.0, 130.0]},
     }
-    wrist = Link(id="wrist", name="wrist", geometry={"visual": [primitive("cylinder", [0.02, 0.03], None, STEEL)]},
-                 inertial=exact({"mass": 0.1}))
-    hand = Link(id="hand", name="hand", geometry={"visual": [primitive("box", [0.03, 0.03, 0.03], None, STEEL)]},
-                inertial=exact({"mass": 0.1}))
-    return _entity("steward-bot", "robot", "planar", [base, head, carriage, arm, wrist, hand, gripper], joints,
-                   state_vars={"gripper": exact("open")}, root_actuator=root_actuator)
+    if _assembly_enabled():
+        wrist = Link(id="wrist", name="wrist", geometry={"visual": [
+            primitive("cylinder", [.02, .012], pose([-.12, 0, .086]), STEEL),
+            # Rear mast and overhead boom are included in optical/self-mask audits.
+            primitive("box", [.006, .006, .112], pose([-.15, 0, .142]), STEEL),
+            primitive("box", [math.hypot(.25, .07), .006, .006],
+                      pose([-.025, .035, .198], quat_from_yaw(math.atan2(.07, .25))), STEEL),
+            primitive("box", [.016, .016, .012], pose([.104, .073, .192]), BLACK),
+        ]},
+                     inertial=exact({"mass": 0.1}))
+        hand = Link(id="hand", name="hand", geometry={"visual": [primitive("box", [.03, .03, .012], pose([-.12, 0, .086]), STEEL)]},
+                    inertial=exact({"mass": 0.1}))
+        # The ONE servo camera stays above/front of TCP, upstream of both
+        # wrist axes. A small obliquity retains parallax past the held shaft while
+        # presenting the support face nearly head-on. entry_layout narrows only the FOV;
+        # the optical axis already intersects the fingertip workspace below TCP.
+        wrist.sensors.append({
+            "id": "entry_camera", "kind": "rgbd", "purpose": "tip_entry_servo",
+            "mount": pose([.10, .07, .18], quat_mul(
+                quat_from_yaw(math.atan2(-.07, -.10)),
+                quat_from_axis_angle([0, 1, 0], math.atan2(.219, math.hypot(.10, .07))))),
+            "intrinsics": {"width": 848, "height": 480, "fovy": 46},
+            "rateHz": 0, "onDemand": True, "depthRangeM": [.02, .50],
+            "renderNearM": .02, "housingSizeM": [.016, .016, .012],
+        })
+        # Separate horizontal view for held-axis polarity; the oblique hole camera
+        # remains useful for independent before/after-release inspection.
+        # A fixed sensor-only link follows BOTH wrist axes, like the grasp point.
+        hand_view = Link(id="hand_view", name="hand_view", sensors=[{
+            "id": "hand_camera", "kind": "rgbd",
+            "mount": pose([.12, 0, -.019], quat_from_axis_angle([0, 0, 1], math.pi)),
+            "intrinsics": {"width": 848, "height": 480, "fovy": 80},
+            "rateHz": 0, "onDemand": True, "depthRangeM": [.02, .50],
+            "renderNearM": .02, "housingSizeM": [.016, .016, .004],
+        }], inertial=exact({"mass": 0.01}))
+        joints.append(_fixed("hand_view_mount", "gripper", "hand_view", pose()))
+        return _entity("steward-bot", "robot", "planar", [base, head, carriage, arm, wrist, hand, gripper, hand_view], joints,
+                       state_vars={"gripper": exact("open")}, root_actuator=root_actuator)
+    else:
+        wrist = Link(id="wrist", name="wrist", geometry={"visual": [primitive("cylinder", [0.02, 0.03], None, STEEL)]},
+                     inertial=exact({"mass": 0.1}))
+        hand = Link(id="hand", name="hand", geometry={"visual": [primitive("box", [0.03, 0.03, 0.03], None, STEEL)]},
+                    inertial=exact({"mass": 0.1}))
+        return _entity("steward-bot", "robot", "planar", [base, head, carriage, arm, wrist, hand, gripper], joints,
+                       state_vars={"gripper": exact("open")}, root_actuator=root_actuator)
 
 
-GENERATORS: dict[str, Callable[..., Entity]] = {
-    "building": building,
-    "counter": counter,
-    "sideboard": sideboard,
-    "dining_table": dining_table,
-    "cabinet_with_drawer": cabinet_with_drawer,
-    "cup": cup,
-    "plate": plate,
-    "bowl": bowl,
-    "nesting_bowl": nesting_bowl,
-    "wine_glass": wine_glass,
-    "mug": mug,
-    "teddy_bear": teddy_bear,
-    "scissors": scissors,
-    "toy_airplane": toy_airplane,
-    "airplane_fuselage": airplane_fuselage,
-    "airplane_wing": airplane_wing,
-    "airplane_propeller": airplane_propeller,
-    "airplane_landing_gear": airplane_landing_gear,
-    "car_body": car_body,
-    "car_wheel": car_wheel,
-    "toy_screw": toy_screw,
-    "screw_board": screw_board,
-    "electric_screwdriver": electric_screwdriver,
-    "pistol": pistol,
-    "pill_bottle": pill_bottle,
-    "perfume_bottle": perfume_bottle,
-    "chair": chair,
-    "printed_board": printed_board,
-    "open_box": open_box,
-    "steward_bot": steward_bot,
-}
-# The agilex embodiment's generator lives in its own module (it imports these constants), so it is
-# registered by whoever needs it: see authoring.service.build_cobot_workstation.
+if _assembly_enabled():
+    GENERATORS: dict[str, Callable[..., Entity]] = {
+        "building": building,
+        "counter": counter,
+        "sideboard": sideboard,
+        "dining_table": dining_table,
+        "cabinet_with_drawer": cabinet_with_drawer,
+        "cup": cup,
+        "plate": plate,
+        "bowl": bowl,
+        "nesting_bowl": nesting_bowl,
+        "wine_glass": wine_glass,
+        "mug": mug,
+        "teddy_bear": teddy_bear,
+        "scissors": scissors,
+        "toy_airplane": toy_airplane,
+        "airplane_fuselage": airplane_fuselage,
+        "airplane_wing": airplane_wing,
+        "airplane_propeller": airplane_propeller,
+        "airplane_landing_gear": airplane_landing_gear,
+        "car_body": car_body,
+        "car_wheel": car_wheel,
+        "toy_screw": toy_screw,
+        "electric_screwdriver": electric_screwdriver,
+        "pistol": pistol,
+        "pill_bottle": pill_bottle,
+        "perfume_bottle": perfume_bottle,
+        "chair": chair,
+        "printed_board": printed_board,
+        "open_box": open_box,
+        "steward_bot": steward_bot,
+    }
+else:
+    GENERATORS: dict[str, Callable[..., Entity]] = {
+        "building": building,
+        "counter": counter,
+        "sideboard": sideboard,
+        "dining_table": dining_table,
+        "cabinet_with_drawer": cabinet_with_drawer,
+        "cup": cup,
+        "plate": plate,
+        "bowl": bowl,
+        "nesting_bowl": nesting_bowl,
+        "wine_glass": wine_glass,
+        "mug": mug,
+        "teddy_bear": teddy_bear,
+        "scissors": scissors,
+        "toy_airplane": toy_airplane,
+        "airplane_fuselage": airplane_fuselage,
+        "airplane_wing": airplane_wing,
+        "airplane_propeller": airplane_propeller,
+        "airplane_landing_gear": airplane_landing_gear,
+        "car_body": car_body,
+        "car_wheel": car_wheel,
+        "toy_screw": toy_screw,
+        "screw_board": screw_board,
+        "electric_screwdriver": electric_screwdriver,
+        "pistol": pistol,
+        "pill_bottle": pill_bottle,
+        "perfume_bottle": perfume_bottle,
+        "chair": chair,
+        "printed_board": printed_board,
+        "open_box": open_box,
+        "steward_bot": steward_bot,
+    }

@@ -112,17 +112,17 @@ test('a checkpoint reviews progress with the scene', () => {
 
 const EFFORT = { act: 'low', instruction: 'high', recover: 'high', shallow: 'high', deep: 'max', checkpoint: 'high' }
 
-function harness(config = {}) {
+async function harness(config = {}) {
   const handlers = {}
   const reports = []
   const registered = []
   const ctx = {
-    ego: { reflect: async (report) => { reports.push(report); return REFLECTION }, summary: async () => SUMMARY },
+    ego: { assemblyProfile: async () => process.env.STEWARD_ASSEMBLY_PROFILE === 'toy' ? 'toy' : 'off', reflect: async (report) => { reports.push(report); return REFLECTION }, summary: async () => SUMMARY },
     on: (name, handler) => { handlers[name] = handler },
     effect: (fn) => fn(),
     tools: { register: (tool) => { registered.push(tool); return () => {} } },
   }
-  apply(ctx, Config({ instructionMarker: '操作员任务：', effort: EFFORT, checkpointEvery: 0, idleEvery: 0, ...config }))
+  await apply(ctx, Config({ instructionMarker: '操作员任务：', effort: EFFORT, checkpointEvery: 0, idleEvery: 0, ...config }))
   const agent = {}
   const signal = new AbortController().signal
   const claim = (text, kind = 'user') => handlers['agent/inbox/claimed']({ agent, message: { source: { kind }, content: [{ type: 'text', text }] }, turn: 1 })
@@ -138,7 +138,7 @@ function harness(config = {}) {
 }
 
 test('a failed robot step gets one reflection message carrying the operator instruction', async () => {
-  const h = harness()
+  const h = (await harness())
   h.claim('说明\n\n操作员任务：把拼图倒在桌上')
   h.claim('后台提醒', 'ego-reflection')
   const decision = await h.run('ego_query', { category: 'box' }, ok({ objects: [] }))
@@ -151,7 +151,7 @@ test('a failed robot step gets one reflection message carrying the operator inst
 })
 
 test('a failed skill_run is reported with the parameters of the receipt it ran', async () => {
-  const h = harness()
+  const h = (await harness())
   await h.run('ego_predict', { skill: 'pick', target: 'e:5' }, ok({ receipt: 'r7', feasible: true, issues: [] }))
   await h.run('skill_run', { receipt: 'r7' }, ok({ skill: 'pick', state: 'failed', message: 'missed the grasp' }))
   assert.deepEqual(h.reports, [{ tool: 'skill_run', arguments: { receipt: 'r7', params: { skill: 'pick', target: 'e:5' } },
@@ -159,7 +159,7 @@ test('a failed skill_run is reported with the parameters of the receipt it ran',
 })
 
 test('a recurring failure and a failure after several shallow reflections are reflected on deeply', async () => {
-  const h = harness({ deepAfter: 2 })
+  const h = (await harness({ deepAfter: 2 }))
   h.claim('操作员任务：拼好拼图')
   const fail = (category) => h.run('ego_query', { category }, ok({ objects: [] }))
   assert.match(h.text(await fail('box')), /^【反思】/)
@@ -173,7 +173,7 @@ test('a recurring failure and a failure after several shallow reflections are re
 })
 
 test('reflections beyond the budgets pass, and a new operator message resets them but keeps the earlier one', async () => {
-  const h = harness({ maxPerInstruction: 2, maxDeepPerInstruction: 0 })
+  const h = (await harness({ maxPerInstruction: 2, maxDeepPerInstruction: 0 }))
   h.claim('操作员任务：拼好拼图')
   const fail = (category) => h.run('ego_query', { category }, ok({ objects: [] }))
   assert.match(h.text(await fail('box')), /^【反思】/)
@@ -187,14 +187,14 @@ test('reflections beyond the budgets pass, and a new operator message resets the
 })
 
 test('tools outside the configured set and successful steps are left alone', async () => {
-  const h = harness()
+  const h = (await harness())
   assert.deepEqual(await h.run('ego_capture_cameras', {}, failed('boom')), { kind: 'accept' })
   assert.deepEqual(await h.run('ego_state', {}, ok({ objects: [] })), { kind: 'accept' })
   assert.deepEqual(h.reports, [])
 })
 
 test('a failed program is reflected on only when none of its nested failures was', async () => {
-  const h = harness()
+  const h = (await harness())
   await h.run('ego_query', { category: 'box' }, ok({ objects: [] }), { rootCallId: 'call-1' })
   assert.equal((await h.program(failed('Error: no box'), 'call-1')).additionalContexts, undefined)
   const decision = await h.program(failed('Error: only 9 pieces matched'), 'call-2')
@@ -205,7 +205,7 @@ test('a failed program is reflected on only when none of its nested failures was
 test('a program language error gets a short reflection and never escalates to a deep one', async () => {
   assert.equal(isProgramError('SyntaxError: Identifier \'p\' has already been declared'), true)
   assert.equal(isProgramError('pick failed: missed the grasp'), false)
-  const h = harness({ deepAfter: 1 })
+  const h = (await harness({ deepAfter: 1 }))
   h.claim('操作员任务：拼好拼图')
   const syntax = 'SyntaxError: Identifier \'p\' has already been declared'
   const first = h.text(await h.program(failed(syntax), 'call-1'))
@@ -220,7 +220,7 @@ test('a program language error gets a short reflection and never escalates to a 
 })
 
 test('the reflect tool answers a reported difficulty deeply unless a shallow check is asked for', async () => {
-  const h = harness()
+  const h = (await harness())
   assert.equal(h.registered[0].name, 'reflect')
   h.claim('操作员任务：拼好拼图')
   await h.run('skill_run', { receipt: 'r1' }, ok({ skill: 'pick', state: 'failed', message: 'missed' }))
@@ -234,7 +234,7 @@ test('the reflect tool answers a reported difficulty deeply unless a shallow che
 })
 
 test('a run of programs without reflection ends with a checkpoint; a failing program defers it', async () => {
-  const h = harness({ checkpointEvery: 3 })
+  const h = (await harness({ checkpointEvery: 3 }))
   h.claim('操作员任务：拼好拼图')
   assert.equal((await h.program()).additionalContexts, undefined)
   assert.equal((await h.program()).additionalContexts, undefined)
@@ -247,7 +247,7 @@ test('a run of programs without reflection ends with a checkpoint; a failing pro
 })
 
 test('a run of programs in which the robot does not act ends with a review of what they wait for', async () => {
-  const h = harness({ idleEvery: 3 })
+  const h = (await harness({ idleEvery: 3 }))
   h.claim('操作员任务：拼好拼图')
   await h.program(ok(null), 'call-1')
   await h.run('skill_run', { receipt: 'r1' }, ok({ skill: 'pick', state: 'succeeded' }), { rootCallId: 'call-2' })
@@ -261,7 +261,7 @@ test('a run of programs in which the robot does not act ends with a review of wh
 })
 
 test('each request thinks as long as the kind of step it follows', async () => {
-  const h = harness({ checkpointEvery: 2 })
+  const h = (await harness({ checkpointEvery: 2 }))
   assert.equal(await h.effort(), 'high', 'before any step the configured effort stands')
   h.claim('操作员任务：拼好拼图')
   assert.equal(await h.effort(), 'high', 'a new instruction')
@@ -277,7 +277,7 @@ test('each request thinks as long as the kind of step it follows', async () => {
   assert.equal(await h.effort(), 'high', 'a checkpoint')
   await h.program()
   assert.equal(await h.effort(), 'low')
-  const plain = harness({ effort: {} })
+  const plain = (await harness({ effort: {} }))
   await plain.program()
   assert.equal(await plain.effort(), 'high', 'an empty effort leaves the request as configured')
 })

@@ -3,6 +3,9 @@
 Persistence is a motion assumption, not fresh perception or evidence of attachment.
 Raw tracks remain available for collision geometry and independent verification.
 """
+
+from steward.assembly_profile import enabled as _assembly_enabled
+
 from copy import deepcopy
 import math
 
@@ -39,18 +42,43 @@ class StationaryAssemblies:
         return record
 
     def invalidate(self, entity, track=None, stamp=None):
-        if stamp is not None:
-            self.motion_events.append(dict(entity=entity, stamp=float(stamp),
-                category=track.category if track is not None else None,
-                position=track.pos.tolist() if track is not None else None))
-        for r in self.records.values():
-            ref = r['reference']
-            spatial = track is not None and track.category in (ref['category'], ref.get('family')) and np.linalg.norm(track.pos-np.asarray(ref['position'])) < .10
-            if entity in (*r['aliases'], ref['support']) or spatial:
-                self.warn(r, 'robot_action_on_reference', entity=entity, stamp=stamp)
-            for p in r['parts']:
-                if p['entity'] == entity:
-                    p['status'] = 'invalidated'
+        if _assembly_enabled():
+            if stamp is not None:
+                # Consumers ask whether/when this entity last moved. Keep the latest
+                # event per identity; old trajectory samples cannot change that answer.
+                previous = next((e for e in self.motion_events if e['entity'] == entity), None)
+                if previous is None or previous['stamp'] <= stamp:
+                    self.motion_events[:] = [e for e in self.motion_events if e['entity'] != entity]
+                    self.motion_events.append(dict(entity=entity, stamp=float(stamp),
+                        category=track.category if track is not None else None,
+                        position=track.pos.tolist() if track is not None else None))
+            for r in self.records.values():
+                ref = r['reference']
+                spatial = track is not None and track.category in (ref['category'], ref.get('family')) and np.linalg.norm(track.pos-np.asarray(ref['position'])) < .10
+                if entity in (*r['aliases'], ref['support']) or spatial:
+                    self.warn(r, 'robot_action_on_reference', entity=entity, stamp=stamp)
+                    if ref.get('faceResolution') and stamp is not None and stamp >= ref['faceResolution'].get('since', -math.inf):
+                        ref['faceResolution'] = dict(status='unknown', source=None, since=stamp,
+                            reason='body_moved_since_face_estimate', exposedHoles=[], exposedInterfaces=[])
+                        ref['faceCheck'] = dict(passed=None, status='unknown', reason='body_moved_since_face_estimate')
+                        ref['faceSince'] = stamp
+                        ref['faceBefore'] = None
+                for p in r['parts']:
+                    if p['entity'] == entity:
+                        p['status'] = 'invalidated'
+        else:
+            if stamp is not None:
+                self.motion_events.append(dict(entity=entity, stamp=float(stamp),
+                    category=track.category if track is not None else None,
+                    position=track.pos.tolist() if track is not None else None))
+            for r in self.records.values():
+                ref = r['reference']
+                spatial = track is not None and track.category in (ref['category'], ref.get('family')) and np.linalg.norm(track.pos-np.asarray(ref['position'])) < .10
+                if entity in (*r['aliases'], ref['support']) or spatial:
+                    self.warn(r, 'robot_action_on_reference', entity=entity, stamp=stamp)
+                for p in r['parts']:
+                    if p['entity'] == entity:
+                        p['status'] = 'invalidated'
 
     @staticmethod
     def warn(record, reason, **numbers):
@@ -112,83 +140,162 @@ class StationaryAssemblies:
         self.freeze(entity, parent['entity'], ref, evidence)
 
     def update(self, tracks, stamp):
-        for r in self.records.values():
-            if r['status'] != 'frozen':
-                continue
-            ref = r['reference']
-            origin = np.asarray(ref['position'])
-            support = tracks.get(ref['support'])
-            obs = (support.manipulation_view or support.assembly_observation) if support else None
-            if obs:
-                distance = float(np.linalg.norm(np.asarray(obs['centreM'])-r['support'].pose.value['p']))
-                if distance > .04:
-                    self.warn(r, 'support_motion_ignored', entity=support.id, distanceM=distance, ageS=stamp-obs['stamp'])
-            candidates = []
-            for t in tracks.values():
-                # Spatial association with a comparable BODY outline, never the
-                # support, released members, a historical id or a merged envelope.
-                if (t.id == ref['support'] or t.id in {p['entity'] for p in r['parts']}
-                        or t.category not in (ref['category'], ref.get('family'))):
+        if _assembly_enabled():
+            for r in self.records.values():
+                if r['status'] != 'frozen':
                     continue
-                obs = t.manipulation_view or t.assembly_observation
-                if not obs:
+                ref = r['reference']
+                origin = np.asarray(ref['position'])
+                support = tracks.get(ref['support'])
+                obs = (support.manipulation_view or support.assembly_observation) if support else None
+                if obs:
+                    distance = float(np.linalg.norm(np.asarray(obs['centreM'])-r['support'].pose.value['p']))
+                    if distance > .04:
+                        self.warn(r, 'support_motion_ignored', entity=support.id, distanceM=distance, ageS=stamp-obs['stamp'])
+                candidates = []
+                for t in tracks.values():
+                    # Spatial association with a comparable BODY outline, never the
+                    # support, released members, a historical id or a merged envelope.
+                    if (t.id == ref['support'] or t.id in {p['entity'] for p in r['parts']}
+                            or t.category not in (ref['category'], ref.get('family'))):
+                        continue
+                    obs = t.manipulation_view or t.assembly_observation
+                    if not obs:
+                        continue
+                    distance = float(np.linalg.norm(np.asarray(obs['centreM'])-origin))
+                    age = stamp-obs['stamp']
+                    range_m = obs.get('rangeM', float('inf'))
+                    complete = (not obs['truncated'] and obs['invalidDepthFraction'] <= .05
+                                and np.allclose(np.sort(obs['visibleSizeM'][:2]), np.sort(ref['size'][:2]), atol=.025))
+                    if distance <= max(.5, 2*BODY_DISPLACEMENT_M) and complete:
+                        candidates.append((distance, t, obs, age, range_m))
+                candidates.sort(key=lambda x:x[0])
+                # A nearer body at the reference, or two plausible neighbours, defeats
+                # a displacement claim about the more distant one.
+                if not candidates:
                     continue
-                distance = float(np.linalg.norm(np.asarray(obs['centreM'])-origin))
-                age = stamp-obs['stamp']
-                range_m = obs.get('rangeM', float('inf'))
-                complete = (not obs['truncated'] and obs['invalidDepthFraction'] <= .05
-                            and np.allclose(np.sort(obs['visibleSizeM'][:2]), np.sort(ref['size'][:2]), atol=.025))
-                if distance <= max(.5, 2*BODY_DISPLACEMENT_M) and complete:
-                    candidates.append((distance, t, obs, age, range_m))
-            candidates.sort(key=lambda x:x[0])
-            # A nearer body at the reference, or two plausible neighbours, defeats
-            # a displacement claim about the more distant one.
-            if not candidates:
-                continue
-            distance, t, obs, age, range_m = candidates[0]
-            if (r['registrationEvidence'].get('tier', 0) >= 2 and not r['parts']
-                    and (self.first_grasp_at is None or distance <= BODY_DISPLACEMENT_M)
-                    and 0 <= age <= FRESH_VIEW_S and range_m <= NEAR_VIEW_M):
-                # A first close view corrects an explicitly provisional far/fused
-                # frame. It is an estimate update, never a movement verdict.
-                from steward.ego.hole_registration import register_hole_template
-                from steward.ego.priors import screw_holes, SCREW_HOLE_FRAMES
-                holes, registration = register_hole_template(screw_holes(ref['category']),
-                    SCREW_HOLE_FRAMES.get(ref['category']), obs['visibleSizeM'], best_effort=True)
-                ref.update(position=list(obs['centreM']), size=list(obs['visibleSizeM']),
-                           yaw=obs['boxYawRad'], registeredAt=obs['stamp'], holes=holes, registration=registration)
-                r['entity'].pose.value = dict(p=list(ref['position']), q=quat_from_yaw(ref['yaw']))
-                r['entity'].pose.t = obs['stamp']
-                r['entity'].rigid.links[0].affordances = [a for a in r['entity'].rigid.links[0].affordances
-                    if not (isinstance(a.value, dict) and 'screw-hole' in a.value)] + [Est(value={'screw-hole':h},src='prior') for h in holes]
-                r['registrationEvidence'].update(tier=0, observedAt=obs['stamp'], ageS=age, rangeM=range_m,
-                                                 source='first_near_correction')
-                self.warn(r, 'first_near_body_correction', distanceM=distance, ageS=age, rangeM=range_m)
-                distance = 0.
-            if t.id not in r['aliases']:
-                r['aliases'].append(t.id)
-                self.warn(r, 'spatial_alias', entity=t.id, distanceM=distance)
-            r['rawBodyObservations'] = {t.id: {k:deepcopy(v) for k,v in obs.items() if k != 'points'}}
-            qualified = (self.first_grasp_at is not None and obs['stamp'] > max(ref['registeredAt'], self.first_grasp_at)
-                         and 0 <= age <= FRESH_VIEW_S and range_m <= NEAR_VIEW_M
-                         and (len(candidates) == 1 or candidates[1][0]-distance > .10))
-            moved = distance > BODY_DISPLACEMENT_M
-            if distance > .04 or not qualified:
-                self.warn(r, 'body_motion_diagnostic', entity=t.id, distanceM=distance,
-                          thresholdM=BODY_DISPLACEMENT_M, ageS=age,
-                          rangeM=range_m if math.isfinite(range_m) else None,
-                          firstGraspAt=self.first_grasp_at, qualified=bool(qualified))
-            last, count = r['motionSamples'].get('body', (-1, 0))
-            if obs['stamp'] > last:
-                count = count+1 if qualified and moved else 0
-                r['motionSamples']['body'] = (obs['stamp'], count)
-            if count >= 2 and 'ownReleaseAt' in ref:
-                self.warn(r, 'post_release_body_displacement', **dict(entity=t.id, distanceM=distance, stamp=obs['stamp']))
-            elif count >= 2:
-                r.update(status='invalidated', hardMotion=True,
-                         reason='direct near fresh body displacement',
-                         displacementEvidence=dict(entity=t.id, distanceM=distance,
-                            thresholdM=BODY_DISPLACEMENT_M, ageS=age, rangeM=range_m, stamp=obs['stamp']))
+                distance, t, obs, age, range_m = candidates[0]
+                if (not ref.get('geometryRelocalization') and r['registrationEvidence'].get('tier', 0) >= 2 and not r['parts']
+                        and (self.first_grasp_at is None or distance <= BODY_DISPLACEMENT_M)
+                        and 0 <= age <= FRESH_VIEW_S and range_m <= NEAR_VIEW_M):
+                    # A first close view corrects an explicitly provisional far/fused
+                    # frame. It is an estimate update, never a movement verdict.
+                    from steward.ego.hole_registration import register_hole_template
+                    from steward.ego.priors import screw_holes, SCREW_HOLE_FRAMES
+                    holes, registration = register_hole_template(screw_holes(ref['category']),
+                        SCREW_HOLE_FRAMES.get(ref['category']), obs['visibleSizeM'], best_effort=True)
+                    ref.update(position=list(obs['centreM']), size=list(obs['visibleSizeM']),
+                               yaw=obs['boxYawRad'], registeredAt=obs['stamp'], holes=holes, registration=registration)
+                    r['entity'].pose.value = dict(p=list(ref['position']), q=quat_from_yaw(ref['yaw']))
+                    r['entity'].pose.t = obs['stamp']
+                    r['entity'].rigid.links[0].affordances = [a for a in r['entity'].rigid.links[0].affordances
+                        if not (isinstance(a.value, dict) and 'screw-hole' in a.value)] + [Est(value={'screw-hole':h},src='prior') for h in holes]
+                    r['registrationEvidence'].update(tier=0, observedAt=obs['stamp'], ageS=age, rangeM=range_m,
+                                                     source='first_near_correction')
+                    self.warn(r, 'first_near_body_correction', distanceM=distance, ageS=age, rangeM=range_m)
+                    distance = 0.
+                if t.id not in r['aliases']:
+                    r['aliases'].append(t.id)
+                    self.warn(r, 'spatial_alias', entity=t.id, distanceM=distance)
+                r['rawBodyObservations'] = {t.id: {k:deepcopy(v) for k,v in obs.items() if k != 'points'}}
+                qualified = (self.first_grasp_at is not None and obs['stamp'] > max(ref['registeredAt'], self.first_grasp_at)
+                             and 0 <= age <= FRESH_VIEW_S and range_m <= NEAR_VIEW_M
+                             and (len(candidates) == 1 or candidates[1][0]-distance > .10))
+                moved = distance > BODY_DISPLACEMENT_M
+                if distance > .04 or not qualified:
+                    self.warn(r, 'body_motion_diagnostic', entity=t.id, distanceM=distance,
+                              thresholdM=BODY_DISPLACEMENT_M, ageS=age,
+                              rangeM=range_m if math.isfinite(range_m) else None,
+                              firstGraspAt=self.first_grasp_at, qualified=bool(qualified))
+                last, count = r['motionSamples'].get('body', (-1, 0))
+                if obs['stamp'] > last:
+                    count = count+1 if qualified and moved else 0
+                    r['motionSamples']['body'] = (obs['stamp'], count)
+                if count >= 2 and 'ownReleaseAt' in ref:
+                    self.warn(r, 'post_release_body_displacement', **dict(entity=t.id, distanceM=distance, stamp=obs['stamp']))
+                elif count >= 2:
+                    r.update(status='invalidated', hardMotion=True,
+                             reason='direct near fresh body displacement',
+                             displacementEvidence=dict(entity=t.id, distanceM=distance,
+                                thresholdM=BODY_DISPLACEMENT_M, ageS=age, rangeM=range_m, stamp=obs['stamp']))
+        else:
+            for r in self.records.values():
+                if r['status'] != 'frozen':
+                    continue
+                ref = r['reference']
+                origin = np.asarray(ref['position'])
+                support = tracks.get(ref['support'])
+                obs = (support.manipulation_view or support.assembly_observation) if support else None
+                if obs:
+                    distance = float(np.linalg.norm(np.asarray(obs['centreM'])-r['support'].pose.value['p']))
+                    if distance > .04:
+                        self.warn(r, 'support_motion_ignored', entity=support.id, distanceM=distance, ageS=stamp-obs['stamp'])
+                candidates = []
+                for t in tracks.values():
+                    # Spatial association with a comparable BODY outline, never the
+                    # support, released members, a historical id or a merged envelope.
+                    if (t.id == ref['support'] or t.id in {p['entity'] for p in r['parts']}
+                            or t.category not in (ref['category'], ref.get('family'))):
+                        continue
+                    obs = t.manipulation_view or t.assembly_observation
+                    if not obs:
+                        continue
+                    distance = float(np.linalg.norm(np.asarray(obs['centreM'])-origin))
+                    age = stamp-obs['stamp']
+                    range_m = obs.get('rangeM', float('inf'))
+                    complete = (not obs['truncated'] and obs['invalidDepthFraction'] <= .05
+                                and np.allclose(np.sort(obs['visibleSizeM'][:2]), np.sort(ref['size'][:2]), atol=.025))
+                    if distance <= max(.5, 2*BODY_DISPLACEMENT_M) and complete:
+                        candidates.append((distance, t, obs, age, range_m))
+                candidates.sort(key=lambda x:x[0])
+                # A nearer body at the reference, or two plausible neighbours, defeats
+                # a displacement claim about the more distant one.
+                if not candidates:
+                    continue
+                distance, t, obs, age, range_m = candidates[0]
+                if (r['registrationEvidence'].get('tier', 0) >= 2 and not r['parts']
+                        and (self.first_grasp_at is None or distance <= BODY_DISPLACEMENT_M)
+                        and 0 <= age <= FRESH_VIEW_S and range_m <= NEAR_VIEW_M):
+                    # A first close view corrects an explicitly provisional far/fused
+                    # frame. It is an estimate update, never a movement verdict.
+                    from steward.ego.hole_registration import register_hole_template
+                    from steward.ego.priors import screw_holes, SCREW_HOLE_FRAMES
+                    holes, registration = register_hole_template(screw_holes(ref['category']),
+                        SCREW_HOLE_FRAMES.get(ref['category']), obs['visibleSizeM'], best_effort=True)
+                    ref.update(position=list(obs['centreM']), size=list(obs['visibleSizeM']),
+                               yaw=obs['boxYawRad'], registeredAt=obs['stamp'], holes=holes, registration=registration)
+                    r['entity'].pose.value = dict(p=list(ref['position']), q=quat_from_yaw(ref['yaw']))
+                    r['entity'].pose.t = obs['stamp']
+                    r['entity'].rigid.links[0].affordances = [a for a in r['entity'].rigid.links[0].affordances
+                        if not (isinstance(a.value, dict) and 'screw-hole' in a.value)] + [Est(value={'screw-hole':h},src='prior') for h in holes]
+                    r['registrationEvidence'].update(tier=0, observedAt=obs['stamp'], ageS=age, rangeM=range_m,
+                                                     source='first_near_correction')
+                    self.warn(r, 'first_near_body_correction', distanceM=distance, ageS=age, rangeM=range_m)
+                    distance = 0.
+                if t.id not in r['aliases']:
+                    r['aliases'].append(t.id)
+                    self.warn(r, 'spatial_alias', entity=t.id, distanceM=distance)
+                r['rawBodyObservations'] = {t.id: {k:deepcopy(v) for k,v in obs.items() if k != 'points'}}
+                qualified = (self.first_grasp_at is not None and obs['stamp'] > max(ref['registeredAt'], self.first_grasp_at)
+                             and 0 <= age <= FRESH_VIEW_S and range_m <= NEAR_VIEW_M
+                             and (len(candidates) == 1 or candidates[1][0]-distance > .10))
+                moved = distance > BODY_DISPLACEMENT_M
+                if distance > .04 or not qualified:
+                    self.warn(r, 'body_motion_diagnostic', entity=t.id, distanceM=distance,
+                              thresholdM=BODY_DISPLACEMENT_M, ageS=age,
+                              rangeM=range_m if math.isfinite(range_m) else None,
+                              firstGraspAt=self.first_grasp_at, qualified=bool(qualified))
+                last, count = r['motionSamples'].get('body', (-1, 0))
+                if obs['stamp'] > last:
+                    count = count+1 if qualified and moved else 0
+                    r['motionSamples']['body'] = (obs['stamp'], count)
+                if count >= 2 and 'ownReleaseAt' in ref:
+                    self.warn(r, 'post_release_body_displacement', **dict(entity=t.id, distanceM=distance, stamp=obs['stamp']))
+                elif count >= 2:
+                    r.update(status='invalidated', hardMotion=True,
+                             reason='direct near fresh body displacement',
+                             displacementEvidence=dict(entity=t.id, distanceM=distance,
+                                thresholdM=BODY_DISPLACEMENT_M, ageS=age, rangeM=range_m, stamp=obs['stamp']))
 
     def overlay(self, entities, relations, tracks, stamp):
         self.update(tracks, stamp)

@@ -49,11 +49,13 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, ReasoningEffortId, type ContentBlock, type LlmCallConfig, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { defineTool, type PostToolDecision, type ToolDefinition, type ToolExecution, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import type { Candidate, EgoService, FailureReport, JsonObject, Reflection } from '@steward/dsh-ego'
+import { installContinuation } from './continuation.js'
 
 declare module '@deepseek-ai/dsh-llm' {
   interface MessageSourceMap {
     /** Reflection on a robot step attached by `@steward/dsh-ego-reflection`. */
     'ego-reflection': { kind: 'ego-reflection' }
+    'ego-continuation': { kind: 'ego-continuation' }
   }
 }
 
@@ -107,6 +109,8 @@ export interface Config {
   historyMaxChars: number
   /** Prediction receipts remembered to name the target of a failed `skill_run`. */
   receiptMemory: number
+  /** End after this many consecutive text-only replies; 0 disables continuation. */
+  maxConsecutiveTextReplies?: number
 }
 
 const effort = z.string().default('')
@@ -131,6 +135,7 @@ export const Config: z<Config> = z.object({
   historyLimit: z.natural().default(6),
   historyMaxChars: z.natural().min(40).default(160),
   receiptMemory: z.natural().min(1).default(64),
+  ...(process.env.STEWARD_ASSEMBLY_PROFILE === 'toy' ? { maxConsecutiveTextReplies: z.natural().max(5).default(3) } : {}),
 })
 
 /** A failed robot step as reflection reads it. */
@@ -312,10 +317,16 @@ export const SHALLOW_QUESTIONS = [
  * Questions for a program that failed to compile or threw a language error: fix the code, do not
  * re-examine the physical scene.
  */
-export const PROGRAM_QUESTIONS = [
-  '一、错误：程序哪里写错了（语法、变量重复声明、未定义的名字、类型不符）？',
-  '二、修正：怎样改写后重试；不要原样再提交同一段代码。',
-]
+export const PROGRAM_QUESTIONS = programQuestions(process.env.STEWARD_ASSEMBLY_PROFILE)
+
+function programQuestions(profile: string | undefined) {
+  return [
+    '一、错误：程序哪里写错了（语法、变量重复声明、未定义的名字、类型不符）？',
+    '二、修正：怎样改写后重试；不要原样再提交同一段代码。',
+    ...(profile === 'toy' ? ['若提示同名变量已声明：执行环境会保留顶层绑定；把本次临时声明放在 { ... } 块内，或使用新名字。'
+      + '不要用 var 重声明已有 const/let；也不要给 const 重新赋值。解释后继续调用 run_code 执行修正。'] : []),
+  ]
+}
 
 /**
  * Whether a failure message is a program language error rather than a robot-tool or physical
@@ -412,10 +423,12 @@ function evidenceLines(evidence: Reflection | { error: string }, candidateLimit:
  * @param context - the operator's messages, the earlier failures, the ordinal, the depth and its trigger.
  * @param evidence - the Ego Runtime's reflection evidence, or the reason it is unavailable.
  * @param config - limits.
+ * @param profile - connected runtime profile, or the environment for standalone rendering.
  * @returns the message text.
  */
 export function reflectionText(failure: Failure, context: ReflectionContext,
-  evidence: Reflection | { error: string }, config: Pick<Config, 'candidateLimit' | 'failureMaxChars'>): string {
+  evidence: Reflection | { error: string }, config: Pick<Config, 'candidateLimit' | 'failureMaxChars'>,
+  profile = process.env.STEWARD_ASSEMBLY_PROFILE): string {
   const what = clip(failure.message, config.failureMaxChars)
   const deep = context.depth === 'deep'
   const programBug = !deep && isProgramError(failure.message)
@@ -431,7 +444,7 @@ export function reflectionText(failure: Failure, context: ReflectionContext,
     if (context.ordinal > 1) lines.push(...RECURRING_QUESTIONS)
     lines.push(...DEEP_QUESTIONS)
   } else if (programBug) {
-    lines.push(`这是程序本身的错误，不是机器人动作失败。用一两句话回答后改程序重试：`, ...PROGRAM_QUESTIONS)
+    lines.push(`这是程序本身的错误，不是机器人动作失败。用一两句话回答后改程序重试：`, ...programQuestions(profile))
   } else {
     lines.push(`这是这条指令下的第 ${context.ordinal} 次反思。下一次行动之前，逐条回答，每条一句话：`, ...SHALLOW_QUESTIONS,
       '同一类失败再次出现时，会进入深度反思。')
@@ -523,7 +536,11 @@ export function reflectTool(ask: (difficulty: string, name: string | undefined, 
   })
 }
 
-export function apply(ctx: Context, config: Config) {
+export async function apply(ctx: Context, config: Config): Promise<void> {
+  const profile = await ctx.ego.assemblyProfile()
+  installContinuation(ctx, profile === 'toy' ? config.maxConsecutiveTextReplies ?? 3 : 0, text => createUserMessage({
+    content: [{ type: 'text', text }], source: { kind: 'ego-continuation' },
+  }))
   const ego: EgoService = ctx.ego
   const tools = new Set(config.tools)
   const programs = new Set(config.programTools)
@@ -568,7 +585,7 @@ export function apply(ctx: Context, config: Config) {
       instructions: [...state.instructions], history: [...state.history], ordinal: state.reflections + 1, depth,
       ...trigger === undefined ? {} : { trigger }, steps: state.steps,
       ...depth === 'deep' ? { scene: await scene(signal) } : {},
-    }, evidence, config)
+    }, evidence, config, profile)
     note(state, depth, countTowardDeep)
     state.history.push(`${failure.tool}：${clip(failure.message, config.historyMaxChars)}`)
     while (state.history.length > config.historyLimit) state.history.shift()

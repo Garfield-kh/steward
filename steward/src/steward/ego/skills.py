@@ -9,17 +9,31 @@ the current skill between control ticks and holds the current pose.
 
 from __future__ import annotations
 
+from steward.assembly_profile import enabled as _assembly_enabled
+
+
+if _assembly_enabled():
+    from steward.ego.phase_timing import timed
+    from steward.ego.decision_observation import action as observation_action, decision as observe_decision, scope as observation_scope
+
 import itertools
 import math
 import threading
 import time
+if _assembly_enabled():
+    from steward.ego import action_budget as ab
 from collections.abc import Callable
+if _assembly_enabled():
+    from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
 
 from steward.math3d import wrap_angle
+
+if _assembly_enabled():
+    from steward.ego.public import public_json
 
 if TYPE_CHECKING:
     from steward.ego.runtime import RobotLink
@@ -39,6 +53,8 @@ class OutOfReach(SkillFailed):
 
 @dataclass
 class MotionConfig:
+    if _assembly_enabled():
+        interface_precision_m: float = .0035  # close-view planar residual target
     linear_speed: float = 1.4
     angular_speed: float = 3.6
     look_angular_speed: float = 1.0
@@ -115,9 +131,10 @@ class MotionConfig:
     """Most robot time a place waits for its joints to come within ``release_joint_tol``; then it lets go anyway."""
     # insert_screw_into_hole: linger after open so the screw can drop into the hole, then rise
     # tip-down before any retract — a 0.15 s wait + snap retract knocks it over.
-    insert_release_wait_s: float = 0.75
-    insert_clear_dz: float = 0.05
-    """Metres to raise the gripper (still tip-down) after insert release before drawing back."""
+    if not _assembly_enabled():
+        insert_release_wait_s: float = 0.75
+        insert_clear_dz: float = 0.05
+        """Metres to raise the gripper (still tip-down) after insert release before drawing back."""
     handle_release_wait_s: float = 0.08
     look_dwell_s: float = 0.6
     inspect_closed_drawers: bool = False
@@ -169,10 +186,31 @@ class Job:
     postcondition: dict | None = None
 
     def to_dict(self) -> dict:
-        return {"id": self.id, "skill": self.skill, "receipt": self.receipt, "state": self.state,
-                "message": self.message, "started": self.started, "finished": self.finished, "log": self.log[-20:],
-                "timing": getattr(self.log, "events", [])[-20:],
-                **({"postcondition": self.postcondition} if self.postcondition is not None else {})}
+        if _assembly_enabled():
+            from steward.ego.preconditions import publish
+            from steward.ego.phase_timing import snapshot
+            publish(self)
+            message = self.message
+            precision = (self.postcondition or {}).get('precisionSummary')
+            if precision and precision not in message:
+                message += '\n' + precision
+            edge_trials = len(((self.postcondition or {}).get('edgePlacement') or {}).get('adjustments', []))
+            log_limit = 4 if self.skill == 'flip_assembly' and edge_trials > 1 else 8 if precision else 20
+            postcondition = self.postcondition
+            if self.skill == 'flip_assembly' and postcondition is not None:
+                postcondition = dict(postcondition)
+                if 'executed' in postcondition:
+                    postcondition['actuatorSequenceExecuted'] = postcondition.pop('executed')
+            return public_json({"id": self.id, "skill": self.skill, "receipt": self.receipt, "state": self.state,
+                    "message": message, "started": self.started, "finished": self.finished, "log": self.log[-log_limit:],
+                    "timing": getattr(self.log, "events", [])[-(4 if precision and hasattr(self, "phaseTiming") else log_limit):],
+                    **({"phaseTiming": snapshot(self)} if hasattr(self, "phaseTiming") else {}),
+                    **({"postcondition": postcondition} if postcondition is not None else {})})
+        else:
+            return {"id": self.id, "skill": self.skill, "receipt": self.receipt, "state": self.state,
+                    "message": self.message, "started": self.started, "finished": self.finished, "log": self.log[-20:],
+                    "timing": getattr(self.log, "events", [])[-20:],
+                    **({"postcondition": self.postcondition} if self.postcondition is not None else {})}
 
 
 class _Stall:
@@ -199,89 +237,170 @@ class _Stall:
 class SkillExecutor:
     """Runs at most one skill at a time in a worker thread."""
 
-    def __init__(self, command: Callable[[dict], None], state: Callable[[], dict], mark_held: Callable[[str], str],
-                 config: MotionConfig | None = None, shift: Callable[[str, list[float]], None] | None = None,
-                 on_error: Callable[[str], None] | None = None, on_finish: Callable[[Job], None] | None = None,
-                 on_begin: Callable[[str, dict], None] | None = None,
-                 on_release: Callable[..., None] | None = None,
-                 clock: RobotLink | None = None,
-                 closed_drawers: Callable[[], list[str]] | None = None,
-                 drawer_plan: Callable[..., tuple[dict | None, str]] | None = None,
-                 pin: Callable[[str, bool], None] | None = None,
-                 furniture: Callable[[str], str | None] | None = None,
-                 contents: Callable[[str], list[str]] | None = None,
-                 content_positions: Callable[[str], dict[str, list[float]]] | None = None,
-                 resettle: Callable[[str, list[float], dict[str, list[float]]], list[str]] | None = None,
-                 home_empty: Callable[[Callable[[], dict]], bool] | None = None,
-                 deploy_working: Callable[[Callable[[], dict]], None] | None = None,
-                 placement_evidence: Callable[[str], dict] | None = None,
-                 on_release_target: Callable[[str, list[float], dict], None] | None = None,
-                 assemble_onto: Callable[[Job, dict], None] | None = None,
-                 validate_placement: Callable[[dict], None] | None = None,
-                 fasten: Callable[[Job, dict], None] | None = None,
-                 verify_screw_seat: Callable[[str], tuple[bool, str]] | None = None,
-                 replan_pick: Callable[[str], dict | None] | None = None,
-                 replan_insert_place: Callable[[dict], dict | None] | None = None):
-        """``clock`` is the robot link whose world clock times the control ticks (one hold per job,
-        ``skill/<job id>``); without it a tick sleeps ``tick_s`` of wall time.
+    if _assembly_enabled():
+        def __init__(self, command: Callable[[dict], None], state: Callable[[], dict], mark_held: Callable[[str], str],
+                     config: MotionConfig | None = None, shift: Callable[[str, list[float]], None] | None = None,
+                     on_error: Callable[[str], None] | None = None, on_finish: Callable[[Job], None] | None = None,
+                     on_begin: Callable[[str, dict], None] | None = None,
+                     on_release: Callable[[str, list[float]], None] | None = None,
+                     clock: RobotLink | None = None,
+                     closed_drawers: Callable[[], list[str]] | None = None,
+                     drawer_plan: Callable[..., tuple[dict | None, str]] | None = None,
+                     pin: Callable[[str, bool], None] | None = None,
+                     furniture: Callable[[str], str | None] | None = None,
+                     contents: Callable[[str], list[str]] | None = None,
+                     content_positions: Callable[[str], dict[str, list[float]]] | None = None,
+                     resettle: Callable[[str, list[float], dict[str, list[float]]], list[str]] | None = None,
+                     home_empty: Callable[[Callable[[], dict]], bool] | None = None,
+                     deploy_working: Callable[[Callable[[], dict]], None] | None = None,
+                     placement_evidence: Callable[[str], dict] | None = None,
+                     on_release_target: Callable[[str, list[float], dict], None] | None = None,
+                     assemble_onto: Callable[[Job, dict], None] | None = None,
+                     validate_placement: Callable[[dict], None] | None = None,
+                     prepare_place_surface: Callable[[Job, dict], dict] | None = None,
+                     fasten: Callable[[Job, dict], None] | None = None):
+            """``clock`` is the robot link whose world clock times the control ticks (one hold per job,
+            ``skill/<job id>``); without it a tick sleeps ``tick_s`` of wall time.
 
-        ``closed_drawers`` lists drawers to open after a look-around, and ``drawer_plan`` returns
-        the open or close plan for one of them, with the reason when there is no plan. A close may
-        be asked with the metres just opened, so the drawer is pushed back the same distance.
-        ``furniture`` is the piece that holds a drawer; it is held still for the visit so the
-        open drawer is not fused into it.
+            ``closed_drawers`` lists drawers to open after a look-around, and ``drawer_plan`` returns
+            the open or close plan for one of them, with the reason when there is no plan. A close may
+            be asked with the metres just opened, so the drawer is pushed back the same distance.
+            ``furniture`` is the piece that holds a drawer; it is held still for the visit so the
+            open drawer is not fused into it.
 
-        ``home_empty``, when provided, returns empty arms home after successful work using the job's
-        cancellable tick. Homing failure fails the job without attempting Cartesian recovery; None
-        leaves arms as-is.
+            ``home_empty``, when provided, returns empty arms home after successful work using the job's
+            cancellable tick. Homing failure fails the job without attempting Cartesian recovery; None
+            leaves arms as-is.
 
-        ``deploy_working``, when provided, joint-space unfolds a resting arm through HOME before the
-        first planar dock (PARK/zero has no safe one-shot IK swing).
+            ``deploy_working``, when provided, joint-space unfolds a resting arm through HOME before the
+            first planar dock (PARK/zero has no safe one-shot IK swing)."""
+            self._on_error = on_error
+            self._clock = clock
+            self._now = 0.0
+            self._hold = ""
+            self._on_finish = timed("on_finish")(on_finish) if on_finish else None
+            self._on_begin = on_begin
+            self._on_release = on_release
+            self._home_empty = timed("home_empty")(home_empty) if home_empty else None
+            self._placement_evidence = placement_evidence
+            self._on_release_target = on_release_target
+            self._assemble_onto = assemble_onto
+            self._fasten = fasten
+            self._validate_placement = validate_placement
+            self._prepare_place_surface = prepare_place_surface
+            self._deploy_working = timed("deploy_working")(deploy_working) if deploy_working else None
+            from steward.ego.phase_timing import state_reader, command_writer
+            self._command = command_writer(command)
+            from steward.ego.action_budget import reader
+            self._state = reader(self, state_reader(state))
+            from steward.ego import base_command_ledger
+            if base_command_ledger.enabled():
+                base_command_ledger.install(self)
+            self._mark_held = mark_held
+            self._shift = shift
+            self._closed_drawers = closed_drawers
+            self._drawer_plan = drawer_plan
+            self._pin = pin
+            self._furniture = furniture
+            self._contents = contents
+            self._content_positions = content_positions
+            self._resettle = resettle
+            self.config = config or MotionConfig()
+            self._ids = itertools.count(1)
+            self._gentle = False  # the running plan moves a container with its contents
+            self._setpoints: dict[str, float] = {}  # the last target each joint was moved to
+            self._look = False  # the running skill is a look-around
+            self._keyframed = False  # that look-around turns at look_angular_speed only while perception keeps keyframes
+            self._arm_engaged = False  # Cartesian recovery is allowed only after this job docks successfully
+            self._lock = threading.Lock()
+            self._stop = threading.Event()
+            self.jobs: dict[str, Job] = {}
+            self.current: Job | None = None
+            self._pulls: dict[str, dict] = {}  # drawer id -> the pull that left it open (:meth:`pull_of`)
+    else:
+        def __init__(self, command: Callable[[dict], None], state: Callable[[], dict], mark_held: Callable[[str], str],
+                     config: MotionConfig | None = None, shift: Callable[[str, list[float]], None] | None = None,
+                     on_error: Callable[[str], None] | None = None, on_finish: Callable[[Job], None] | None = None,
+                     on_begin: Callable[[str, dict], None] | None = None,
+                     on_release: Callable[..., None] | None = None,
+                     clock: RobotLink | None = None,
+                     closed_drawers: Callable[[], list[str]] | None = None,
+                     drawer_plan: Callable[..., tuple[dict | None, str]] | None = None,
+                     pin: Callable[[str, bool], None] | None = None,
+                     furniture: Callable[[str], str | None] | None = None,
+                     contents: Callable[[str], list[str]] | None = None,
+                     content_positions: Callable[[str], dict[str, list[float]]] | None = None,
+                     resettle: Callable[[str, list[float], dict[str, list[float]]], list[str]] | None = None,
+                     home_empty: Callable[[Callable[[], dict]], bool] | None = None,
+                     deploy_working: Callable[[Callable[[], dict]], None] | None = None,
+                     placement_evidence: Callable[[str], dict] | None = None,
+                     on_release_target: Callable[[str, list[float], dict], None] | None = None,
+                     assemble_onto: Callable[[Job, dict], None] | None = None,
+                     validate_placement: Callable[[dict], None] | None = None,
+                     fasten: Callable[[Job, dict], None] | None = None,
+                     verify_screw_seat: Callable[[str], tuple[bool, str]] | None = None,
+                     replan_pick: Callable[[str], dict | None] | None = None,
+                     replan_insert_place: Callable[[dict], dict | None] | None = None):
+            """``clock`` is the robot link whose world clock times the control ticks (one hold per job,
+            ``skill/<job id>``); without it a tick sleeps ``tick_s`` of wall time.
 
-        ``verify_screw_seat`` / ``replan_pick`` / ``replan_insert_place`` back
-        ``insert_screw_into_hole``: after each place, confirm the screw stands tip-down in a hole;
-        on miss, re-pick and re-plan the place.
-        """
-        self._on_error = on_error
-        self._clock = clock
-        self._now = 0.0
-        self._hold = ""
-        self._on_finish = on_finish
-        self._on_begin = on_begin
-        self._on_release = on_release
-        self._home_empty = home_empty
-        self._placement_evidence = placement_evidence
-        self._on_release_target = on_release_target
-        self._assemble_onto = assemble_onto
-        self._fasten = fasten
-        self._validate_placement = validate_placement
-        self._deploy_working = deploy_working
-        self._verify_screw_seat = verify_screw_seat
-        self._replan_pick = replan_pick
-        self._replan_insert_place = replan_insert_place
-        self._command = command
-        self._state = state
-        self._mark_held = mark_held
-        self._shift = shift
-        self._closed_drawers = closed_drawers
-        self._drawer_plan = drawer_plan
-        self._pin = pin
-        self._furniture = furniture
-        self._contents = contents
-        self._content_positions = content_positions
-        self._resettle = resettle
-        self.config = config or MotionConfig()
-        self._ids = itertools.count(1)
-        self._gentle = False  # the running plan moves a container with its contents
-        self._setpoints: dict[str, float] = {}  # the last target each joint was moved to
-        self._look = False  # the running skill is a look-around
-        self._keyframed = False  # that look-around turns at look_angular_speed only while perception keeps keyframes
-        self._arm_engaged = False  # Cartesian recovery is allowed only after this job docks successfully
-        self._lock = threading.Lock()
-        self._stop = threading.Event()
-        self.jobs: dict[str, Job] = {}
-        self.current: Job | None = None
-        self._pulls: dict[str, dict] = {}  # drawer id -> the pull that left it open (:meth:`pull_of`)
+            ``closed_drawers`` lists drawers to open after a look-around, and ``drawer_plan`` returns
+            the open or close plan for one of them, with the reason when there is no plan. A close may
+            be asked with the metres just opened, so the drawer is pushed back the same distance.
+            ``furniture`` is the piece that holds a drawer; it is held still for the visit so the
+            open drawer is not fused into it.
+
+            ``home_empty``, when provided, returns empty arms home after successful work using the job's
+            cancellable tick. Homing failure fails the job without attempting Cartesian recovery; None
+            leaves arms as-is.
+
+            ``deploy_working``, when provided, joint-space unfolds a resting arm through HOME before the
+            first planar dock (PARK/zero has no safe one-shot IK swing).
+
+            ``verify_screw_seat`` / ``replan_pick`` / ``replan_insert_place`` back
+            ``insert_screw_into_hole``: after each place, confirm the screw stands tip-down in a hole;
+            on miss, re-pick and re-plan the place.
+            """
+            self._on_error = on_error
+            self._clock = clock
+            self._now = 0.0
+            self._hold = ""
+            self._on_finish = on_finish
+            self._on_begin = on_begin
+            self._on_release = on_release
+            self._home_empty = home_empty
+            self._placement_evidence = placement_evidence
+            self._on_release_target = on_release_target
+            self._assemble_onto = assemble_onto
+            self._fasten = fasten
+            self._validate_placement = validate_placement
+            self._deploy_working = deploy_working
+            self._verify_screw_seat = verify_screw_seat
+            self._replan_pick = replan_pick
+            self._replan_insert_place = replan_insert_place
+            self._command = command
+            self._state = state
+            self._mark_held = mark_held
+            self._shift = shift
+            self._closed_drawers = closed_drawers
+            self._drawer_plan = drawer_plan
+            self._pin = pin
+            self._furniture = furniture
+            self._contents = contents
+            self._content_positions = content_positions
+            self._resettle = resettle
+            self.config = config or MotionConfig()
+            self._ids = itertools.count(1)
+            self._gentle = False  # the running plan moves a container with its contents
+            self._setpoints: dict[str, float] = {}  # the last target each joint was moved to
+            self._look = False  # the running skill is a look-around
+            self._keyframed = False  # that look-around turns at look_angular_speed only while perception keeps keyframes
+            self._arm_engaged = False  # Cartesian recovery is allowed only after this job docks successfully
+            self._lock = threading.Lock()
+            self._stop = threading.Event()
+            self.jobs: dict[str, Job] = {}
+            self.current: Job | None = None
+            self._pulls: dict[str, dict] = {}  # drawer id -> the pull that left it open (:meth:`pull_of`)
 
     # ------------------------------------------------------------------ public
     def pull_of(self, drawer_id: str) -> dict:
@@ -296,21 +415,45 @@ class SkillExecutor:
                                         "distance": pull["distance"]}
 
     def start(self, skill: str, receipt: dict) -> Job:
-        with self._lock:
-            if self.current is not None and self.current.state == "running":
-                raise RuntimeError(f"skill {self.current.skill} ({self.current.id}) is still running")
-            job = Job(id=f"job-{next(self._ids)}", skill=skill, receipt=receipt["id"], started=self._state()["stamp"])
-            self.jobs[job.id] = job
-            self.current = job
-            self._stop.clear()
-        if self._clock is not None:
-            self._clock.arm(f"skill/{job.id}")
+        if _assembly_enabled():
+            from steward.ego.look_timeout import ENABLED
+            bounded_look = skill == 'look_around' and ENABLED
+            if bounded_look:
+                timeout = float(receipt.get('plan', {}).get('timeoutS', 120.))
+                if not math.isfinite(timeout) or timeout <= 0:
+                    raise ValueError('look_around timeoutS must be finite and positive')
+            with self._lock:
+                if self.current is not None and self.current.state == "running":
+                    raise RuntimeError(f"skill {self.current.skill} ({self.current.id}) is still running")
+                initial = self._state()
+                job = Job(id=f"job-{next(self._ids)}", skill=skill, receipt=receipt["id"], started=initial["stamp"])
+                if bounded_look:
+                    receipt = {**receipt, 'plan':dict(receipt.get('plan', {}), timeoutS=timeout,
+                        _lookDeadline=time.monotonic()+timeout, _lookInitialState=initial)}
+                self.jobs[job.id] = job
+                self.current = job
+                self._stop.clear()
+            if self._clock is not None and not bounded_look:
+                self._clock.arm(f"skill/{job.id}")
+        else:
+            with self._lock:
+                if self.current is not None and self.current.state == "running":
+                    raise RuntimeError(f"skill {self.current.skill} ({self.current.id}) is still running")
+                job = Job(id=f"job-{next(self._ids)}", skill=skill, receipt=receipt["id"], started=self._state()["stamp"])
+                self.jobs[job.id] = job
+                self.current = job
+                self._stop.clear()
+            if self._clock is not None:
+                self._clock.arm(f"skill/{job.id}")
         threading.Thread(target=self._run, args=(job, skill, receipt), name=f"skill-{job.id}", daemon=True).start()
         return job
 
     def cancel(self) -> None:
         """Interrupt the current skill without commanding the body (used when the world restarts)."""
         self._stop.set()
+        if _assembly_enabled():
+            from steward.ego.base_command_ledger import invalidate
+            invalidate(self, 'executor_cancel_or_reset')
 
     def stop(self) -> dict:
         self._stop.set()
@@ -331,111 +474,229 @@ class SkillExecutor:
         return job
 
     # ---------------------------------------------------------------- runner
-    def _begin(self, job: Job, skill: str, receipt: dict) -> None:
-        """Run the caller's preparation inside the job thread, so ``start`` returns at once.
+    if _assembly_enabled():
+        @timed("preparation")
+        def _begin(self, job: Job, skill: str, receipt: dict) -> None:
+            """Run the caller's preparation inside the job thread, so ``start`` returns at once.
 
-        Preparation may take tens of seconds (a fresh segmentation of the scene). The caller that
-        waits on the job has a budget for that; the caller that issues the run only has its
-        transport timeout, and must not be made to hold it."""
-        self._primitive_deadline = time.monotonic() + 3600
-        if self._on_begin is None:
-            return
-        try:
-            self._on_begin(skill, receipt)
-        except SkillFailed:
-            raise  # the skill itself reports it; a preparation that found the plan stale is not an alert
-        except Exception as exc:  # noqa: BLE001 - an unexpected preparation error is an alert, and fails the skill
-            if self._on_error is not None:
-                self._on_error(f"技能 {skill}（{job.id}）准备阶段出错：{type(exc).__name__}: {exc}")
-            raise
+            Preparation may take tens of seconds (a fresh segmentation of the scene). The caller that
+            waits on the job has a budget for that; the caller that issues the run only has its
+            transport timeout, and must not be made to hold it."""
+            observe_decision(self, 'action_start', skill)
+            self._primitive_deadline = ab.watchdog(self, 3600)
+            if receipt.get('preconditions'):
+                from steward.ego.preconditions import record_job
+                record_job(job, receipt['preconditions'], receipt['id']+':admission')
+            if self._on_begin is None:
+                return
+            try:
+                self._on_begin(skill, receipt)
+            except SkillFailed:
+                raise  # the skill itself reports it; a preparation that found the plan stale is not an alert
+            except Exception as exc:  # noqa: BLE001 - an unexpected preparation error is an alert, and fails the skill
+                if self._on_error is not None:
+                    self._on_error(f"技能 {skill}（{job.id}）准备阶段出错：{type(exc).__name__}: {exc}")
+                raise
+    else:
+        def _begin(self, job: Job, skill: str, receipt: dict) -> None:
+            """Run the caller's preparation inside the job thread, so ``start`` returns at once.
+
+            Preparation may take tens of seconds (a fresh segmentation of the scene). The caller that
+            waits on the job has a budget for that; the caller that issues the run only has its
+            transport timeout, and must not be made to hold it."""
+            self._primitive_deadline = time.monotonic() + 3600
+            if self._on_begin is None:
+                return
+            try:
+                self._on_begin(skill, receipt)
+            except SkillFailed:
+                raise  # the skill itself reports it; a preparation that found the plan stale is not an alert
+            except Exception as exc:  # noqa: BLE001 - an unexpected preparation error is an alert, and fails the skill
+                if self._on_error is not None:
+                    self._on_error(f"技能 {skill}（{job.id}）准备阶段出错：{type(exc).__name__}: {exc}")
+                raise
 
     def _run(self, job: Job, skill: str, receipt: dict) -> None:
-        homing = False
-        self._stamp_watchdog = (None, time.monotonic())
-        self._job_deadline = time.monotonic() + 14400
-        self._primitive_deadline = time.monotonic() + 3600
-        self._arm_engaged = False
-        try:
-            if self._clock is not None:
-                self._hold = f"skill/{job.id}"
-                self._now = self._clock.wait_until(None, self._hold)
-            plan = receipt.get("plan", {})
-            self._begin(job, skill, receipt)
-            if self._stop.is_set():
-                raise SkillStopped()
-            self._gentle = bool(plan.get("gentle"))
-            if skill == "look_around":
-                self._look = True
-                try:
-                    self._look_around(job)
-                finally:
-                    self._look = False
-            elif skill in ('seat_screw', 'fasten_onto', 'flip_assembly', 'regrasp_upright') and self._fasten is not None:
-                self._fasten(job, plan)
-            elif skill == "assemble_onto" and self._assemble_onto is not None:
-                self._assemble_onto(job, plan)
-            elif skill == "navigate":
-                self._drive(job, plan["path"], plan["yaw"])
-            elif skill == "pick":
-                self._pick(job, plan)
-            elif skill == "place" and "floor" in plan:
-                self._place_floor(job, plan)
-            elif skill == "place":
-                self._place(job, plan)
-            elif skill == "open":
-                self._open(job, plan)
-            elif skill == "close":
-                self._close(job, plan)
-            elif skill == "pour":
-                self._pour(job, plan)
-            elif skill == "drive_screw":
-                # Kitchen tip-down plans carry pressLift/spot; assembly fastening uses body/screw.
-                if self._fasten is not None and "pressLift" not in plan and "spot" not in plan:
-                    self._fasten(job, plan)
-                else:
-                    self._drive_screw(job, plan)
-            elif skill == "insert_screw_into_hole":
-                self._insert_screw_into_hole(job, plan)
-            else:
-                raise SkillFailed(f"unknown skill {skill}")
-            if self._home_empty is not None:
-                homing = True
-                if self._home_empty(self._tick):
-                    self._setpoints.clear()
-                    job.log.append("both empty arms returned to zero")
-            job.state, job.message = "succeeded", job.message or f"{skill} completed"
-        except SkillStopped:
-            job.state, job.message = "stopped", "stopped on request"
-        except SkillFailed as exc:
-            job.state, job.message = "failed", (f"{job.message or skill + ' completed'}; homing failed: {exc}"
-                                                if homing else str(exc))
-            if not homing and self._arm_engaged:
-                self._safe_retract()
-        except Exception as exc:  # noqa: BLE001 - surfaced to the caller through the job record
-            detail = f"{type(exc).__name__}: {exc}"
-            job.state, job.message = "failed", (f"{job.message or skill + ' completed'}; homing failed: {detail}"
-                                                if homing else detail)
-            if self._on_error is not None:
-                self._on_error(f"技能 {skill}（{job.id}）出现未预料的异常：{type(exc).__name__}: {exc}")
-            if not homing and self._arm_engaged:
-                self._safe_retract()
-        finally:
-            job.finished = self._state()["stamp"]
-            if self._clock is not None:
-                self._release_clock(f"skill/{job.id}")
-            if self._on_finish is not None:
-                self._on_finish(job)
-
-    def _released(self, object_id: str, spot: list[float], target: dict | None = None,
-                  tip_roll: float | None = None) -> None:
-        if target is not None and self._on_release_target is not None:
-            self._on_release_target(object_id, list(spot), target)
-        elif self._on_release is not None:
+        if _assembly_enabled():
+            self._observation_thread = threading.get_ident()
+            wall_started = time.time()
             try:
-                self._on_release(object_id, list(spot), tip_roll=tip_roll)
-            except TypeError:
-                # Older callbacks take only (id, spot).
+                from steward.ego.phase_timing import job_timing
+                with job_timing(job):
+                    return self._run_job(job, skill, receipt)
+            finally:
+                from steward.ego.receipt_log import append
+                append(job, receipt, wall_started)
+                self._observation_thread = None
+        else:
+            homing = False
+            self._stamp_watchdog = (None, time.monotonic())
+            self._job_deadline = time.monotonic() + 14400
+            self._primitive_deadline = time.monotonic() + 3600
+            self._arm_engaged = False
+            try:
+                if self._clock is not None:
+                    self._hold = f"skill/{job.id}"
+                    self._now = self._clock.wait_until(None, self._hold)
+                plan = receipt.get("plan", {})
+                self._begin(job, skill, receipt)
+                if self._stop.is_set():
+                    raise SkillStopped()
+                self._gentle = bool(plan.get("gentle"))
+                if skill == "look_around":
+                    self._look = True
+                    try:
+                        self._look_around(job)
+                    finally:
+                        self._look = False
+                elif skill in ('seat_screw', 'fasten_onto', 'flip_assembly', 'regrasp_upright') and self._fasten is not None:
+                    self._fasten(job, plan)
+                elif skill == "assemble_onto" and self._assemble_onto is not None:
+                    self._assemble_onto(job, plan)
+                elif skill == "navigate":
+                    self._drive(job, plan["path"], plan["yaw"])
+                elif skill == "pick":
+                    self._pick(job, plan)
+                elif skill == "place" and "floor" in plan:
+                    self._place_floor(job, plan)
+                elif skill == "place":
+                    self._place(job, plan)
+                elif skill == "open":
+                    self._open(job, plan)
+                elif skill == "close":
+                    self._close(job, plan)
+                elif skill == "pour":
+                    self._pour(job, plan)
+                elif skill == "drive_screw":
+                    # Kitchen tip-down plans carry pressLift/spot; assembly fastening uses body/screw.
+                    if self._fasten is not None and "pressLift" not in plan and "spot" not in plan:
+                        self._fasten(job, plan)
+                    else:
+                        self._drive_screw(job, plan)
+                elif skill == "insert_screw_into_hole":
+                    self._insert_screw_into_hole(job, plan)
+                else:
+                    raise SkillFailed(f"unknown skill {skill}")
+                if self._home_empty is not None:
+                    homing = True
+                    if self._home_empty(self._tick):
+                        self._setpoints.clear()
+                        job.log.append("both empty arms returned to zero")
+                job.state, job.message = "succeeded", job.message or f"{skill} completed"
+            except SkillStopped:
+                job.state, job.message = "stopped", "stopped on request"
+            except SkillFailed as exc:
+                job.state, job.message = "failed", (f"{job.message or skill + ' completed'}; homing failed: {exc}"
+                                                    if homing else str(exc))
+                if not homing and self._arm_engaged:
+                    self._safe_retract()
+            except Exception as exc:  # noqa: BLE001 - surfaced to the caller through the job record
+                detail = f"{type(exc).__name__}: {exc}"
+                job.state, job.message = "failed", (f"{job.message or skill + ' completed'}; homing failed: {detail}"
+                                                    if homing else detail)
+                if self._on_error is not None:
+                    self._on_error(f"技能 {skill}（{job.id}）出现未预料的异常：{type(exc).__name__}: {exc}")
+                if not homing and self._arm_engaged:
+                    self._safe_retract()
+            finally:
+                job.finished = self._state()["stamp"]
+                if self._clock is not None:
+                    self._release_clock(f"skill/{job.id}")
+                if self._on_finish is not None:
+                    self._on_finish(job)
+
+    if _assembly_enabled():
+        def _run_job(self, job: Job, skill: str, receipt: dict) -> None:
+            if skill == 'look_around' and '_lookDeadline' in receipt.get('plan', {}):
+                from steward.ego.look_timeout import run
+                return run(self, job, receipt)
+            homing = False
+            self._stamp_watchdog = (None, time.monotonic())
+            self._job_deadline = ab.watchdog(self, 14400)
+            self._primitive_deadline = ab.watchdog(self, 3600)
+            self._arm_engaged = False
+            try:
+                if self._clock is not None:
+                    self._hold = f"skill/{job.id}"
+                    self._now = self._clock.wait_until(None, self._hold)
+                plan = receipt.get("plan", {})
+                self._begin(job, skill, receipt)
+                if self._stop.is_set():
+                    raise SkillStopped()
+                self._gentle = bool(plan.get("gentle"))
+                if skill == "look_around":
+                    self._look = True
+                    try:
+                        self._look_around(job)
+                    finally:
+                        self._look = False
+                elif skill in ('complete_assembly', 'seat_screw', 'drive_screw', 'fasten_onto', 'flip_assembly', 'regrasp_upright') and self._fasten is not None:
+                    self._fasten(job, plan)
+                elif skill == "assemble_onto" and self._assemble_onto is not None:
+                    self._assemble_onto(job, plan)
+                elif skill == "navigate":
+                    self._drive(job, plan["path"], plan["yaw"])
+                elif skill == "pick":
+                    self._pick(job, plan)
+                elif skill == "place" and "floor" in plan:
+                    self._place_floor(job, plan)
+                elif skill == "place":
+                    self._place(job, plan)
+                elif skill == "open":
+                    self._open(job, plan)
+                elif skill == "close":
+                    self._close(job, plan)
+                elif skill == "pour":
+                    self._pour(job, plan)
+                else:
+                    raise SkillFailed(f"unknown skill {skill}")
+                if self._home_empty is not None and skill != 'complete_assembly':
+                    homing = True
+                    with observation_scope(self, skill, transport=True):
+                        if self._home_empty(self._tick):
+                            self._setpoints.clear()
+                            job.log.append("both empty arms returned to zero")
+                job.state, job.message = "succeeded", job.message or f"{skill} completed"
+            except SkillStopped:
+                job.state, job.message = "stopped", "stopped on request"
+            except SkillFailed as exc:
+                job.state, job.message = "failed", (f"{job.message or skill + ' completed'}; homing failed: {exc}"
+                                                    if homing else str(exc))
+                if not homing and self._arm_engaged:
+                    self._safe_retract()
+            except Exception as exc:  # noqa: BLE001 - surfaced to the caller through the job record
+                detail = f"{type(exc).__name__}: {exc}"
+                job.state, job.message = "failed", (f"{job.message or skill + ' completed'}; homing failed: {detail}"
+                                                    if homing else detail)
+                if self._on_error is not None:
+                    self._on_error(f"技能 {skill}（{job.id}）出现未预料的异常：{type(exc).__name__}: {exc}")
+                if not homing and self._arm_engaged:
+                    self._safe_retract()
+            finally:
+                observe_decision(self, 'action_end', skill)
+                job.finished = self._state()["stamp"]
+                if self._clock is not None:
+                    self._release_clock(f"skill/{job.id}")
+                if self._on_finish is not None:
+                    self._on_finish(job)
+
+    if _assembly_enabled():
+        def _released(self, object_id: str, spot: list[float], target: dict | None = None) -> None:
+            if target is not None and self._on_release_target is not None:
+                self._on_release_target(object_id, list(spot), target)
+            elif self._on_release is not None:
                 self._on_release(object_id, list(spot))
+    else:
+        def _released(self, object_id: str, spot: list[float], target: dict | None = None,
+                      tip_roll: float | None = None) -> None:
+            if target is not None and self._on_release_target is not None:
+                self._on_release_target(object_id, list(spot), target)
+            elif self._on_release is not None:
+                try:
+                    self._on_release(object_id, list(spot), tip_roll=tip_roll)
+                except TypeError:
+                    # Older callbacks take only (id, spot).
+                    self._on_release(object_id, list(spot))
 
     def _report_placement(self, job: Job, object_id: str) -> None:
         if self._placement_evidence is None:
@@ -446,6 +707,13 @@ class SkillExecutor:
             evidence = {"ok": None, "status": "unknown", "entity": object_id,
                         "reason": "post-release evidence unavailable; observe before continuing"}
         job.postcondition = evidence
+        if _assembly_enabled():
+            binding = getattr(self, '_load_binding_receipt', lambda eid: None)(object_id)
+            if binding:
+                from steward.ego.grasp_binding import public
+                job.postcondition.update(public(binding),
+                    newReleaseExecuted=bool(binding.get('newReleaseExecuted')),
+                    specifiedTargetReleased=bool(binding.get('newReleaseExecuted') and binding['transportCommitted']))
         job.log.append(f"[RSI_PLACE_EVIDENCE] {object_id} {evidence['status']} "
                        f"deltaXYM={evidence.get('deltaXYM')}; ok=null")
         if "orientation" in evidence:
@@ -473,100 +741,233 @@ class SkillExecutor:
             except Exception:  # noqa: BLE001 - best effort after a failure that is already reported
                 continue
 
-    def _tick(self) -> dict:
-        if self._stop.is_set():
-            raise SkillStopped()
-        if self._clock is None:
-            time.sleep(self.config.tick_s)
-        else:
-            self._now = self._clock.wait_until(self._now + self.config.tick_s, self._hold)
-        state = self._state()
-        stamp = state['stamp']
-        now = time.monotonic()
-        last, progressed = getattr(self, '_stamp_watchdog', (None, now))
-        if stamp != last:
-            progressed = now
-        self._stamp_watchdog = (stamp, progressed)
-        if now-progressed >= 900:
-            raise SkillFailed('robot sensor timestamp stalled for 900 s')
-        if now > min(getattr(self, '_primitive_deadline', math.inf), getattr(self, '_job_deadline', math.inf)):
-            raise SkillFailed('motion wall timeout; continue after checked recovery')
-        return state
+    if _assembly_enabled():
+        @timed("control_tick")
+        def _tick(self) -> dict:
+            from steward.ego.assembly_session import check_budget
+            check_budget()
+            ratio_stamp = ab.clock(self).stamp
+            ratio_wall = time.monotonic()
+            if self._stop.is_set():
+                raise SkillStopped()
+            from steward.ego.look_timeout import remaining, active, capture
+            remaining(math.inf)
+            if self._clock is None:
+                time.sleep(remaining(self.config.tick_s))
+            else:
+                self._now = self._clock.wait_until(self._now + self.config.tick_s, self._hold)
+            remaining(math.inf)
+            state = self._state()
+            check_budget()
+            ab.clock(self).measure(state['stamp']-ratio_stamp, time.monotonic()-ratio_wall)
+            if active():
+                capture(self, state)
+            remaining(math.inf)
+            stamp = state['stamp']
+            now = time.monotonic()
+            last, progressed = getattr(self, '_stamp_watchdog', (None, now))
+            if stamp != last:
+                progressed = now
+            self._stamp_watchdog = (stamp, progressed)
+            if now-progressed >= 900:
+                raise SkillFailed('robot sensor timestamp stalled for 900 s')
+            if ab.expired(ab.limited(getattr(self, '_primitive_deadline', math.inf), getattr(self, '_job_deadline', math.inf))):
+                raise SkillFailed('motion wall timeout; continue after checked recovery')
+            return state
+    else:
+        def _tick(self) -> dict:
+            if self._stop.is_set():
+                raise SkillStopped()
+            if self._clock is None:
+                time.sleep(self.config.tick_s)
+            else:
+                self._now = self._clock.wait_until(self._now + self.config.tick_s, self._hold)
+            state = self._state()
+            stamp = state['stamp']
+            now = time.monotonic()
+            last, progressed = getattr(self, '_stamp_watchdog', (None, now))
+            if stamp != last:
+                progressed = now
+            self._stamp_watchdog = (stamp, progressed)
+            if now-progressed >= 900:
+                raise SkillFailed('robot sensor timestamp stalled for 900 s')
+            if now > min(getattr(self, '_primitive_deadline', math.inf), getattr(self, '_job_deadline', math.inf)):
+                raise SkillFailed('motion wall timeout; continue after checked recovery')
+            return state
 
     # ------------------------------------------------------------- primitives
-    def _turn_to(self, yaw_target: float) -> None:
-        st = self._state()
-        o = st["odometry"]
-        x, y, yaw0 = o["x"], o["y"], o["yaw"]
-        delta = wrap_angle(yaw_target - yaw0)
-        if self._look and self._keyframed:
-            # A closed look turns half as fast. The cup is only a few pixels wide, and a
-            # tenth of a radian steps over the heading that separates it from the counter.
-            speed = self.config.look_angular_speed if self.config.inspect_closed_drawers else self.config.look_angular_speed * 0.5
-        elif self._gentle:
-            speed = self.config.gentle_turn_speed
-        else:
-            speed = self.config.angular_speed
-        duration = abs(delta) / speed
-        t0 = st["stamp"]
-        deadline = t0 + duration * 3 + 5.0
-        stall = _Stall(t0, self.config.stall_s, 0.02)
-        self._primitive_deadline = time.monotonic() + 3600
-        while True:
-            st = self._tick()
-            frac = self._profile(1.0 if duration == 0 else min(1.0, (st["stamp"] - t0) / duration))
-            self._command({"base": [x, y, yaw0 + delta * frac]})
-            err = abs(wrap_angle(yaw_target - st["odometry"]["yaw"]))
-            if frac >= 1.0 and err < self.config.yaw_tol:
-                return
-            if stall.stuck(st["stamp"], err):
-                raise SkillFailed(f"turn is blocked: no progress for {self.config.stall_s:.0f} s (yaw error {err:.2f} rad)")
-            if st["stamp"] > deadline:
-                raise SkillFailed(f"turn did not converge (yaw error {err:.2f} rad)")
-
-    def _translate_to(self, x1: float, y1: float, yaw: float, speed: float | None = None,
-                      tol: float | None = None) -> None:
-        tol = self.config.position_tol if tol is None else tol
-        st = self._state()
-        x0, y0 = st["odometry"]["x"], st["odometry"]["y"]
-        # The base yaw joint is continuous: express the heading in the same unwrapped frame as the
-        # odometry, otherwise the position controller spins the base by a full turn.
-        current = st["odometry"]["yaw"]
-        yaw = current + wrap_angle(yaw - current)
-        length = math.hypot(x1 - x0, y1 - y0)
-        duration = length / (speed or (self.config.gentle_speed if self._gentle else self.config.linear_speed))
-        t0 = st["stamp"]
-        deadline = t0 + duration * 3 + 5.0
-        stall = _Stall(t0, self.config.stall_s, 0.01)
-        self._primitive_deadline = time.monotonic() + 3600
-        while True:
-            st = self._tick()
-            frac = self._profile(1.0 if duration == 0 else min(1.0, (st["stamp"] - t0) / duration))
-            self._command({"base": [x0 + (x1 - x0) * frac, y0 + (y1 - y0) * frac, yaw]})
-            err = math.hypot(x1 - st["odometry"]["x"], y1 - st["odometry"]["y"])
-            if frac >= 1.0 and err < tol:
-                return
-            if stall.stuck(st["stamp"], err):
-                raise SkillFailed(f"base is blocked: no progress for {self.config.stall_s:.0f} s ({err:.2f} m from the waypoint)")
-            if st["stamp"] > deadline:
-                raise SkillFailed(f"base did not reach the waypoint (error {err:.2f} m)")
-
-    def _drive(self, job: Job, path: list, final_yaw: float) -> None:
-        for waypoint in path[1:]:
-            wx, wy = waypoint[:2]
-            o = self._state()["odometry"]
-            if math.hypot(wx - o["x"], wy - o["y"]) < self.config.position_tol:
-                continue
-            heading = math.atan2(wy - o["y"], wx - o["x"])
-            if len(waypoint) == 3:
-                heading = waypoint[2]
-                if abs(wrap_angle(o['yaw']-heading)) > self.config.yaw_tol:
-                    raise SkillFailed('escape heading changed; predict again')
+    if _assembly_enabled():
+        @timed("turn")
+        def _turn_to(self, yaw_target: float) -> None:
+            st = self._state()
+            o = st["odometry"]
+            x, y, yaw0 = o["x"], o["y"], o["yaw"]
+            delta = wrap_angle(yaw_target - yaw0)
+            if self._look and self._keyframed:
+                # A closed look turns half as fast. The cup is only a few pixels wide, and a
+                # tenth of a radian steps over the heading that separates it from the counter.
+                speed = self.config.look_angular_speed if self.config.inspect_closed_drawers else self.config.look_angular_speed * 0.5
+            elif self._gentle:
+                speed = self.config.gentle_turn_speed
             else:
-                self._turn_to(heading)
-            self._translate_to(wx, wy, heading)
-            job.log.append(f"reached waypoint ({wx:.2f}, {wy:.2f})")
-        self._turn_to(final_yaw)
+                speed = self.config.angular_speed
+            duration = abs(delta) / speed
+            t0 = st["stamp"]
+            deadline = t0 + duration * 3 + 5.0
+            stall = _Stall(t0, self.config.stall_s, 0.02)
+            self._primitive_deadline = ab.watchdog(self, 3600)
+            while True:
+                st = self._tick()
+                frac = self._profile(1.0 if duration == 0 else min(1.0, (st["stamp"] - t0) / duration))
+                self._command({"base": [x, y, yaw0 + delta * frac]})
+                err = abs(wrap_angle(yaw_target - st["odometry"]["yaw"]))
+                if frac >= 1.0 and err < self.config.yaw_tol:
+                    return
+                if stall.stuck(st["stamp"], err):
+                    raise SkillFailed(f"turn is blocked: no progress for {self.config.stall_s:.0f} s (yaw error {err:.2f} rad)")
+                if st["stamp"] > deadline:
+                    raise SkillFailed(f"turn did not converge (yaw error {err:.2f} rad)")
+    else:
+        def _turn_to(self, yaw_target: float) -> None:
+            st = self._state()
+            o = st["odometry"]
+            x, y, yaw0 = o["x"], o["y"], o["yaw"]
+            delta = wrap_angle(yaw_target - yaw0)
+            if self._look and self._keyframed:
+                # A closed look turns half as fast. The cup is only a few pixels wide, and a
+                # tenth of a radian steps over the heading that separates it from the counter.
+                speed = self.config.look_angular_speed if self.config.inspect_closed_drawers else self.config.look_angular_speed * 0.5
+            elif self._gentle:
+                speed = self.config.gentle_turn_speed
+            else:
+                speed = self.config.angular_speed
+            duration = abs(delta) / speed
+            t0 = st["stamp"]
+            deadline = t0 + duration * 3 + 5.0
+            stall = _Stall(t0, self.config.stall_s, 0.02)
+            self._primitive_deadline = time.monotonic() + 3600
+            while True:
+                st = self._tick()
+                frac = self._profile(1.0 if duration == 0 else min(1.0, (st["stamp"] - t0) / duration))
+                self._command({"base": [x, y, yaw0 + delta * frac]})
+                err = abs(wrap_angle(yaw_target - st["odometry"]["yaw"]))
+                if frac >= 1.0 and err < self.config.yaw_tol:
+                    return
+                if stall.stuck(st["stamp"], err):
+                    raise SkillFailed(f"turn is blocked: no progress for {self.config.stall_s:.0f} s (yaw error {err:.2f} rad)")
+                if st["stamp"] > deadline:
+                    raise SkillFailed(f"turn did not converge (yaw error {err:.2f} rad)")
+
+    if _assembly_enabled():
+        @timed("translation")
+        def _translate_to(self, x1: float, y1: float, yaw: float, speed: float | None = None,
+                          tol: float | None = None, *, command_start: dict | None = None) -> None:
+            tol = self.config.position_tol if tol is None else tol
+            st = self._state()
+            if command_start is None:
+                x0, y0 = st["odometry"]["x"], st["odometry"]["y"]
+                # Ordinary navigation retains its odometry-based unwrapped heading.
+                current = st["odometry"]["yaw"]
+                yaw = current + wrap_angle(yaw - current)
+            else:
+                # Precision only: both ends and the unwrapped heading belong to the
+                # same command frame. Sensor noise must not enter any interpolation.
+                ledger = self._baseCommandLedger
+                expected = command_start
+                if not ledger.matches(expected):
+                    raise SkillFailed('precision base hold unavailable or changed')
+                x0, y0, held_yaw = expected['base']
+                if yaw != held_yaw:
+                    raise SkillFailed('precision translation cannot turn the base')
+            length = math.hypot(x1 - x0, y1 - y0)
+            duration = length / (speed or (self.config.gentle_speed if self._gentle else self.config.linear_speed))
+            t0 = st["stamp"]
+            deadline = t0 + duration * 3 + 5.0
+            stall = _Stall(t0, self.config.stall_s, 0.01)
+            self._primitive_deadline = ab.watchdog(self, 3600)
+            while True:
+                st = self._tick()
+                if command_start is not None and not ledger.matches(expected):
+                    raise SkillFailed('precision base hold invalidated during translation')
+                frac = self._profile(1.0 if duration == 0 else min(1.0, (st["stamp"] - t0) / duration))
+                self._command({"base": [x0 + (x1 - x0) * frac, y0 + (y1 - y0) * frac, yaw]})
+                if command_start is not None:
+                    expected = ledger.snapshot()
+                    if not expected['valid']:
+                        raise SkillFailed('precision base hold invalidated during command')
+                err = math.hypot(x1 - st["odometry"]["x"], y1 - st["odometry"]["y"])
+                if frac >= 1.0 and err < tol:
+                    return
+                if stall.stuck(st["stamp"], err):
+                    raise SkillFailed(f"base is blocked: no progress for {self.config.stall_s:.0f} s ({err:.2f} m from the waypoint)")
+                if st["stamp"] > deadline:
+                    raise SkillFailed(f"base did not reach the waypoint (error {err:.2f} m)")
+    else:
+        def _translate_to(self, x1: float, y1: float, yaw: float, speed: float | None = None,
+                          tol: float | None = None) -> None:
+            tol = self.config.position_tol if tol is None else tol
+            st = self._state()
+            x0, y0 = st["odometry"]["x"], st["odometry"]["y"]
+            # The base yaw joint is continuous: express the heading in the same unwrapped frame as the
+            # odometry, otherwise the position controller spins the base by a full turn.
+            current = st["odometry"]["yaw"]
+            yaw = current + wrap_angle(yaw - current)
+            length = math.hypot(x1 - x0, y1 - y0)
+            duration = length / (speed or (self.config.gentle_speed if self._gentle else self.config.linear_speed))
+            t0 = st["stamp"]
+            deadline = t0 + duration * 3 + 5.0
+            stall = _Stall(t0, self.config.stall_s, 0.01)
+            self._primitive_deadline = time.monotonic() + 3600
+            while True:
+                st = self._tick()
+                frac = self._profile(1.0 if duration == 0 else min(1.0, (st["stamp"] - t0) / duration))
+                self._command({"base": [x0 + (x1 - x0) * frac, y0 + (y1 - y0) * frac, yaw]})
+                err = math.hypot(x1 - st["odometry"]["x"], y1 - st["odometry"]["y"])
+                if frac >= 1.0 and err < tol:
+                    return
+                if stall.stuck(st["stamp"], err):
+                    raise SkillFailed(f"base is blocked: no progress for {self.config.stall_s:.0f} s ({err:.2f} m from the waypoint)")
+                if st["stamp"] > deadline:
+                    raise SkillFailed(f"base did not reach the waypoint (error {err:.2f} m)")
+
+    if _assembly_enabled():
+        @timed("navigation")
+        @observation_action('navigate', transport=True)
+        def _drive(self, job: Job, path: list, final_yaw: float) -> None:
+            from steward.ego.base_command_ledger import invalidate
+            invalidate(self, 'navigation_started')
+            for waypoint in path[1:]:
+                wx, wy = waypoint[:2]
+                o = self._state()["odometry"]
+                if math.hypot(wx - o["x"], wy - o["y"]) < self.config.position_tol:
+                    continue
+                heading = math.atan2(wy - o["y"], wx - o["x"])
+                if len(waypoint) == 3:
+                    heading = waypoint[2]
+                    if abs(wrap_angle(o['yaw']-heading)) > self.config.yaw_tol:
+                        raise SkillFailed('escape heading changed; predict again')
+                if len(waypoint) != 3:
+                    self._turn_to(heading)
+                self._translate_to(wx, wy, heading)
+                job.log.append(f"reached waypoint ({wx:.2f}, {wy:.2f})")
+            self._turn_to(final_yaw)
+    else:
+        def _drive(self, job: Job, path: list, final_yaw: float) -> None:
+            for waypoint in path[1:]:
+                wx, wy = waypoint[:2]
+                o = self._state()["odometry"]
+                if math.hypot(wx - o["x"], wy - o["y"]) < self.config.position_tol:
+                    continue
+                heading = math.atan2(wy - o["y"], wx - o["x"])
+                if len(waypoint) == 3:
+                    heading = waypoint[2]
+                    if abs(wrap_angle(o['yaw']-heading)) > self.config.yaw_tol:
+                        raise SkillFailed('escape heading changed; predict again')
+                else:
+                    self._turn_to(heading)
+                self._translate_to(wx, wy, heading)
+                job.log.append(f"reached waypoint ({wx:.2f}, {wy:.2f})")
+            self._turn_to(final_yaw)
 
     def _set_joint(self, name: str, target: float, timeout: float = 8.0, ramp: bool = True,
                    tol: float | None = None) -> None:
@@ -590,7 +991,10 @@ class SkillExecutor:
         corrected = False
         if tol is None:
             tol = self.config.wrist_pitch_tol if name == "wrist_pitch" else self.config.joint_tol
-        self._primitive_deadline = time.monotonic() + 3600
+        if _assembly_enabled():
+            self._primitive_deadline = ab.watchdog(self, 3600)
+        else:
+            self._primitive_deadline = time.monotonic() + 3600
         while True:
             st = self._tick()
             q = st["joints"][name]
@@ -607,18 +1011,33 @@ class SkillExecutor:
             if st["stamp"] - t0 > timeout:
                 raise SkillFailed(f"joint {name} did not reach {target:.3f} (at {q:.3f})")
 
-    def _settle_for_release(self) -> None:
-        """Wait until the lift and reach are within ``release_joint_tol`` of their setpoints, for at
-        most ``release_settle_s``; a joint that stays farther (sagging under the load) does not fail the place."""
-        t0 = self._state()["stamp"]
-        self._primitive_deadline = time.monotonic() + 3600
-        while True:
-            st = self._tick()
-            if all(abs(st["joints"].get(name, target) - target) < self.config.release_joint_tol
-                   for name, target in self._setpoints.items() if name in ("lift", "reach")):
-                return
-            if st["stamp"] - t0 > self.config.release_settle_s:
-                return
+    if _assembly_enabled():
+        @timed("release_settle")
+        def _settle_for_release(self) -> None:
+            """Wait until the lift and reach are within ``release_joint_tol`` of their setpoints, for at
+            most ``release_settle_s``; a joint that stays farther (sagging under the load) does not fail the place."""
+            t0 = self._state()["stamp"]
+            self._primitive_deadline = ab.watchdog(self, 3600)
+            while True:
+                st = self._tick()
+                if all(abs(st["joints"].get(name, target) - target) < self.config.release_joint_tol
+                       for name, target in self._setpoints.items() if name in ("lift", "reach")):
+                    return
+                if st["stamp"] - t0 > self.config.release_settle_s:
+                    return
+    else:
+        def _settle_for_release(self) -> None:
+            """Wait until the lift and reach are within ``release_joint_tol`` of their setpoints, for at
+            most ``release_settle_s``; a joint that stays farther (sagging under the load) does not fail the place."""
+            t0 = self._state()["stamp"]
+            self._primitive_deadline = time.monotonic() + 3600
+            while True:
+                st = self._tick()
+                if all(abs(st["joints"].get(name, target) - target) < self.config.release_joint_tol
+                       for name, target in self._setpoints.items() if name in ("lift", "reach")):
+                    return
+                if st["stamp"] - t0 > self.config.release_settle_s:
+                    return
 
     def _profile(self, frac: float) -> float:
         """Share of a move done at time share ``frac``: steady, or for a gentle plan starting and
@@ -634,7 +1053,10 @@ class SkillExecutor:
         at rest, then settle each."""
         st = self._state()
         q0, t0 = {name: st["joints"].get(name, 0.0) for name in targets}, st["stamp"]
-        self._primitive_deadline = time.monotonic() + 3600
+        if _assembly_enabled():
+            self._primitive_deadline = ab.watchdog(self, 3600)
+        else:
+            self._primitive_deadline = time.monotonic() + 3600
         while True:
             st = self._tick()
             frac = min(1.0, (st["stamp"] - t0) / seconds) if seconds > 0 else 1.0
@@ -651,6 +1073,24 @@ class SkillExecutor:
 
         Lowering onto ``lift`` with the tool still tilted can leave a short dock outside the
         workspace: back up and refresh the reach before each retry."""
+        if _assembly_enabled():
+            from steward.ego import placement_xy_compensation
+            if placement_xy_compensation.applies(plan) and 'placementXYCompensationClearLift' in plan or (placement_xy_compensation.enabled() and plan.get('placementXYCompensationVerticalPick')):
+                clear = plan.get('placementXYCompensationClearLift', max(plan.get('carryLift', lift), plan.get('approachLift') or lift))
+                self._set_joint('lift', clear)
+                self._reach_out(xy, plan.get('wristPitch'))
+                self._align_lateral(xy, tol=self.config.interface_precision_m)
+                self._set_joint('reach', self._reach_to(xy), tol=self.config.interface_precision_m)
+                self._set_joint('lift', lift)
+                return
+            from steward.ego import seating_geometry
+            if seating_geometry.enabled() and plan.get('seatingGeometryPickClearance') is not None:
+                self._set_joint('lift', plan['seatingGeometryPickClearance'])
+                self._reach_out(xy, plan.get('wristPitch'))
+                self._align_lateral(xy)
+                self._set_joint('reach', self._reach_to(xy))
+                self._set_joint('lift', lift)
+                return
         over = plan.get("approachLift")
         pitch = plan.get("wristPitch")
         if over is not None and over > lift:
@@ -848,15 +1288,27 @@ class SkillExecutor:
         if abs(pitch) >= self.config.joint_tol:
             self._ramp_joints({"wrist_pitch": 0.0}, abs(pitch) / self.config.wrist_pitch_speed)
 
-    def _withdraw(self, plan: dict) -> None:
-        """Retract the arm, first back up above the rim it reached over (the plan's ``approachLift``).
+    if _assembly_enabled():
+        @timed("withdraw")
+        def _withdraw(self, plan: dict) -> None:
+            """Retract the arm, first back up above the rim it reached over (the plan's ``approachLift``).
 
-        Tool-down tops out near 0.50 m reach under the USD mounts, so a long dock must draw back
-        while still tilted (and high enough for ``retract_reach``) before untilting."""
-        over = plan.get("approachLift")
-        if over is not None and self._state()["joints"]["lift"] < over:
-            self._set_joint("lift", over)
-        self._exit_long_reach(plan)
+            Tool-down tops out near 0.50 m reach under the USD mounts, so a long dock must draw back
+            while still tilted (and high enough for ``retract_reach``) before untilting."""
+            over = plan.get("approachLift")
+            if over is not None and self._state()["joints"]["lift"] < over:
+                self._set_joint("lift", over)
+            self._exit_long_reach(plan)
+    else:
+        def _withdraw(self, plan: dict) -> None:
+            """Retract the arm, first back up above the rim it reached over (the plan's ``approachLift``).
+
+            Tool-down tops out near 0.50 m reach under the USD mounts, so a long dock must draw back
+            while still tilted (and high enough for ``retract_reach``) before untilting."""
+            over = plan.get("approachLift")
+            if over is not None and self._state()["joints"]["lift"] < over:
+                self._set_joint("lift", over)
+            self._exit_long_reach(plan)
 
     def _exit_long_reach(self, plan: dict) -> None:
         """Leave a long dock without crossing the tool-down / short-retract USD holes.
@@ -879,84 +1331,170 @@ class SkillExecutor:
                abs(float(self._setpoints.get("wrist_pitch", 0.0)))) >= self.config.joint_tol:
             self._untilt()
 
-    def _retract(self, plan: dict) -> None:
-        """Bring the gripper back to the retracted reach, or only as near as the plan's ``retractReach``
-        (a tool tilted forward cannot come all the way back without turning the wrist over)."""
-        self._set_joint("reach", max(self.config.retract_reach, plan.get("retractReach", 0.0)))
+    if _assembly_enabled():
+        @timed("retract")
+        def _retract(self, plan: dict) -> None:
+            """Bring the gripper back to the retracted reach, or only as near as the plan's ``retractReach``
+            (a tool tilted forward cannot come all the way back without turning the wrist over)."""
+            self._set_joint("reach", max(self.config.retract_reach, plan.get("retractReach", 0.0)))
+    else:
+        def _retract(self, plan: dict) -> None:
+            """Bring the gripper back to the retracted reach, or only as near as the plan's ``retractReach``
+            (a tool tilted forward cannot come all the way back without turning the wrist over)."""
+            self._set_joint("reach", max(self.config.retract_reach, plan.get("retractReach", 0.0)))
 
-    def _wait(self, seconds: float) -> None:
-        t0 = self._state()["stamp"]
-        self._primitive_deadline = time.monotonic() + 3600
-        while self._tick()["stamp"] - t0 < seconds:
-            pass
+    if _assembly_enabled():
+        @timed("fixed_wait")
+        def _wait(self, seconds: float) -> None:
+            t0 = self._state()["stamp"]
+            self._primitive_deadline = ab.watchdog(self, 3600)
+            while self._tick()["stamp"] - t0 < seconds:
+                pass
+    else:
+        def _wait(self, seconds: float) -> None:
+            t0 = self._state()["stamp"]
+            self._primitive_deadline = time.monotonic() + 3600
+            while self._tick()["stamp"] - t0 < seconds:
+                pass
 
-    def _dock(self, job: Job, plan: dict, retract: bool = True) -> None:
-        """Drive and verify docking with the arm unchanged, then prepare its retracted reach.
-        ``retract=False`` leaves the carrying reach unchanged for floor placement. Failure before
-        docking does not enable Cartesian arm recovery."""
-        self._arm_engaged = False
-        self._drive(job, plan["path"], plan["yaw"])
-        self._translate_to(plan["dock"][0], plan["dock"][1], plan["yaw"], tol=self.config.dock_position_tol)
-        o = self._state()["odometry"]
-        dist = math.hypot(o["x"] - plan["dock"][0], o["y"] - plan["dock"][1])
-        dyaw = abs(wrap_angle(o["yaw"] - plan["yaw"]))
-        if dist > self.config.dock_tol or dyaw > self.config.dock_yaw_tol:
-            self._backoff(plan)
-            raise SkillFailed(f"docking missed the planned pose by {dist:.2f} m / {math.degrees(dyaw):.0f} deg")
-        if self._stop.is_set():
-            raise SkillStopped()
-        job.log.append("docked")
-        self._arm_engaged = True
-        # PARK/zero rest cannot one-shot IK to a working tip (servo stalls ~0.21 m); unfold via HOME.
-        deployed = False
-        if self._deploy_working is not None:
-            before = float(self._state()["joints"].get("reach", 0.0))
-            if self._state().get("armResting") or before < self.config.retract_reach - 0.04:
-                job.log.append(f"deploying working posture (reach was {before:.3f})")
-                self._deploy_working(self._tick)
-                # Re-assert a hole-free planar tip and sync setpoints from the live virtual joints.
-                # Leaving the arm on the HOME FK ridge (~0.21–0.32 m) makes the next handle dock
-                # settle short of its setpoint. Prefer working_reach (past the 0.32 m hole), not
-                # retract_reach which sits on that ridge.
-                tip_lift = max(self.config.working_lift, self.config.stow_lift, 0.85)
-                tip_reach = self.config.working_reach
-                self._command({"lift": tip_lift, "reach": tip_reach, "wrist_pitch": 0.0,
-                               "wrist_yaw": 0.0, "wrist_roll": 0.0})
-                self._wait(self.config.settle_s)
-                after = float(self._state()["joints"].get("reach", 0.0))
-                job.log.append(f"deployed working posture (reach now {after:.3f})")
-                self._setpoints.update({k: float(self._state()["joints"].get(k, 0.0))
-                                        for k in ("lift", "reach", "wrist_pitch", "wrist_yaw", "wrist_roll")
-                                        if k in self._state()["joints"]})
-                if after < tip_reach - 0.04:
-                    raise SkillFailed(
-                        f"arm did not leave its folded tip after deploy (reach {after:.3f})")
-                deployed = True
-        if retract:
-            # Only what the arm holds is held at the plan's tilt; an empty gripper points down.
-            # Clear ghost tilt before an empty short retract: FK can read ~0 while the virtual
-            # target still carries pitch, and 0.28 m @ mid height @ that pitch has no reliable IK.
-            held = bool(self._state()["gripper"].get("holding"))
-            parked = plan if held else {}
-            pitch_now = max(abs(float(self._state()["joints"].get("wrist_pitch", 0.0))),
-                            abs(float(self._setpoints.get("wrist_pitch", 0.0))),
-                            abs(float(parked.get("wristPitch") or 0.0)))
-            if held and pitch_now >= 0.3:
-                self._exit_long_reach({**parked, "wristPitch": parked.get("wristPitch", pitch_now)})
-            elif deployed:
-                # Just unfolded to the working tip; a further empty retract can throw the arm back
-                # onto the folded ridge (FK falls to ~0.22 m). Keep the working tip.
-                self._setpoints["wrist_pitch"] = 0.0
-                self._command({"wrist_pitch": 0.0})
-            else:
-                # Force the virtual target down even when FK already reads ~0 (otherwise a later
-                # lift/reach merge keeps the ghost pitch and hits the short-retract hole).
-                self._setpoints["wrist_pitch"] = 0.0
-                self._command({"wrist_pitch": 0.0})
-                if float(self._state()["joints"].get("reach", 0.0)) > self.config.retract_reach + 0.05:
-                    self._set_joint("lift", max(float(self._state()["joints"].get("lift", 0.0)),
-                                                self.config.untilted_exit_lift, self.config.stow_lift))
-                self._retract(parked if held else {})
+    if _assembly_enabled():
+        @timed("dock")
+        @observation_action('dock', transport=True)
+        def _dock(self, job: Job, plan: dict, retract: bool = True) -> None:
+            """Drive and verify docking with the arm unchanged, then prepare its retracted reach.
+            ``retract=False`` leaves the carrying reach unchanged for floor placement. Failure before
+            docking does not enable Cartesian arm recovery."""
+            self._arm_engaged = False
+            self._drive(job, plan["path"], plan["yaw"])
+            self._translate_to(plan["dock"][0], plan["dock"][1], plan["yaw"], tol=self.config.dock_position_tol)
+            o = self._state()["odometry"]
+            dist = math.hypot(o["x"] - plan["dock"][0], o["y"] - plan["dock"][1])
+            dyaw = abs(wrap_angle(o["yaw"] - plan["yaw"]))
+            if dist > self.config.dock_tol or dyaw > self.config.dock_yaw_tol:
+                self._backoff(plan)
+                raise SkillFailed(f"docking missed the planned pose by {dist:.2f} m / {math.degrees(dyaw):.0f} deg")
+            if self._stop.is_set():
+                raise SkillStopped()
+            job.log.append("docked")
+            self._arm_engaged = True
+            # PARK/zero rest cannot one-shot IK to a working tip (servo stalls ~0.21 m); unfold via HOME.
+            deployed = False
+            if self._deploy_working is not None:
+                before = float(self._state()["joints"].get("reach", 0.0))
+                if self._state().get("armResting") or before < self.config.retract_reach - 0.04:
+                    job.log.append(f"deploying working posture (reach was {before:.3f})")
+                    self._deploy_working(self._tick)
+                    # Re-assert a hole-free planar tip and sync setpoints from the live virtual joints.
+                    # Leaving the arm on the HOME FK ridge (~0.21–0.32 m) makes the next handle dock
+                    # settle short of its setpoint. Prefer working_reach (past the 0.32 m hole), not
+                    # retract_reach which sits on that ridge.
+                    tip_lift = max(self.config.working_lift, self.config.stow_lift, 0.85)
+                    tip_reach = self.config.working_reach
+                    self._command({"lift": tip_lift, "reach": tip_reach, "wrist_pitch": 0.0,
+                                   "wrist_yaw": 0.0, "wrist_roll": 0.0})
+                    self._wait(self.config.settle_s)
+                    after = float(self._state()["joints"].get("reach", 0.0))
+                    job.log.append(f"deployed working posture (reach now {after:.3f})")
+                    self._setpoints.update({k: float(self._state()["joints"].get(k, 0.0))
+                                            for k in ("lift", "reach", "wrist_pitch", "wrist_yaw", "wrist_roll")
+                                            if k in self._state()["joints"]})
+                    if after < tip_reach - 0.04:
+                        raise SkillFailed(
+                            f"arm did not leave its folded tip after deploy (reach {after:.3f})")
+                    deployed = True
+            if retract:
+                # Only what the arm holds is held at the plan's tilt; an empty gripper points down.
+                # Clear ghost tilt before an empty short retract: FK can read ~0 while the virtual
+                # target still carries pitch, and 0.28 m @ mid height @ that pitch has no reliable IK.
+                held = bool(self._state()["gripper"].get("holding"))
+                parked = plan if held else {}
+                pitch_now = max(abs(float(self._state()["joints"].get("wrist_pitch", 0.0))),
+                                abs(float(self._setpoints.get("wrist_pitch", 0.0))),
+                                abs(float(parked.get("wristPitch") or 0.0)))
+                if held and pitch_now >= 0.3:
+                    self._exit_long_reach({**parked, "wristPitch": parked.get("wristPitch", pitch_now)})
+                elif deployed:
+                    # Just unfolded to the working tip; a further empty retract can throw the arm back
+                    # onto the folded ridge (FK falls to ~0.22 m). Keep the working tip.
+                    self._setpoints["wrist_pitch"] = 0.0
+                    self._command({"wrist_pitch": 0.0})
+                else:
+                    # Force the virtual target down even when FK already reads ~0 (otherwise a later
+                    # lift/reach merge keeps the ghost pitch and hits the short-retract hole).
+                    self._setpoints["wrist_pitch"] = 0.0
+                    self._command({"wrist_pitch": 0.0})
+                    if float(self._state()["joints"].get("reach", 0.0)) > self.config.retract_reach + 0.05:
+                        self._set_joint("lift", max(float(self._state()["joints"].get("lift", 0.0)),
+                                                    self.config.untilted_exit_lift, self.config.stow_lift))
+                    self._retract(parked if held else {})
+    else:
+        def _dock(self, job: Job, plan: dict, retract: bool = True) -> None:
+            """Drive and verify docking with the arm unchanged, then prepare its retracted reach.
+            ``retract=False`` leaves the carrying reach unchanged for floor placement. Failure before
+            docking does not enable Cartesian arm recovery."""
+            self._arm_engaged = False
+            self._drive(job, plan["path"], plan["yaw"])
+            self._translate_to(plan["dock"][0], plan["dock"][1], plan["yaw"], tol=self.config.dock_position_tol)
+            o = self._state()["odometry"]
+            dist = math.hypot(o["x"] - plan["dock"][0], o["y"] - plan["dock"][1])
+            dyaw = abs(wrap_angle(o["yaw"] - plan["yaw"]))
+            if dist > self.config.dock_tol or dyaw > self.config.dock_yaw_tol:
+                self._backoff(plan)
+                raise SkillFailed(f"docking missed the planned pose by {dist:.2f} m / {math.degrees(dyaw):.0f} deg")
+            if self._stop.is_set():
+                raise SkillStopped()
+            job.log.append("docked")
+            self._arm_engaged = True
+            # PARK/zero rest cannot one-shot IK to a working tip (servo stalls ~0.21 m); unfold via HOME.
+            deployed = False
+            if self._deploy_working is not None:
+                before = float(self._state()["joints"].get("reach", 0.0))
+                if self._state().get("armResting") or before < self.config.retract_reach - 0.04:
+                    job.log.append(f"deploying working posture (reach was {before:.3f})")
+                    self._deploy_working(self._tick)
+                    # Re-assert a hole-free planar tip and sync setpoints from the live virtual joints.
+                    # Leaving the arm on the HOME FK ridge (~0.21–0.32 m) makes the next handle dock
+                    # settle short of its setpoint. Prefer working_reach (past the 0.32 m hole), not
+                    # retract_reach which sits on that ridge.
+                    tip_lift = max(self.config.working_lift, self.config.stow_lift, 0.85)
+                    tip_reach = self.config.working_reach
+                    self._command({"lift": tip_lift, "reach": tip_reach, "wrist_pitch": 0.0,
+                                   "wrist_yaw": 0.0, "wrist_roll": 0.0})
+                    self._wait(self.config.settle_s)
+                    after = float(self._state()["joints"].get("reach", 0.0))
+                    job.log.append(f"deployed working posture (reach now {after:.3f})")
+                    self._setpoints.update({k: float(self._state()["joints"].get(k, 0.0))
+                                            for k in ("lift", "reach", "wrist_pitch", "wrist_yaw", "wrist_roll")
+                                            if k in self._state()["joints"]})
+                    if after < tip_reach - 0.04:
+                        raise SkillFailed(
+                            f"arm did not leave its folded tip after deploy (reach {after:.3f})")
+                    deployed = True
+            if retract:
+                # Only what the arm holds is held at the plan's tilt; an empty gripper points down.
+                # Clear ghost tilt before an empty short retract: FK can read ~0 while the virtual
+                # target still carries pitch, and 0.28 m @ mid height @ that pitch has no reliable IK.
+                held = bool(self._state()["gripper"].get("holding"))
+                parked = plan if held else {}
+                pitch_now = max(abs(float(self._state()["joints"].get("wrist_pitch", 0.0))),
+                                abs(float(self._setpoints.get("wrist_pitch", 0.0))),
+                                abs(float(parked.get("wristPitch") or 0.0)))
+                if held and pitch_now >= 0.3:
+                    self._exit_long_reach({**parked, "wristPitch": parked.get("wristPitch", pitch_now)})
+                elif deployed:
+                    # Just unfolded to the working tip; a further empty retract can throw the arm back
+                    # onto the folded ridge (FK falls to ~0.22 m). Keep the working tip.
+                    self._setpoints["wrist_pitch"] = 0.0
+                    self._command({"wrist_pitch": 0.0})
+                else:
+                    # Force the virtual target down even when FK already reads ~0 (otherwise a later
+                    # lift/reach merge keeps the ghost pitch and hits the short-retract hole).
+                    self._setpoints["wrist_pitch"] = 0.0
+                    self._command({"wrist_pitch": 0.0})
+                    if float(self._state()["joints"].get("reach", 0.0)) > self.config.retract_reach + 0.05:
+                        self._set_joint("lift", max(float(self._state()["joints"].get("lift", 0.0)),
+                                                    self.config.untilted_exit_lift, self.config.stow_lift))
+                    self._retract(parked if held else {})
 
     def _gripper_xy(self) -> np.ndarray:
         """Gripper position from the robot's own odometry and reach encoder, on the arm's line
@@ -967,22 +1505,41 @@ class SkillExecutor:
         c, s = math.cos(o["yaw"]), math.sin(o["yaw"])
         return np.array([o["x"] + ahead * c - side * s, o["y"] + ahead * s + side * c])
 
-    def _align_lateral(self, target_xy: list[float], tol: float | None = None) -> None:
-        """Shift the base sideways so the target lies on the arm's line of reach.
+    if _assembly_enabled():
+        @timed("alignment")
+        def _align_lateral(self, target_xy: list[float], tol: float | None = None) -> None:
+            """Shift the base sideways so the target lies on the arm's line of reach.
 
-        A long unfurl that creeps the base forward can leave 10+ cm of lateral error; step in
-        ``align_max`` chunks so a single large correction is not skipped."""
-        for _ in range(6):
-            st = self._state()
-            o = st["odometry"]
-            left = np.array([-math.sin(o["yaw"]), math.cos(o["yaw"])])
-            lateral = float((np.array(target_xy) - np.array([o["x"], o["y"]])) @ left) - st.get("armLateral", 0.0)
-            if abs(lateral) <= (self.config.align_min if tol is None else tol):
-                return
-            step = max(-self.config.align_max, min(self.config.align_max, lateral))
-            self._translate_to(o["x"] + step * left[0], o["y"] + step * left[1], o["yaw"], tol=tol)
-            if abs(lateral) <= self.config.align_max:
-                return
+            A long unfurl that creeps the base forward can leave 10+ cm of lateral error; step in
+            ``align_max`` chunks so a single large correction is not skipped."""
+            for _ in range(6):
+                st = self._state()
+                o = st["odometry"]
+                left = np.array([-math.sin(o["yaw"]), math.cos(o["yaw"])])
+                lateral = float((np.array(target_xy) - np.array([o["x"], o["y"]])) @ left) - st.get("armLateral", 0.0)
+                if abs(lateral) <= (self.config.align_min if tol is None else tol):
+                    return
+                step = max(-self.config.align_max, min(self.config.align_max, lateral))
+                self._translate_to(o["x"] + step * left[0], o["y"] + step * left[1], o["yaw"], tol=tol)
+                if abs(lateral) <= self.config.align_max:
+                    return
+    else:
+        def _align_lateral(self, target_xy: list[float], tol: float | None = None) -> None:
+            """Shift the base sideways so the target lies on the arm's line of reach.
+
+            A long unfurl that creeps the base forward can leave 10+ cm of lateral error; step in
+            ``align_max`` chunks so a single large correction is not skipped."""
+            for _ in range(6):
+                st = self._state()
+                o = st["odometry"]
+                left = np.array([-math.sin(o["yaw"]), math.cos(o["yaw"])])
+                lateral = float((np.array(target_xy) - np.array([o["x"], o["y"]])) @ left) - st.get("armLateral", 0.0)
+                if abs(lateral) <= (self.config.align_min if tol is None else tol):
+                    return
+                step = max(-self.config.align_max, min(self.config.align_max, lateral))
+                self._translate_to(o["x"] + step * left[0], o["y"] + step * left[1], o["yaw"], tol=tol)
+                if abs(lateral) <= self.config.align_max:
+                    return
 
     def _backoff(self, plan: dict) -> None:
         self._translate_to(plan["predock"][0], plan["predock"][1], plan["yaw"])
@@ -1015,6 +1572,10 @@ class SkillExecutor:
         if "placementToleranceM" in plan:
             if np.linalg.norm(g - np.asarray(plan["spot"])[:2]) > plan["placementToleranceM"]:
                 return False
+        if _assembly_enabled():
+            if plan.get('edgePlacement'):
+                from steward.ego.assembly_edge import release_inside
+                return release_inside(plan, g)
         if plan.get("mate"):
             # Centre on the mate, with a short capture slack for dock error.
             slack = 0.02
@@ -1028,19 +1589,43 @@ class SkillExecutor:
         return True
 
     # ---------------------------------------------------------------- skills
-    def _look_around(self, job: Job) -> None:
-        st = self._state()
-        # Odometry stays at the origin until the first body frame. A look that commands that point
-        # drives the base there. A state without the flag (a test double) is already a pose.
-        while st.get("posed") is False:
-            st = self._tick()
-        yaw0 = st["odometry"]["yaw"]
-        for k in range(1, 5):
-            self._turn_to(wrap_angle(yaw0 + k * math.pi / 2))
-            self._wait(self.config.look_dwell_s)
-            job.log.append(f"looked toward {math.degrees(wrap_angle(yaw0 + k * math.pi / 2)):.0f} deg")
-        if self.config.inspect_closed_drawers:
-            self._inspect_closed_drawers(job)
+    if _assembly_enabled():
+        @timed("look_around")
+        @observation_action('look_around')
+        def _look_around(self, job: Job) -> None:
+            return self._look_sweep(job)
+    else:
+        def _look_around(self, job: Job) -> None:
+            st = self._state()
+            # Odometry stays at the origin until the first body frame. A look that commands that point
+            # drives the base there. A state without the flag (a test double) is already a pose.
+            while st.get("posed") is False:
+                st = self._tick()
+            yaw0 = st["odometry"]["yaw"]
+            for k in range(1, 5):
+                self._turn_to(wrap_angle(yaw0 + k * math.pi / 2))
+                self._wait(self.config.look_dwell_s)
+                job.log.append(f"looked toward {math.degrees(wrap_angle(yaw0 + k * math.pi / 2)):.0f} deg")
+            if self.config.inspect_closed_drawers:
+                self._inspect_closed_drawers(job)
+
+    if _assembly_enabled():
+        def _look_sweep(self, job: Job) -> None:
+            st = self._state()
+            # Odometry stays at the origin until the first body frame. A look that commands that point
+            # drives the base there. A state without the flag (a test double) is already a pose.
+            while st.get("posed") is False:
+                st = self._tick()
+            from steward.ego.look_timeout import active, capture
+            if active():
+                capture(self, st)
+            yaw0 = st["odometry"]["yaw"]
+            for k in range(1, 5):
+                self._turn_to(wrap_angle(yaw0 + k * math.pi / 2))
+                self._wait(self.config.look_dwell_s)
+                job.log.append(f"looked toward {math.degrees(wrap_angle(yaw0 + k * math.pi / 2)):.0f} deg")
+            if self.config.inspect_closed_drawers and not active():
+                self._inspect_closed_drawers(job)
 
     def _inspect_closed_drawers(self, job: Job) -> None:
         """Open every closed drawer the ego state still names, look in, and close it.
@@ -1241,28 +1826,60 @@ class SkillExecutor:
                 self._pin(tid, False)
             self._pin(drawer_id, False)
 
-    def _pick(self, job: Job, plan: dict) -> None:
-        # Registered small parts can disappear into a gripper/background mask
-        # during docking. Keep the last unobstructed estimate for this attempt;
-        # tactile capture and the existing spatial gates still decide the grasp.
-        protected = bool(plan.get("protectGraspFrame") and self._pin is not None)
-        if protected:
-            self._pin(plan["target"], True)
-        try:
-            self._pick_target(job, plan)
-        finally:
+    if _assembly_enabled():
+        @timed("pick")
+        @observation_action('pick')
+        def _pick(self, job: Job, plan: dict) -> None:
+            # Registered small parts can disappear into a gripper/background mask
+            # during docking. Keep the last unobstructed estimate for this attempt;
+            # tactile capture and the existing spatial gates still decide the grasp.
+            protected = bool(plan.get("protectGraspFrame") and self._pin is not None)
             if protected:
-                self._pin(plan["target"], False)
+                self._pin(plan["target"], True)
+            try:
+                self._pick_target(job, plan)
+            finally:
+                if protected:
+                    self._pin(plan["target"], False)
+    else:
+        def _pick(self, job: Job, plan: dict) -> None:
+            # Registered small parts can disappear into a gripper/background mask
+            # during docking. Keep the last unobstructed estimate for this attempt;
+            # tactile capture and the existing spatial gates still decide the grasp.
+            protected = bool(plan.get("protectGraspFrame") and self._pin is not None)
+            if protected:
+                self._pin(plan["target"], True)
+            try:
+                self._pick_target(job, plan)
+            finally:
+                if protected:
+                    self._pin(plan["target"], False)
 
     def _pick_target(self, job: Job, plan: dict) -> None:
+        if _assembly_enabled():
+            prepare_binding = getattr(self, '_prepare_load_binding', None)
+            if prepare_binding: prepare_binding(plan)
         self._dock(job, plan)
-        if plan.get('assemblyGrip'):
-            # The planner's grasp path uses roll zero. A previous exit can leave
-            # the wrist inverted; set the empty hand before closing, not the load.
-            self._set_joint('wrist_roll', 0., tol=.02)
-            self._set_joint('wrist_yaw', plan['wristYaw'], tol=.02)
-        target = ({'p':list(plan['targetP'])} if plan.get('assemblyGrip')
-                  else self._state()['entities'].get(plan['target']))
+        if _assembly_enabled():
+            from steward.ego import seating_geometry
+            stock_pick = seating_geometry.enabled() and plan.get('seatingGeometryPickClearance') is not None
+            if stock_pick:
+                self._set_joint('lift', plan['seatingGeometryPickClearance'])
+            if plan.get('assemblyGrip') or plan.get('poweredGrip') or (plan.get('axialGrip') and 'wristYaw' in plan):
+                # The planner's grasp path uses roll zero. A previous exit can leave
+                # the wrist inverted; set the empty hand before closing, not the load.
+                self._set_joint('wrist_roll', 0., tol=.02)
+                self._set_joint('wrist_yaw', plan['wristYaw'], tol=.02)
+            target = ({'p':list(plan['targetP'])} if plan.get('assemblyGrip') or plan.get('axialGrip') or stock_pick
+                      else self._state()['entities'].get(plan['target']))
+        else:
+            if plan.get('assemblyGrip'):
+                # The planner's grasp path uses roll zero. A previous exit can leave
+                # the wrist inverted; set the empty hand before closing, not the load.
+                self._set_joint('wrist_roll', 0., tol=.02)
+                self._set_joint('wrist_yaw', plan['wristYaw'], tol=.02)
+            target = ({'p':list(plan['targetP'])} if plan.get('assemblyGrip')
+                      else self._state()['entities'].get(plan['target']))
         if target is None and plan.get("targetP") is not None:
             # The track was renumbered while docking; the predicted position is seconds old and
             # the gripper is already beside it — go on with the position.
@@ -1302,12 +1919,20 @@ class SkillExecutor:
             pick_lift = max(pick_lift, min(float(plan["approachLift"]), float(plan.get("lift", pick_lift) + 0.12)))
         self._reach_over(plan, target["p"][:2], pick_lift)
         self._wait(self.config.settle_s)
+        if _assembly_enabled():
+            supply_check = getattr(self, '_supply_pregrasp_before_pick', None)
+            if supply_check is not None:
+                supply_check(plan)
         miss = float(np.linalg.norm(self._gripper_xy() - np.array(target["p"][:2])))
         # Tool-down drawer closes creep under a short reach cap; allow a centimetre more than the
         # plan's capture so TCP settle noise does not refuse a grasp that probes would find.
         capture = float(plan.get("captureRadius", 0.05))
-        if plan.get("approachLift") is not None and abs(float(plan.get("closePitch") or 0.0)) < 1e-3:
-            capture = max(capture, 0.14)
+        if _assembly_enabled():
+            if not stock_pick and plan.get("approachLift") is not None and abs(float(plan.get("closePitch") or 0.0)) < 1e-3:
+                capture = max(capture, 0.14)
+        else:
+            if plan.get("approachLift") is not None and abs(float(plan.get("closePitch") or 0.0)) < 1e-3:
+                capture = max(capture, 0.14)
         if miss > capture:
             self._withdraw(plan)
             self._untilt()
@@ -1337,62 +1962,123 @@ class SkillExecutor:
             else:
                 z_probes = self.config.grasp_probe_z
             probes += [(0.0, 0.0, dz) for dz in z_probes]
+        if _assembly_enabled():
+            if stock_pick or plan.get('placementXYCompensationVerticalPick'):
+                # Never sweep an open jaw sideways through the remaining stock.
+                probes = [(0.0, 0.0, 0.0)]
         grasped = False
-        for n, (forward, sideways, dz) in enumerate(probes):
-            seen = None if plan.get('assemblyGrip') else self._state()['entities'].get(plan['target'])
-            latest = aimed(seen) if seen is not None else target
-            o = self._state()["odometry"]
-            heading = np.array([math.cos(o["yaw"]), math.sin(o["yaw"])])
-            left = np.array([-heading[1], heading[0]])
-            goal = np.array(latest["p"][:2]) + forward * heading + sideways * left
-            if n:
-                self._command({"gripper": "open"})
-                self._wait(self.config.grasp_wait_s)
-                self._align_lateral(goal.tolist())
-                try:
-                    live_pitch = abs(float(self._state()["joints"].get("wrist_pitch", 0.0)))
-                    floor = float(plan["lift"]) if live_pitch > 0.5 else float(plan["lift"]) + dz
-                    need = max(0.05, self._reach_to(goal.tolist()))
-                    # Drawer closes only: 0.52 m @ ~0.65 m @ mild tilt packs joint2. Table / flip
-                    # picks keep the planned reach (high tilt at elevated lift needs the full dock).
-                    td_cap = self.config.tool_down_reach_mid
-                    if plan.get("approachLift") is not None and live_pitch <= 0.5 and need > td_cap:
-                        o2 = self._state()["odometry"]
-                        fwd = (math.cos(o2["yaw"]), math.sin(o2["yaw"]))
-                        for _ in range(6):
-                            if self._reach_to(goal.tolist()) <= td_cap:
-                                break
-                            self._translate_to(o2["x"] + 0.03 * fwd[0], o2["y"] + 0.03 * fwd[1], o2["yaw"])
-                            o2 = self._state()["odometry"]
-                        need = max(0.05, min(td_cap, self._reach_to(goal.tolist())))
-                    # Shorten / untilt before lowering: lift-first at long reach sits in the USD hole.
-                    # Keep a mild tilt under a rim — full untilt at drawer-close height fails IK.
-                    if dz < 0.0 and live_pitch >= self.config.joint_tol:
-                        self._set_joint("reach", min(need, td_cap), ramp=False)
-                        if plan.get("approachLift") is not None:
-                            keep = 0.25 if live_pitch >= 0.25 else live_pitch
-                            if abs(float(self._state()["joints"].get("wrist_pitch", 0.0)) - keep) >= self.config.joint_tol:
-                                self._set_joint("wrist_pitch", keep)
-                            live_pitch = keep
-                        else:
-                            self._untilt()
-                            live_pitch = 0.0
-                        floor = float(plan["lift"]) + dz
-                        need = max(0.05, min(td_cap, self._reach_to(goal.tolist())))
-                    self._set_joint("reach", need, ramp=False)
-                    self._set_joint("lift", max(float(latest["p"][2] + dz), floor))
-                except (OutOfReach, SkillFailed) as e:
-                    job.log.append(f"skipped probe {n}: {e}")
-                    continue
-            self._command({"gripper": "close"})
-            self._wait(self.config.grasp_wait_s)
-            if self._state()["gripper"]["holding"]:
+        if _assembly_enabled():
+            for n, (forward, sideways, dz) in enumerate(probes):
+                seen = None if plan.get('assemblyGrip') or stock_pick or plan.get('placementXYCompensationVerticalPick') else self._state()['entities'].get(plan['target'])
+                latest = aimed(seen) if seen is not None else target
+                o = self._state()["odometry"]
+                heading = np.array([math.cos(o["yaw"]), math.sin(o["yaw"])])
+                left = np.array([-heading[1], heading[0]])
+                goal = np.array(latest["p"][:2]) + forward * heading + sideways * left
                 if n:
-                    job.log.append(f"grasped {plan['target']} on probe {n} "
-                                   f"(forward {forward * 100:+.0f} cm, left {sideways * 100:+.0f} cm, "
-                                   f"height {dz * 100:+.1f} cm)")
-                grasped = True
-                break
+                    self._command({"gripper": "open"})
+                    self._wait(self.config.grasp_wait_s)
+                    self._align_lateral(goal.tolist())
+                    try:
+                        live_pitch = abs(float(self._state()["joints"].get("wrist_pitch", 0.0)))
+                        floor = float(plan["lift"]) if live_pitch > 0.5 else float(plan["lift"]) + dz
+                        need = max(0.05, self._reach_to(goal.tolist()))
+                        # Drawer closes only: 0.52 m @ ~0.65 m @ mild tilt packs joint2. Table / flip
+                        # picks keep the planned reach (high tilt at elevated lift needs the full dock).
+                        td_cap = self.config.tool_down_reach_mid
+                        if plan.get("approachLift") is not None and live_pitch <= 0.5 and need > td_cap:
+                            o2 = self._state()["odometry"]
+                            fwd = (math.cos(o2["yaw"]), math.sin(o2["yaw"]))
+                            for _ in range(6):
+                                if self._reach_to(goal.tolist()) <= td_cap:
+                                    break
+                                self._translate_to(o2["x"] + 0.03 * fwd[0], o2["y"] + 0.03 * fwd[1], o2["yaw"])
+                                o2 = self._state()["odometry"]
+                            need = max(0.05, min(td_cap, self._reach_to(goal.tolist())))
+                        # Shorten / untilt before lowering: lift-first at long reach sits in the USD hole.
+                        # Keep a mild tilt under a rim — full untilt at drawer-close height fails IK.
+                        if dz < 0.0 and live_pitch >= self.config.joint_tol:
+                            self._set_joint("reach", min(need, td_cap), ramp=False)
+                            if plan.get("approachLift") is not None:
+                                keep = 0.25 if live_pitch >= 0.25 else live_pitch
+                                if abs(float(self._state()["joints"].get("wrist_pitch", 0.0)) - keep) >= self.config.joint_tol:
+                                    self._set_joint("wrist_pitch", keep)
+                                live_pitch = keep
+                            else:
+                                self._untilt()
+                                live_pitch = 0.0
+                            floor = float(plan["lift"]) + dz
+                            need = max(0.05, min(td_cap, self._reach_to(goal.tolist())))
+                        self._set_joint("reach", need, ramp=False)
+                        self._set_joint("lift", max(float(latest["p"][2] + dz), floor))
+                    except (OutOfReach, SkillFailed) as e:
+                        job.log.append(f"skipped probe {n}: {e}")
+                        continue
+                self._command({"gripper": "close"})
+                self._wait(self.config.grasp_wait_s)
+                if self._state()["gripper"]["holding"]:
+                    if n:
+                        job.log.append(f"grasped {plan['target']} on probe {n} "
+                                       f"(forward {forward * 100:+.0f} cm, left {sideways * 100:+.0f} cm, "
+                                       f"height {dz * 100:+.1f} cm)")
+                    grasped = True
+                    break
+        else:
+            for n, (forward, sideways, dz) in enumerate(probes):
+                seen = None if plan.get('assemblyGrip') else self._state()['entities'].get(plan['target'])
+                latest = aimed(seen) if seen is not None else target
+                o = self._state()["odometry"]
+                heading = np.array([math.cos(o["yaw"]), math.sin(o["yaw"])])
+                left = np.array([-heading[1], heading[0]])
+                goal = np.array(latest["p"][:2]) + forward * heading + sideways * left
+                if n:
+                    self._command({"gripper": "open"})
+                    self._wait(self.config.grasp_wait_s)
+                    self._align_lateral(goal.tolist())
+                    try:
+                        live_pitch = abs(float(self._state()["joints"].get("wrist_pitch", 0.0)))
+                        floor = float(plan["lift"]) if live_pitch > 0.5 else float(plan["lift"]) + dz
+                        need = max(0.05, self._reach_to(goal.tolist()))
+                        # Drawer closes only: 0.52 m @ ~0.65 m @ mild tilt packs joint2. Table / flip
+                        # picks keep the planned reach (high tilt at elevated lift needs the full dock).
+                        td_cap = self.config.tool_down_reach_mid
+                        if plan.get("approachLift") is not None and live_pitch <= 0.5 and need > td_cap:
+                            o2 = self._state()["odometry"]
+                            fwd = (math.cos(o2["yaw"]), math.sin(o2["yaw"]))
+                            for _ in range(6):
+                                if self._reach_to(goal.tolist()) <= td_cap:
+                                    break
+                                self._translate_to(o2["x"] + 0.03 * fwd[0], o2["y"] + 0.03 * fwd[1], o2["yaw"])
+                                o2 = self._state()["odometry"]
+                            need = max(0.05, min(td_cap, self._reach_to(goal.tolist())))
+                        # Shorten / untilt before lowering: lift-first at long reach sits in the USD hole.
+                        # Keep a mild tilt under a rim — full untilt at drawer-close height fails IK.
+                        if dz < 0.0 and live_pitch >= self.config.joint_tol:
+                            self._set_joint("reach", min(need, td_cap), ramp=False)
+                            if plan.get("approachLift") is not None:
+                                keep = 0.25 if live_pitch >= 0.25 else live_pitch
+                                if abs(float(self._state()["joints"].get("wrist_pitch", 0.0)) - keep) >= self.config.joint_tol:
+                                    self._set_joint("wrist_pitch", keep)
+                                live_pitch = keep
+                            else:
+                                self._untilt()
+                                live_pitch = 0.0
+                            floor = float(plan["lift"]) + dz
+                            need = max(0.05, min(td_cap, self._reach_to(goal.tolist())))
+                        self._set_joint("reach", need, ramp=False)
+                        self._set_joint("lift", max(float(latest["p"][2] + dz), floor))
+                    except (OutOfReach, SkillFailed) as e:
+                        job.log.append(f"skipped probe {n}: {e}")
+                        continue
+                self._command({"gripper": "close"})
+                self._wait(self.config.grasp_wait_s)
+                if self._state()["gripper"]["holding"]:
+                    if n:
+                        job.log.append(f"grasped {plan['target']} on probe {n} "
+                                       f"(forward {forward * 100:+.0f} cm, left {sideways * 100:+.0f} cm, "
+                                       f"height {dz * 100:+.1f} cm)")
+                    grasped = True
+                    break
         if not grasped:
             self._command({"gripper": "open"})
             self._wait(0.2)
@@ -1401,10 +2087,21 @@ class SkillExecutor:
             self._untilt()
             self._backoff(plan)
             raise SkillFailed(f"grasp missed {plan['target']} ({len(probes)} probes)")
-        try:
-            held = self._mark_held(plan["target"])
-        except KeyError as exc:
-            raise SkillFailed(str(exc).strip("'")) from None
+        if _assembly_enabled():
+            pickup_state = deepcopy(self._state())
+            try:
+                self._active_grasp_diagnostic = dict(plan=deepcopy(plan), probeIndex=n,
+                    probeForwardM=forward, probeLeftM=sideways, probeHeightM=dz)
+                held = self._mark_held(plan["target"])
+            except KeyError as exc:
+                raise SkillFailed(str(exc).strip("'")) from None
+            finally:
+                self._active_grasp_diagnostic = None
+        else:
+            try:
+                held = self._mark_held(plan["target"])
+            except KeyError as exc:
+                raise SkillFailed(str(exc).strip("'")) from None
         job.log.append(f"grasped {held}")
         # Rise at the grasp reach first. Stretching back to the planned dock reach at the low close
         # height (e.g. 0.50 m @ 0.60 m @ ~0.25 rad after a drawer untilt-close) often has no USD IK;
@@ -1416,23 +2113,60 @@ class SkillExecutor:
         carry = max(float(plan["carryLift"]),
                     self.config.tilted_carry_floor if (pitched or mild_tilt) else 0.0)
         self._set_joint("lift", carry)
-        if not plan.get("keepReach"):
-            if pitched:
-                # Short retract while most-tilted needs the exit floor; keep tilt for pour/flip carry.
-                self._set_joint("lift", max(carry, self.config.tilted_exit_lift, self.config.stow_lift))
-                self._retract(plan)
-            elif mild_tilt:
-                self._exit_long_reach({**plan, "wristPitch": plan.get("wristPitch") or plan.get("closePitch")
-                                       or live_tilt})
-            else:
-                self._retract(plan)
-                if abs(float(self._state()["joints"].get("wrist_pitch", 0.0))) >= self.config.joint_tol:
-                    self._untilt()
-        if "retreat" in plan:
-            self._translate_to(plan["retreat"][0], plan["retreat"][1], plan["yaw"])
-        elif not plan.get('stayNear'):
-            self._backoff(plan)
+        if _assembly_enabled():
+            verify_load = getattr(self, '_verify_load_after_lift', None)
+            if verify_load is not None:
+                held = verify_load(held, job, plan, pickup_state)
+            inspect_hand = getattr(self, '_inspect_hand_after_lift', None)
+            if inspect_hand is not None:
+                observation = inspect_hand(held, requested=True) if plan.get('inspectHand') else inspect_hand(held)
+                if observation is not None:
+                    if job.postcondition is None:
+                        job.postcondition = {}
+                    job.postcondition.setdefault('handObservations', []).append(observation)
+            self._carry_away(plan, carry, pitched, mild_tilt, live_tilt)
+            diagnostic = getattr(self, '_grasp_diagnostic_after_lift', None)
+            if diagnostic is not None:
+                diagnostic(held)
+        else:
+            if not plan.get("keepReach"):
+                if pitched:
+                    # Short retract while most-tilted needs the exit floor; keep tilt for pour/flip carry.
+                    self._set_joint("lift", max(carry, self.config.tilted_exit_lift, self.config.stow_lift))
+                    self._retract(plan)
+                elif mild_tilt:
+                    self._exit_long_reach({**plan, "wristPitch": plan.get("wristPitch") or plan.get("closePitch")
+                                           or live_tilt})
+                else:
+                    self._retract(plan)
+                    if abs(float(self._state()["joints"].get("wrist_pitch", 0.0))) >= self.config.joint_tol:
+                        self._untilt()
+            if "retreat" in plan:
+                self._translate_to(plan["retreat"][0], plan["retreat"][1], plan["yaw"])
+            elif not plan.get('stayNear'):
+                self._backoff(plan)
         job.message = f"holding {held}"
+
+    if _assembly_enabled():
+        @observation_action('carry', transport=True)
+        def _carry_away(self, plan, carry, pitched, mild_tilt, live_tilt):
+            """Transit only after the grasp lift and the existing hand observation."""
+            if not plan.get("keepReach"):
+                if pitched:
+                    # Short retract while most-tilted needs the exit floor; keep tilt for pour/flip carry.
+                    self._set_joint("lift", max(carry, self.config.tilted_exit_lift, self.config.stow_lift))
+                    self._retract(plan)
+                elif mild_tilt:
+                    self._exit_long_reach({**plan, "wristPitch": plan.get("wristPitch") or plan.get("closePitch")
+                                           or live_tilt})
+                else:
+                    self._retract(plan)
+                    if abs(float(self._state()["joints"].get("wrist_pitch", 0.0))) >= self.config.joint_tol:
+                        self._untilt()
+            if "retreat" in plan:
+                self._translate_to(plan["retreat"][0], plan["retreat"][1], plan["yaw"])
+            elif not plan.get('stayNear'):
+                self._backoff(plan)
 
     def _restore_planned_reach(self, plan: dict, xy: list[float]) -> None:
         """Match the live reach to the plan's: back up when the dock landed short, creep in when it
@@ -1541,243 +2275,488 @@ class SkillExecutor:
             self._translate_to(o["x"] + 0.03 * fwd[0], o["y"] + 0.03 * fwd[1], o["yaw"])
             self._align_lateral(xy)
 
-    def _place(self, job: Job, plan: dict) -> None:
-        # Flip-in-air: keep the planned release lift (turn_over already chose the lowest safe drop).
-        # Raising it to the carry floor here made pieces bounce onto neighbours on the table.
-        if "turnLift" in plan:
-            plan["turnLift"] = max(float(plan["turnLift"]),
-                                   float(plan["lift"]) + 0.2, self.config.tilted_carry_floor + 0.15)
-            if plan.get("wristPitch") is None:
-                plan["wristPitch"] = self.config.wrist_pitch_max
-        self._dock(job, plan)
-        if "wristYaw" in plan:
-            self._ramp_joint("wrist_yaw", plan["wristYaw"], self.config.wrist_turn_s)
-        grip = plan.get("gripSpot", plan["spot"])
-        self._restore_planned_reach(plan, grip)
-        if "turnLift" in plan:
-            # Turned over in the air above the spot, then lowered as far as the arm reaches so.
-            # Reach and tilt first: ramping lift alone through ~0.87 m with a short carrying reach
-            # and pitch 1.05 has no USD IK solution (the servo target would sit in the hole).
-            self._align_lateral(grip)
-            self._reach_out(grip, plan.get("wristPitch"))
-            self._set_joint("lift", plan["turnLift"])
-            self._command({"wrist_roll": plan["wristRoll"], "turnOver": True})
-            self._set_joint("wrist_roll", plan["wristRoll"], ramp=False)
-        elif 'assemblyTurnLift' in plan:
-            self._set_joint('lift', plan['assemblyTurnLift'])
-            self._align_lateral(grip)
-            self._reach_out(grip, plan.get('wristPitch'))
-            self._ramp_joint('wrist_roll', plan['wristRoll'], self.config.wrist_turn_s)
-            self._set_joint('wrist_roll', plan['wristRoll'], ramp=False, tol=.02)
-        elif "wristRoll" in plan:
-            self._ramp_joint("wrist_roll", plan["wristRoll"], self.config.wrist_turn_s)
-        if "placementToleranceM" in plan:
-            self._align_lateral(grip, tol=min(self.config.dock_position_tol, plan["placementToleranceM"] / 4))
-        else:
-            self._align_lateral(grip)
-        self._restore_planned_reach(plan, grip)
-        self._reach_over(plan, grip, plan["lift"])
-        self._settle_for_release()
-        if not self._over_support(plan):
-            error = float(np.linalg.norm(self._gripper_xy() - np.asarray(grip))) if "placementToleranceM" in plan else None
-            self._withdraw(plan)
-            self._backoff(plan)
-            detail = (f"; [RSI_MATING_RELEASE] pre-retreat XY error {error:.3f} m, "
-                      f"limit {plan['placementToleranceM']:.3f} m or release outside support" if error is not None else "")
-            raise SkillFailed(f"gripper is not over {plan['support']}; keeping {plan['object']}" + detail)
-        if self._validate_placement is not None:
-            self._validate_placement(plan)
-        self._command({"gripper": "open"})
-        tip = float(plan["wristRoll"]) if "wristRoll" in plan else None
-        self._released(plan["object"], plan["spot"], target=plan.get("placementTarget"), tip_roll=tip)
-        stamp = self._state().get('stamp')
-        if stamp is not None:
-            plan['releasedAt'] = stamp
-        insert_release = bool(plan.get("insert") or plan.get("insertRelease"))
-        if insert_release:
-            self._wait(self.config.insert_release_wait_s)
-        else:
-            self._wait(self.config.release_wait_s)
+    if _assembly_enabled():
+        def _refine_release_xy(self, job, plan, grip):
+            """One encoder correction, then report residual; no new release veto."""
+            before = float(np.linalg.norm(self._gripper_xy()-np.asarray(grip)))
+            if .003 < before <= .03:
+                try:
+                    self._align_lateral(grip, tol=.002)
+                    self._set_joint('reach', self._reach_to(grip), ramp=False, tol=.003)
+                    self._settle_for_release()
+                except (SkillFailed, OutOfReach) as exc:
+                    job.log.append('release refinement advisory: '+str(exc))
+            plan['releaseXYCheck'] = dict(beforeM=before,
+                afterM=float(np.linalg.norm(self._gripper_xy()-np.asarray(grip))),
+                source='robot_encoders', observedHoleAlignment=False)
+
+        def _validate_surface_retry(self, job, plan):
+            """One automatic re-observation per job, then expose the exact condition."""
+            from steward.ego.place_surface import SurfaceMoved
+            try:
+                self._validate_placement(plan)
+            except SurfaceMoved:
+                surface = deepcopy(plan['placementSurface'])
+                job.postcondition['placementSurface'] = surface
+                if getattr(job, '_surface_reobserved', False) or self._prepare_place_surface is None:
+                    raise
+                job._surface_reobserved = True
+                job.postcondition['surfaceReobservation'] = surface['validation']
+                replacement = self._prepare_place_surface(job, plan)
+                if replacement is not plan:
+                    plan.clear(); plan.update(replacement)
+                # Repeat approach with the newly admitted height/IK, including when
+                # reacquisition returned an assumed baseline instead of a plane.
+                return True
+            return False
+
+    if _assembly_enabled():
+        @timed("place")
+        @observation_action('place')
+        def _place(self, job: Job, plan: dict) -> None:
+            if self._prepare_place_surface is not None and not plan.get('surfaceRefreshed'):
+                replacement = self._prepare_place_surface(job, plan)
+                if replacement is not plan:
+                    plan.clear(); plan.update(replacement)
+            if plan.get('placementSurface') and self._validate_placement is not None:
+                if self._validate_surface_retry(job, plan):
+                    return self._place(job, plan)
+            if plan.get("seatEndpoint"):
+                from steward.ego.fasten_seat import endpoint_place
+                return endpoint_place(self, job, plan)
+            # Flip-in-air: keep the planned release lift (turn_over already chose the lowest safe drop).
+            # Raising it to the carry floor here made pieces bounce onto neighbours on the table.
+            if "turnLift" in plan:
+                plan["turnLift"] = max(float(plan["turnLift"]),
+                                       float(plan["lift"]) + 0.2, self.config.tilted_carry_floor + 0.15)
+                if plan.get("wristPitch") is None:
+                    plan["wristPitch"] = self.config.wrist_pitch_max
+            from steward.ego import placement_xy_compensation
+            placement_xy_compensation.clear_before_dock(self, plan)
+            self._dock(job, plan)
+            if "wristYaw" in plan:
+                self._ramp_joint("wrist_yaw", plan["wristYaw"], self.config.wrist_turn_s)
+            grip = plan.get("gripSpot", plan["spot"])
+            self._restore_planned_reach(plan, grip)
+            if "turnLift" in plan:
+                # Turned over in the air above the spot, then lowered as far as the arm reaches so.
+                # Reach and tilt first: ramping lift alone through ~0.87 m with a short carrying reach
+                # and pitch 1.05 has no USD IK solution (the servo target would sit in the hole).
+                self._align_lateral(grip)
+                self._reach_out(grip, plan.get("wristPitch"))
+                self._set_joint("lift", plan["turnLift"])
+                self._command({"wrist_roll": plan["wristRoll"], "turnOver": True})
+                self._set_joint("wrist_roll", plan["wristRoll"], ramp=False)
+            elif 'assemblyTurnLift' in plan:
+                self._set_joint('lift', plan['assemblyTurnLift'])
+                self._align_lateral(grip)
+                self._reach_out(grip, plan.get('wristPitch'))
+                self._ramp_joint('wrist_roll', plan['wristRoll'], self.config.wrist_turn_s)
+                self._set_joint('wrist_roll', plan['wristRoll'], ramp=False, tol=.02)
+            elif "wristRoll" in plan:
+                self._ramp_joint("wrist_roll", plan["wristRoll"], self.config.wrist_turn_s)
+            if "placementToleranceM" in plan:
+                self._align_lateral(grip, tol=min(self.config.dock_position_tol, plan["placementToleranceM"] / 4))
+            else:
+                self._align_lateral(grip)
+            self._restore_planned_reach(plan, grip)
+            precision = getattr(self, '_precision_hover', None)
+            if plan.get('placementSurface') and self._validate_placement is not None:
+                if self._validate_surface_retry(job, plan):
+                    return self._place(job, plan)
+            floor = getattr(self, '_precision_release_floor', None)
+            if floor: floor(plan, plan)
+            from steward.ego.edge_geometry import enabled as contact_window_enabled
+            from steward.ego import assembly_release_height
+            assembly_vertical = assembly_release_height.enabled() and plan.get('assemblyVerticalRelease')
+            edge_low = assembly_vertical or (contact_window_enabled() and plan.get("edgeLowRelease"))
+            from steward.ego import relative_entrance_servo
+            relative_pair = (relative_entrance_servo.applies(plan) and precision is not None
+                             and getattr(self, '_precision_component_native', True))
+            hover_lift = (plan['placementXYCompensationClearLift'] if relative_pair else
+                plan["lift"] + (plan["edgeDescentM"] if edge_low else .012 if plan.get("controlledSeat") or precision else 0.))
+            self._reach_over(plan, grip, hover_lift)
+            if edge_low and not relative_pair:
+                self._ramp_joint("lift", plan["lift"], max(self.config.wrist_turn_s, self.config.release_wait_s))
+            if precision and precision(plan):
+                return
+            if relative_pair:
+                grip = plan.get('gripSpot', plan['spot'])
+            tip_entry = getattr(self, '_precision_tip_entry', None)
+            if tip_entry:
+                tip_entry(plan)
+                grip = plan.get('gripSpot', plan['spot'])
+            if precision and not plan.get('controlledSeat'):
+                observe=getattr(self,'_precision_descent',None)
+                if relative_pair:
+                    relative_entrance_servo.descend(self, plan)
+                elif observe:
+                    from steward.ego.tip_entry_servo import ordinary_descent
+                    ordinary_descent(self,plan,observe)
+                else:
+                    self._set_joint('lift', plan['lift'])
+            if plan.get("controlledSeat"):
+                from steward.ego.fasten_seat import lower
+                lower(self, plan)
+            self._settle_for_release()
+            from steward.ego import placement_xy_compensation
+            if placement_xy_compensation.applies(plan) and not relative_pair:
+                placement_xy_compensation.finish(self, plan)
+            if plan.get('refineReleaseXY') and not placement_xy_compensation.applies(plan):
+                self._refine_release_xy(job, plan, grip)
+            if edge_low and not self._over_support(plan):
+                if not plan.get('workingFaceStationaryPlacement') and not placement_xy_compensation.applies(plan):
+                    self._refine_release_xy(job, plan, grip)
+                plan["edgeReleaseUnconfirmed"] = not self._over_support(plan)
+            if not self._over_support(plan) and not edge_low:
+                error = float(np.linalg.norm(self._gripper_xy() - np.asarray(grip))) if "placementToleranceM" in plan else None
+                self._withdraw(plan)
+                self._backoff(plan)
+                detail = (f"; [RSI_MATING_RELEASE] pre-retreat XY error {error:.3f} m, "
+                          f"limit {plan['placementToleranceM']:.3f} m or release outside support" if error is not None else "")
+                raise SkillFailed(f"gripper is not over {plan['support']}; keeping {plan['object']}" + detail)
+            if self._validate_placement is not None:
+                if self._validate_surface_retry(job, plan):
+                    return self._place(job, plan)
+            before_release = getattr(self, '_precision_before_release', None)
+            if before_release:
+                before_release(plan)
+            release_floor = getattr(self, '_assembly_release_floor', None)
+            if assembly_vertical and release_floor:
+                release_floor(plan)
+            from steward.ego.placement_support_margin import inward_release
+            if not (relative_pair and plan.get('_relative_entrance_servo', {}).get('active')):
+                inward_release(self, plan, job)
+            component_finish = getattr(self, '_precision_component_finish', None)
+            if component_finish:
+                component_finish(plan)
+            self._command({"gripper": "open"})
+            plan["releaseExecuted"] = True
+            binding = getattr(self, '_load_binding_receipt', lambda eid: None)(plan['object'])
+            if binding:
+                from steward.ego.grasp_binding import public
+                plan.update(public(binding), newReleaseExecuted=True,
+                    specifiedTargetReleased=bool(binding['transportCommitted']))
+            plan["releasedAt"] = self._state().get("stamp", 0.)
+            self._released(plan["object"], plan["spot"], plan.get("placementTarget"))
+            stamp = self._state().get('stamp')
+            if stamp is not None:
+                plan['releasedAt'] = stamp
+            self._wait(max(.6, self.config.release_wait_s) if plan.get("controlledSeat") else self.config.release_wait_s)
+            after_release = getattr(self, "_precision_after_release", None)
+            if after_release:
+                after_release(plan)
             # Flip-in-air: let the piece finish falling before any exit motion.
             if "turnLift" in plan:
                 self._wait(max(0.5, self.config.release_wait_s))
-        job.log.append(f"released {plan['object']} on {plan['support']}")
-        if plan.get('stayNear') and 'turnLift' not in plan:
-            # Clear vertically before retracting, but keep the base at this work
-            # station. The next pick still receives its own checked approach.
-            self._exit_long_reach(plan)
-            for key in ('wrist_roll','wrist_yaw'):
-                if abs(self._state()['joints'].get(key,0.)) >= self.config.joint_tol:
-                    self._set_joint(key,0.)
-            self._report_placement(job, plan['object'])
-            return
-        # Once the object is released the place has succeeded: an exit that hits a USD hole (common
-        # after flip-in-air with a residual wrist composition) must not fail the skill.
-        try:
-            if insert_release:
-                # Tip-down insert: linger, rise clear while still rolled, then draw back — do not
-                # snap-retract or unroll beside the screw (that tips it out of the hole).
-                try:
-                    lift_now = float(self._state()["joints"].get("lift", plan["lift"]))
-                    self._set_joint("lift", lift_now + self.config.insert_clear_dz)
-                except (SkillFailed, OutOfReach):
-                    pass
-                self._wait(0.25)
-                reach_now = float(self._state()["joints"].get("reach", 0.0))
-                target_reach = max(self.config.retract_reach, reach_now - 0.18)
-                try:
-                    self._ramp_joint("reach", target_reach,
-                                    abs(reach_now - target_reach) / max(self.config.gentle_lift_speed, 0.05))
-                except (SkillFailed, OutOfReach):
+            job.log.append(f"released {plan['object']} on {plan['support']}")
+            if relative_pair and not edge_low:
+                self._set_joint('lift', max(float(self._state()['joints']['lift']), plan['placementXYCompensationClearLift']))
+            if edge_low:
+                # Lift vertically while holding reach and wrist fixed, before any
+                # horizontal retreat or wrist reset can drag the narrow support.
+                self._set_joint("lift", float(self._state()["joints"]["lift"])+plan["edgeVerticalClearanceM"])
+            if plan.get('stayNear') and 'turnLift' not in plan:
+                # Clear vertically before retracting, but keep the base at this work
+                # station. The next pick still receives its own checked approach.
+                self._exit_long_reach(plan)
+                for key in ('wrist_roll','wrist_yaw'):
+                    if abs(self._state()['joints'].get(key,0.)) >= self.config.joint_tol:
+                        self._set_joint(key,0.)
+                self._report_placement(job, plan['object'])
+                return
+            # Once the object is released the place has succeeded: an exit that hits a USD hole (common
+            # after flip-in-air with a residual wrist composition) must not fail the skill.
+            try:
+                if "turnLift" in plan:
+                    # Drive the base clear before any arm motion: tip retract/lift/unroll over the
+                    # release pose shoved flipped pieces onto neighbours on the table.
+                    try:
+                        self._backoff(plan)
+                    except (SkillFailed, OutOfReach):
+                        pass
+                    try:
+                        o = self._state()["odometry"]
+                        back = (-math.cos(o["yaw"]), -math.sin(o["yaw"]))
+                        self._translate_to(o["x"] + 0.20 * back[0], o["y"] + 0.20 * back[1], o["yaw"])
+                    except (SkillFailed, OutOfReach):
+                        pass
                     try:
                         self._set_joint("reach", self.config.retract_reach, ramp=False)
                     except (SkillFailed, OutOfReach):
                         pass
-                if "wristRoll" in plan and abs(float(self._state()["joints"].get("wrist_roll", 0.0))) >= self.config.joint_tol:
-                    self._ramp_joint("wrist_roll", 0.0, self.config.wrist_turn_s)
+                    try:
+                        self._set_joint("lift", plan["turnLift"])
+                    except (SkillFailed, OutOfReach):
+                        pass
+                    self._command({"wrist_roll": 0.0, "turnOver": True})
+                    try:
+                        self._set_joint("wrist_roll", 0.0, ramp=False)
+                    except (SkillFailed, OutOfReach):
+                        pass
+                else:
+                    reach_now = float(self._state()["joints"].get("reach", 0.0))
+                    try:
+                        self._set_joint("reach", max(self.config.retract_reach, reach_now - 0.22), ramp=False)
+                    except (SkillFailed, OutOfReach):
+                        try:
+                            self._set_joint("reach", self.config.retract_reach, ramp=False)
+                        except (SkillFailed, OutOfReach):
+                            pass
                 self._exit_long_reach(plan)
+                if "wristRoll" in plan and abs(float(self._state()["joints"].get("wrist_roll", 0.0))) >= self.config.joint_tol:
+                    self._set_joint("wrist_roll", 0.0)
                 self._set_joint("lift", self.config.stow_lift)
                 if "wristYaw" in plan:
                     self._set_joint("wrist_yaw", 0.0)
                 self._backoff(plan)
-            elif "turnLift" in plan:
-                # Drive the base clear before any arm motion: tip retract/lift/unroll over the
-                # release pose shoved flipped pieces onto neighbours on the table.
+            except (SkillFailed, OutOfReach) as exc:
+                job.log.append(f"exit after place: {exc}")
                 try:
                     self._backoff(plan)
                 except (SkillFailed, OutOfReach):
                     pass
-                try:
-                    o = self._state()["odometry"]
-                    back = (-math.cos(o["yaw"]), -math.sin(o["yaw"]))
-                    self._translate_to(o["x"] + 0.20 * back[0], o["y"] + 0.20 * back[1], o["yaw"])
-                except (SkillFailed, OutOfReach):
-                    pass
-                try:
-                    self._set_joint("reach", self.config.retract_reach, ramp=False)
-                except (SkillFailed, OutOfReach):
-                    pass
-                try:
-                    self._set_joint("lift", plan["turnLift"])
-                except (SkillFailed, OutOfReach):
-                    pass
-                self._command({"wrist_roll": 0.0, "turnOver": True})
-                try:
-                    self._set_joint("wrist_roll", 0.0, ramp=False)
-                except (SkillFailed, OutOfReach):
-                    pass
-                self._exit_long_reach(plan)
-                if "wristRoll" in plan and abs(float(self._state()["joints"].get("wrist_roll", 0.0))) >= self.config.joint_tol:
-                    self._set_joint("wrist_roll", 0.0)
-                self._set_joint("lift", self.config.stow_lift)
-                if "wristYaw" in plan:
-                    self._set_joint("wrist_yaw", 0.0)
-                self._backoff(plan)
+            job.message = f"placed {plan['object']} on {plan['support']}"
+            self._report_placement(job, plan["object"])
+    else:
+        def _place(self, job: Job, plan: dict) -> None:
+            # Flip-in-air: keep the planned release lift (turn_over already chose the lowest safe drop).
+            # Raising it to the carry floor here made pieces bounce onto neighbours on the table.
+            if "turnLift" in plan:
+                plan["turnLift"] = max(float(plan["turnLift"]),
+                                       float(plan["lift"]) + 0.2, self.config.tilted_carry_floor + 0.15)
+                if plan.get("wristPitch") is None:
+                    plan["wristPitch"] = self.config.wrist_pitch_max
+            self._dock(job, plan)
+            if "wristYaw" in plan:
+                self._ramp_joint("wrist_yaw", plan["wristYaw"], self.config.wrist_turn_s)
+            grip = plan.get("gripSpot", plan["spot"])
+            self._restore_planned_reach(plan, grip)
+            if "turnLift" in plan:
+                # Turned over in the air above the spot, then lowered as far as the arm reaches so.
+                # Reach and tilt first: ramping lift alone through ~0.87 m with a short carrying reach
+                # and pitch 1.05 has no USD IK solution (the servo target would sit in the hole).
+                self._align_lateral(grip)
+                self._reach_out(grip, plan.get("wristPitch"))
+                self._set_joint("lift", plan["turnLift"])
+                self._command({"wrist_roll": plan["wristRoll"], "turnOver": True})
+                self._set_joint("wrist_roll", plan["wristRoll"], ramp=False)
+            elif 'assemblyTurnLift' in plan:
+                self._set_joint('lift', plan['assemblyTurnLift'])
+                self._align_lateral(grip)
+                self._reach_out(grip, plan.get('wristPitch'))
+                self._ramp_joint('wrist_roll', plan['wristRoll'], self.config.wrist_turn_s)
+                self._set_joint('wrist_roll', plan['wristRoll'], ramp=False, tol=.02)
+            elif "wristRoll" in plan:
+                self._ramp_joint("wrist_roll", plan["wristRoll"], self.config.wrist_turn_s)
+            if "placementToleranceM" in plan:
+                self._align_lateral(grip, tol=min(self.config.dock_position_tol, plan["placementToleranceM"] / 4))
             else:
-                reach_now = float(self._state()["joints"].get("reach", 0.0))
-                try:
-                    self._set_joint("reach", max(self.config.retract_reach, reach_now - 0.22), ramp=False)
-                except (SkillFailed, OutOfReach):
+                self._align_lateral(grip)
+            self._restore_planned_reach(plan, grip)
+            self._reach_over(plan, grip, plan["lift"])
+            self._settle_for_release()
+            if not self._over_support(plan):
+                error = float(np.linalg.norm(self._gripper_xy() - np.asarray(grip))) if "placementToleranceM" in plan else None
+                self._withdraw(plan)
+                self._backoff(plan)
+                detail = (f"; [RSI_MATING_RELEASE] pre-retreat XY error {error:.3f} m, "
+                          f"limit {plan['placementToleranceM']:.3f} m or release outside support" if error is not None else "")
+                raise SkillFailed(f"gripper is not over {plan['support']}; keeping {plan['object']}" + detail)
+            if self._validate_placement is not None:
+                self._validate_placement(plan)
+            self._command({"gripper": "open"})
+            tip = float(plan["wristRoll"]) if "wristRoll" in plan else None
+            self._released(plan["object"], plan["spot"], target=plan.get("placementTarget"), tip_roll=tip)
+            stamp = self._state().get('stamp')
+            if stamp is not None:
+                plan['releasedAt'] = stamp
+            insert_release = bool(plan.get("insert") or plan.get("insertRelease"))
+            if insert_release:
+                self._wait(self.config.insert_release_wait_s)
+            else:
+                self._wait(self.config.release_wait_s)
+                # Flip-in-air: let the piece finish falling before any exit motion.
+                if "turnLift" in plan:
+                    self._wait(max(0.5, self.config.release_wait_s))
+            job.log.append(f"released {plan['object']} on {plan['support']}")
+            if plan.get('stayNear') and 'turnLift' not in plan:
+                # Clear vertically before retracting, but keep the base at this work
+                # station. The next pick still receives its own checked approach.
+                self._exit_long_reach(plan)
+                for key in ('wrist_roll','wrist_yaw'):
+                    if abs(self._state()['joints'].get(key,0.)) >= self.config.joint_tol:
+                        self._set_joint(key,0.)
+                self._report_placement(job, plan['object'])
+                return
+            # Once the object is released the place has succeeded: an exit that hits a USD hole (common
+            # after flip-in-air with a residual wrist composition) must not fail the skill.
+            try:
+                if insert_release:
+                    # Tip-down insert: linger, rise clear while still rolled, then draw back — do not
+                    # snap-retract or unroll beside the screw (that tips it out of the hole).
+                    try:
+                        lift_now = float(self._state()["joints"].get("lift", plan["lift"]))
+                        self._set_joint("lift", lift_now + self.config.insert_clear_dz)
+                    except (SkillFailed, OutOfReach):
+                        pass
+                    self._wait(0.25)
+                    reach_now = float(self._state()["joints"].get("reach", 0.0))
+                    target_reach = max(self.config.retract_reach, reach_now - 0.18)
+                    try:
+                        self._ramp_joint("reach", target_reach,
+                                        abs(reach_now - target_reach) / max(self.config.gentle_lift_speed, 0.05))
+                    except (SkillFailed, OutOfReach):
+                        try:
+                            self._set_joint("reach", self.config.retract_reach, ramp=False)
+                        except (SkillFailed, OutOfReach):
+                            pass
+                    if "wristRoll" in plan and abs(float(self._state()["joints"].get("wrist_roll", 0.0))) >= self.config.joint_tol:
+                        self._ramp_joint("wrist_roll", 0.0, self.config.wrist_turn_s)
+                    self._exit_long_reach(plan)
+                    self._set_joint("lift", self.config.stow_lift)
+                    if "wristYaw" in plan:
+                        self._set_joint("wrist_yaw", 0.0)
+                    self._backoff(plan)
+                elif "turnLift" in plan:
+                    # Drive the base clear before any arm motion: tip retract/lift/unroll over the
+                    # release pose shoved flipped pieces onto neighbours on the table.
+                    try:
+                        self._backoff(plan)
+                    except (SkillFailed, OutOfReach):
+                        pass
+                    try:
+                        o = self._state()["odometry"]
+                        back = (-math.cos(o["yaw"]), -math.sin(o["yaw"]))
+                        self._translate_to(o["x"] + 0.20 * back[0], o["y"] + 0.20 * back[1], o["yaw"])
+                    except (SkillFailed, OutOfReach):
+                        pass
                     try:
                         self._set_joint("reach", self.config.retract_reach, ramp=False)
                     except (SkillFailed, OutOfReach):
                         pass
-                self._exit_long_reach(plan)
-                if "wristRoll" in plan and abs(float(self._state()["joints"].get("wrist_roll", 0.0))) >= self.config.joint_tol:
-                    self._set_joint("wrist_roll", 0.0)
-                self._set_joint("lift", self.config.stow_lift)
-                if "wristYaw" in plan:
-                    self._set_joint("wrist_yaw", 0.0)
-                self._backoff(plan)
-        except (SkillFailed, OutOfReach) as exc:
-            job.log.append(f"exit after place: {exc}")
-            try:
-                self._backoff(plan)
-            except (SkillFailed, OutOfReach):
-                pass
-        job.message = f"placed {plan['object']} on {plan['support']}"
-        self._report_placement(job, plan["object"])
+                    try:
+                        self._set_joint("lift", plan["turnLift"])
+                    except (SkillFailed, OutOfReach):
+                        pass
+                    self._command({"wrist_roll": 0.0, "turnOver": True})
+                    try:
+                        self._set_joint("wrist_roll", 0.0, ramp=False)
+                    except (SkillFailed, OutOfReach):
+                        pass
+                    self._exit_long_reach(plan)
+                    if "wristRoll" in plan and abs(float(self._state()["joints"].get("wrist_roll", 0.0))) >= self.config.joint_tol:
+                        self._set_joint("wrist_roll", 0.0)
+                    self._set_joint("lift", self.config.stow_lift)
+                    if "wristYaw" in plan:
+                        self._set_joint("wrist_yaw", 0.0)
+                    self._backoff(plan)
+                else:
+                    reach_now = float(self._state()["joints"].get("reach", 0.0))
+                    try:
+                        self._set_joint("reach", max(self.config.retract_reach, reach_now - 0.22), ramp=False)
+                    except (SkillFailed, OutOfReach):
+                        try:
+                            self._set_joint("reach", self.config.retract_reach, ramp=False)
+                        except (SkillFailed, OutOfReach):
+                            pass
+                    self._exit_long_reach(plan)
+                    if "wristRoll" in plan and abs(float(self._state()["joints"].get("wrist_roll", 0.0))) >= self.config.joint_tol:
+                        self._set_joint("wrist_roll", 0.0)
+                    self._set_joint("lift", self.config.stow_lift)
+                    if "wristYaw" in plan:
+                        self._set_joint("wrist_yaw", 0.0)
+                    self._backoff(plan)
+            except (SkillFailed, OutOfReach) as exc:
+                job.log.append(f"exit after place: {exc}")
+                try:
+                    self._backoff(plan)
+                except (SkillFailed, OutOfReach):
+                    pass
+            job.message = f"placed {plan['object']} on {plan['support']}"
+            self._report_placement(job, plan["object"])
 
-    def _insert_screw_into_hole(self, job: Job, plan: dict) -> None:
-        """Place the screw tip-down into a hole, verify it stands head-up in the hole, retry on miss.
+    if not _assembly_enabled():
+        def _insert_screw_into_hole(self, job: Job, plan: dict) -> None:
+            """Place the screw tip-down into a hole, verify it stands head-up in the hole, retry on miss.
 
-        Each failed verify re-picks the screw and re-plans the place (via runtime callbacks) until
-        ``maxAttempts`` is exhausted.
-        """
-        insert = dict(plan.get("insertParams") or {})
-        screw_id = str(insert.get("object") or plan.get("object") or "")
-        attempts = int(plan.get("maxAttempts") or insert.get("maxAttempts") or 3)
-        place_plan = plan
-        last_msg = "not seated"
-        for attempt in range(1, attempts + 1):
-            if self._stop.is_set():
-                raise SkillStopped()
-            holding = bool(self._state().get("gripper", {}).get("holding"))
-            if not holding:
-                if self._replan_pick is None or self._replan_insert_place is None:
-                    raise SkillFailed(
-                        f"insert attempt {attempt}: screw not in gripper and no replan hooks")
-                pick_plan = self._replan_pick(screw_id)
-                if pick_plan is None:
-                    raise SkillFailed(
-                        f"insert attempt {attempt}: cannot re-pick {screw_id} after a miss ({last_msg})")
-                job.log.append(f"insert attempt {attempt}: re-picking {screw_id}")
-                self._pick(job, pick_plan)
-                place_plan = self._replan_insert_place(insert)
-                if place_plan is None:
-                    raise SkillFailed(
-                        f"insert attempt {attempt}: cannot re-plan tip-down place for {screw_id}")
-            self._place(job, place_plan)
-            if self._verify_screw_seat is None:
-                job.message = f"inserted {screw_id} (no seat verify configured)"
-                return
-            ok, msg = self._verify_screw_seat(screw_id)
-            if ok:
-                job.log.append(msg)
-                job.message = f"inserted {screw_id} tip-down into hole"
-                return
-            last_msg = msg
-            job.log.append(f"insert attempt {attempt}/{attempts} failed: {msg}")
+            Each failed verify re-picks the screw and re-plans the place (via runtime callbacks) until
+            ``maxAttempts`` is exhausted.
+            """
+            insert = dict(plan.get("insertParams") or {})
+            screw_id = str(insert.get("object") or plan.get("object") or "")
+            attempts = int(plan.get("maxAttempts") or insert.get("maxAttempts") or 3)
             place_plan = plan
-        raise SkillFailed(
-            f"insert_screw_into_hole failed after {attempts} attempts ({last_msg}); "
-            "screw must stand tip-down in the hole with head up")
+            last_msg = "not seated"
+            for attempt in range(1, attempts + 1):
+                if self._stop.is_set():
+                    raise SkillStopped()
+                holding = bool(self._state().get("gripper", {}).get("holding"))
+                if not holding:
+                    if self._replan_pick is None or self._replan_insert_place is None:
+                        raise SkillFailed(
+                            f"insert attempt {attempt}: screw not in gripper and no replan hooks")
+                    pick_plan = self._replan_pick(screw_id)
+                    if pick_plan is None:
+                        raise SkillFailed(
+                            f"insert attempt {attempt}: cannot re-pick {screw_id} after a miss ({last_msg})")
+                    job.log.append(f"insert attempt {attempt}: re-picking {screw_id}")
+                    self._pick(job, pick_plan)
+                    place_plan = self._replan_insert_place(insert)
+                    if place_plan is None:
+                        raise SkillFailed(
+                            f"insert attempt {attempt}: cannot re-plan tip-down place for {screw_id}")
+                self._place(job, place_plan)
+                if self._verify_screw_seat is None:
+                    job.message = f"inserted {screw_id} (no seat verify configured)"
+                    return
+                ok, msg = self._verify_screw_seat(screw_id)
+                if ok:
+                    job.log.append(msg)
+                    job.message = f"inserted {screw_id} tip-down into hole"
+                    return
+                last_msg = msg
+                job.log.append(f"insert attempt {attempt}/{attempts} failed: {msg}")
+                place_plan = plan
+            raise SkillFailed(
+                f"insert_screw_into_hole failed after {attempts} attempts ({last_msg}); "
+                "screw must stand tip-down in the hole with head up")
 
-    def _drive_screw(self, job: Job, plan: dict) -> None:
-        """Roll the screwdriver bit-down (shaft must already cross the gripper), press onto the
-        screw head, hold to tighten, then raise — still holding the driver for the next screw.
+        def _drive_screw(self, job: Job, plan: dict) -> None:
+            """Roll the screwdriver bit-down (shaft must already cross the gripper), press onto the
+            screw head, hold to tighten, then raise — still holding the driver for the next screw.
 
-        Predict refuses an end-on grasp (shaft on the wrist-roll axis). Re-assert wrist roll after
-        reaching out (dock/reach can clear the wrist).
-        """
-        self._dock(job, plan)
-        grip = plan.get("gripSpot", plan["spot"])
-        self._align_lateral(grip)
-        self._restore_planned_reach(plan, grip)
-        if "wristYaw" in plan:
-            self._ramp_joint("wrist_yaw", plan["wristYaw"], self.config.wrist_turn_s)
-        if "wristRoll" in plan:
-            self._ramp_joint("wrist_roll", plan["wristRoll"], self.config.wrist_turn_s)
-            job.log.append(f"stood screwdriver bit-down (roll={plan['wristRoll']:.2f})")
-        self._set_joint("lift", plan["lift"])
-        self._reach_out(grip, plan.get("wristPitch"))
-        self._align_lateral(grip)
-        # Reach/dock merges often drop wrist setpoints; lock bit-down again before pressing.
-        if "wristYaw" in plan:
-            self._set_joint("wrist_yaw", plan["wristYaw"])
-        if "wristRoll" in plan:
-            self._set_joint("wrist_roll", plan["wristRoll"])
-        self._set_joint("lift", plan["pressLift"])
-        self._wait(float(plan.get("driveS", 1.5)))
-        job.log.append(f"drove {plan['target']} with {plan['object']}")
-        # Raise while keeping the bit down so the next drive_screw starts upright.
-        self._set_joint("lift", plan["lift"])
-        try:
-            self._exit_long_reach(plan)
-        except (SkillFailed, OutOfReach) as exc:
-            job.log.append(f"exit after drive_screw: {exc}")
-        self._backoff(plan)
-        job.message = f"drove {plan['target']} with {plan['object']}"
+            Predict refuses an end-on grasp (shaft on the wrist-roll axis). Re-assert wrist roll after
+            reaching out (dock/reach can clear the wrist).
+            """
+            self._dock(job, plan)
+            grip = plan.get("gripSpot", plan["spot"])
+            self._align_lateral(grip)
+            self._restore_planned_reach(plan, grip)
+            if "wristYaw" in plan:
+                self._ramp_joint("wrist_yaw", plan["wristYaw"], self.config.wrist_turn_s)
+            if "wristRoll" in plan:
+                self._ramp_joint("wrist_roll", plan["wristRoll"], self.config.wrist_turn_s)
+                job.log.append(f"stood screwdriver bit-down (roll={plan['wristRoll']:.2f})")
+            self._set_joint("lift", plan["lift"])
+            self._reach_out(grip, plan.get("wristPitch"))
+            self._align_lateral(grip)
+            # Reach/dock merges often drop wrist setpoints; lock bit-down again before pressing.
+            if "wristYaw" in plan:
+                self._set_joint("wrist_yaw", plan["wristYaw"])
+            if "wristRoll" in plan:
+                self._set_joint("wrist_roll", plan["wristRoll"])
+            self._set_joint("lift", plan["pressLift"])
+            self._wait(float(plan.get("driveS", 1.5)))
+            job.log.append(f"drove {plan['target']} with {plan['object']}")
+            # Raise while keeping the bit down so the next drive_screw starts upright.
+            self._set_joint("lift", plan["lift"])
+            try:
+                self._exit_long_reach(plan)
+            except (SkillFailed, OutOfReach) as exc:
+                job.log.append(f"exit after drive_screw: {exc}")
+            self._backoff(plan)
+            job.message = f"drove {plan['target']} with {plan['object']}"
 
     def _pour(self, job: Job, plan: dict) -> None:
         """Hold the container low over the spot, tip it slowly about the arm, wait for the contents
@@ -2096,11 +3075,30 @@ class SkillExecutor:
             self._set_joint("reach", plan["reach"])
         if "wristRoll" in plan:
             self._ramp_joint("wrist_roll", plan["wristRoll"], self.config.wrist_turn_s)
+        if _assembly_enabled():
+            precision = getattr(self, '_precision_hover', None)
+            self._set_joint("lift", plan["lift"] + (.012 if precision else 0.))
+            if precision and precision(plan):
+                return
         self._set_joint("lift", plan["lift"])
+        if _assembly_enabled():
+            if self._validate_placement is not None:
+                self._validate_placement(plan)
+            before_release = getattr(self, '_precision_before_release', None)
+            if before_release:
+                before_release(plan)
         self._command({"gripper": "open"})
-        tip = float(plan["wristRoll"]) if "wristRoll" in plan else None
-        self._released(plan["object"], plan["floor"], tip_roll=tip)
+        if _assembly_enabled():
+            plan.update(releaseExecuted=True, releasedAt=self._state()['stamp'])
+            self._released(plan["object"], plan["floor"])
+        else:
+            tip = float(plan["wristRoll"]) if "wristRoll" in plan else None
+            self._released(plan["object"], plan["floor"], tip_roll=tip)
         self._wait(self.config.release_wait_s)
+        if _assembly_enabled():
+            after_release = getattr(self, '_precision_after_release', None)
+            if after_release:
+                after_release(plan)
         job.log.append(f"released {plan['object']} on the floor at ({plan['floor'][0]:.2f}, {plan['floor'][1]:.2f})")
         if "wristRoll" in plan:
             self._set_joint("wrist_roll", 0.0)

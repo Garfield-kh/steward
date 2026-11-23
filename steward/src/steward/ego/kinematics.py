@@ -1,4 +1,7 @@
 """Robot-owned forward kinematics and gripper transforms from synchronized encoder packets."""
+
+from steward.assembly_profile import enabled as _assembly_enabled
+
 import math
 
 import numpy as np
@@ -42,6 +45,19 @@ def _matrix(pose: dict) -> np.ndarray:
     result[:3, :3] = matrix_from_quat(pose["q"])
     result[:3, 3] = pose["p"]
     return result
+
+
+if _assembly_enabled():
+    def camera_rig(model: dict, encoders: dict) -> dict:
+        """Relative camera calibration at encoder time; exclusively robot-owned geometry."""
+        flu_from_cv = np.array([[0, 0, 1, 0], [-1, 0, 0, 0], [0, -1, 0, 0], [0, 0, 0, 1]])
+        transforms = {sensor['id']: _matrix(pose_compose(_link_pose(model, encoders, link['id']),
+                      sensor['mount'])) @ flu_from_cv
+                      for link in model['body']['links'] for sensor in link.get('sensors', [])
+                      if sensor.get('kind') in ('rgb', 'depth', 'rgbd')}
+        inverse = np.linalg.inv(transforms['head_camera'])
+        return {key: {'camera_to_reference': np.round(inverse @ value, 12).tolist()}
+                for key, value in transforms.items()}
 
 
 def reference_to_odometry(model: dict, packet: dict) -> np.ndarray:

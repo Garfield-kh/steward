@@ -21,6 +21,9 @@ without the service and the same image is never sent twice (steward.md §13.7.4)
 
 from __future__ import annotations
 
+from steward.assembly_profile import enabled as _assembly_enabled
+
+
 import base64
 import hashlib
 import io
@@ -38,9 +41,14 @@ import numpy as np
 from PIL import Image
 
 from steward import perception_services
-from steward.ego.providers.geometric_masks import (
-    GeometricMaskConfig, _backproject, masks_from_depth, support_speck_boxes,
-)
+if _assembly_enabled():
+    from steward.ego.providers.geometric_masks import (
+        GeometricMaskConfig, _DepthGeometry, _backproject, masks_from_depth, support_speck_boxes,
+    )
+else:
+    from steward.ego.providers.geometric_masks import (
+        GeometricMaskConfig, _backproject, masks_from_depth, support_speck_boxes,
+    )
 
 DEFAULT_PATH = Path(__file__).resolve().parents[3] / "config" / "segmentation.toml"
 
@@ -493,13 +501,26 @@ class Segmenter:
         :param depth: (H, W) metres of the segmented image, with the robot's own body cleared.
         :param up_cam: the world's up direction in the camera frame (x forward, z up)."""
         cfg = self.config
+        if _assembly_enabled():
+            geometry = (_DepthGeometry(depth, fovy_deg, up_cam)
+                        if cfg.geometric_fill or (cfg.crop_prompts and cfg.crop_target_px > 0) else None)
         specks = []
-        if cfg.crop_prompts and cfg.crop_target_px > 0:
-            specks = support_speck_boxes(depth, fovy_deg, up_cam, min_pixels=cfg.crop_min_pixels, max_pixels=cfg.min_pixels)
+        if _assembly_enabled():
+            if cfg.crop_prompts and cfg.crop_target_px > 0:
+                specks = support_speck_boxes(depth, fovy_deg, up_cam, min_pixels=cfg.crop_min_pixels,
+                                             max_pixels=cfg.min_pixels, _geometry=geometry)
+        else:
+            if cfg.crop_prompts and cfg.crop_target_px > 0:
+                specks = support_speck_boxes(depth, fovy_deg, up_cam, min_pixels=cfg.crop_min_pixels, max_pixels=cfg.min_pixels)
         filled = None
-        if cfg.geometric_fill:
-            filled = masks_from_depth(depth, fovy_deg, GeometricMaskConfig(min_pixels=cfg.min_pixels), up_cam=up_cam,
-                                      supports_only=cfg.fill_supports_only)
+        if _assembly_enabled():
+            if cfg.geometric_fill:
+                filled = masks_from_depth(depth, fovy_deg, GeometricMaskConfig(min_pixels=cfg.min_pixels), up_cam=up_cam,
+                                          supports_only=cfg.fill_supports_only, _geometry=geometry)
+        else:
+            if cfg.geometric_fill:
+                filled = masks_from_depth(depth, fovy_deg, GeometricMaskConfig(min_pixels=cfg.min_pixels), up_cam=up_cam,
+                                          supports_only=cfg.fill_supports_only)
         return DepthClusters(specks, filled)
 
     def fill(self, seg: Segmentation, depth: np.ndarray, fovy_deg: float, up_cam: np.ndarray,
@@ -559,6 +580,9 @@ class Segmenter:
         labels = seg.labels
         if mask.size == 0 or not labels:
             return seg
+        if _assembly_enabled():
+            if not any(lab and not set(lab).isdisjoint(_PEEL_FROM) for lab in labels.values()):
+                return seg
         h, w = mask.shape
         rgb_f = rgb.astype(np.float32)
         depth_f = np.asarray(depth, dtype=np.float32)
@@ -771,8 +795,15 @@ class Segmenter:
             if len(jobs[widest][1]) <= shares[widest]:
                 break
             shares[widest] += 1
-        requests = [(j, _png(image), prompts[k::share])
-                    for j, ((image, prompts), share) in enumerate(zip(jobs, shares)) for k in range(share)]
+        if _assembly_enabled():
+            requests = []
+            for j, ((image, prompts), share) in enumerate(zip(jobs, shares)):
+                if share:
+                    png = _png(image)
+                    requests.extend((j, png, prompts[k::share]) for k in range(share))
+        else:
+            requests = [(j, _png(image), prompts[k::share])
+                        for j, ((image, prompts), share) in enumerate(zip(jobs, shares)) for k in range(share)]
         if len(requests) <= 1:
             replies = [self.client.segment(png, prompts, cfg.threshold) for _j, png, prompts in requests]
         else:

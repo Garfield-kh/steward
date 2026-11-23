@@ -8,6 +8,17 @@ STEWARD="$(cd "$(dirname "$0")/.." && pwd)"
 DSH="$STEWARD/dsh/node_modules/.bin/dsh"
 HOME_DIR="${STEWARD_DSH_VAR:-$STEWARD/var/dsh}/robot-1"
 
+# Keep the selected World/Ego configuration when loading Harness credentials.
+toy_settings=()
+if [ "${STEWARD_ASSEMBLY_PROFILE:-}" = toy ]; then
+  for key in ${!STEWARD_@}; do
+    toy_settings+=("$key=${!key}")
+  done
+  if [ "${SUBGOAL_SUCCESS+x}" ]; then
+    toy_settings+=("SUBGOAL_SUCCESS=$SUBGOAL_SUCCESS")
+  fi
+fi
+
 if [ -f "$STEWARD/.env" ]; then
   set -a
   . "$STEWARD/.env"
@@ -15,4 +26,7 @@ if [ -f "$STEWARD/.env" ]; then
 fi
 mkdir -p "$HOME_DIR/workspace"
 cd "$HOME_DIR/workspace"
+if [ "${#toy_settings[@]}" -gt 0 ]; then
+  exec env "${toy_settings[@]}" DSH_HOME="$HOME_DIR" "$DSH" --profile ego "$@"
+fi
 exec env DSH_HOME="$HOME_DIR" "$DSH" --profile ego "$@"

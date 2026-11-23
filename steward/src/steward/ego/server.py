@@ -13,9 +13,14 @@ between pieces/rotations; snapshot acquisition still completes at its scheduled 
 
 from __future__ import annotations
 
+from steward.assembly_profile import enabled as _assembly_enabled
+
+
 from concurrent.futures import CancelledError
 
 from steward.ego.runtime import EgoRuntime
+if _assembly_enabled():
+    from steward.ego.public import public_json
 from steward.net import NO_CONTENT, CancellableHandler, HttpError, JsonServer
 from steward.viewloop import ViewSettings, frame_response
 
@@ -66,8 +71,21 @@ def ego_api(runtime: EgoRuntime, port: int = 0, bind_wait_s: float = 0.0) -> Jso
         return guarded(match_route, run)(q, b)
 
     handlers[match_route] = CancellableHandler(match)
-    return JsonServer(handlers, port=port, name="ego-api",
-                      bind_wait_s=bind_wait_s)
+    if _assembly_enabled():
+        import json
+        import sys
+        from steward.ego.skill_catalog import PUBLIC_SKILLS
+        print('STEWARD_EGO_INTERFACE ' + json.dumps({
+            'profile': 'toy', 'module': __file__,
+            'runtimeModule': sys.modules[EgoRuntime.__module__].__file__,
+            'skills': PUBLIC_SKILLS,
+            'routes': sorted(f'{method} {path}' for method, path in handlers),
+        }), file=sys.stderr)
+        return JsonServer(handlers, port=port, name="ego-api",
+                          bind_wait_s=bind_wait_s, json_view=public_json)
+    else:
+        return JsonServer(handlers, port=port, name="ego-api",
+                          bind_wait_s=bind_wait_s)
 
 
 def replay(runtime: EgoRuntime, inputs: list[dict]) -> None:
@@ -113,45 +131,88 @@ def _routes(runtime: EgoRuntime) -> dict:
             return runtime.release_control(b.get("owner", ""))
         raise ValueError("action must be acquire or release")
 
-    return {
-        ("GET", "/ego/summary"): lambda q, b: runtime.summary(),
-        ("GET", "/ego/state"): lambda q, b: runtime.ego_state().to_dict(),
-        ("GET", "/ego/query"): lambda q, b: {"objects": runtime.query(
-            q.get("category"), q.get("near"), float(q["radius"]) if "radius" in q else None)},
-        ("POST", "/ego/observe"): lambda q, b: runtime.observe(),
-        ("POST", "/ego/cameras/capture"): lambda q, b: runtime.capture_cameras(),
-        ("GET", "/ego/cameras/calibration"): lambda q, b: runtime.camera_calibration(),
-        ("GET", "/ego/gripper/pose"): lambda q, b: runtime.gripper_pose(),
-        ("POST", "/ego/rgb/record/start"): lambda q, b: runtime.link.rgb_recording_start(b),
-        ("GET", "/ego/rgb/record/status"): lambda q, b: runtime.link.rgb_recording_status(q["recording_id"]),
-        ("POST", "/ego/rgb/record/stop"): lambda q, b: runtime.link.rgb_recording_stop(b["recording_id"], b.get("cancel", False)),
-        ("POST", "/ego/rgb/record/export"): lambda q, b: runtime.recording_evidence(b["recording_id"]),
-        ("POST", "/ego/rgb/prepare-novelanything"): lambda q, b: runtime.prepare_novelanything(b["recording_id"], b.get("num_source_views")),
-        ("POST", "/ego/explore"): lambda q, b: runtime.explore(b.get("owner")),
-        ("GET", "/ego/control"): lambda q, b: runtime.control(),
-        ("GET", "/ego/alerts"): lambda q, b: runtime.alerts_view(),
-        ("GET", "/ego/dropped"): lambda q, b: {"dropped": runtime.dropped()},
-        ("POST", "/ego/alert"): lambda q, b: report(b),
-        ("POST", "/ego/alerts/ack"): lambda q, b: runtime.acknowledge(b.get("id")),
-        ("GET", "/ego/view"): lambda q, b: runtime.view.status(),
-        ("POST", "/ego/view"): lambda q, b: runtime.view.configure(ViewSettings.parse(b)),
-        ("GET", "/ego/view/frame"): lambda q, b: view_frame(q),
-        ("GET", "/ego/plan"): lambda q, b: runtime.plan_view(int(q.get("since", 0))),
-        ("POST", "/ego/plan"): lambda q, b: runtime.set_plan(b),
-        ("POST", "/ego/control"): lambda q, b: control(b),
-        ("POST", "/ego/predict"): lambda q, b: runtime.predict(b["skill"], b.get("params", {})),
-        ("POST", "/ego/annotate"): lambda q, b: runtime.annotate(b),
-        ("POST", "/ego/forget"): lambda q, b: runtime.forget(b),
-        ("POST", "/ego/candidates"): lambda q, b: runtime.candidates(b),
-        ("POST", "/ego/reflect"): lambda q, b: runtime.reflect(b),
-        ("POST", "/ego/inspect"): lambda q, b: runtime.inspect(b["entity"], int(b.get("px", 24))),
-        ("POST", "/ego/screw-holes"): lambda q, b: runtime.screw_holes(b["entity"]),
-        ("POST", "/ego/match-face"): lambda q, b: runtime.match_face(b.get("entities"), b["reference"], int(b.get("px", 24))),
-        ("GET", "/ego/receipt"): lambda q, b: runtime.receipt(q["id"]),
-        ("POST", "/skill/run"): lambda q, b: runtime.run(b["receipt"], b.get("owner")),
-        ("GET", "/skill/status"): lambda q, b: runtime.job(q["job"]),
-        ("POST", "/skill/wait"): lambda q, b: runtime.wait(b["job"], float(b.get("timeoutS", 120))),
-        ("POST", "/skill/stop"): lambda q, b: runtime.stop_motion(),
-        ("POST", "/clock/sleep"): lambda q, b: {"t": runtime.link.sleep(float(b["seconds"]))},
-        ("GET", "/ego/inputs"): lambda q, b: {"inputs": runtime.inputs},
-    }
+    if _assembly_enabled():
+        return {
+            ("GET", "/ego/summary"): lambda q, b: runtime.summary(),
+            ("GET", "/ego/state"): lambda q, b: runtime.ego_state().to_dict(),
+            ("GET", "/ego/query"): lambda q, b: {"objects": runtime.query(
+                q.get("category"), q.get("near"), float(q["radius"]) if "radius" in q else None)},
+            ("POST", "/ego/observe"): lambda q, b: runtime.observe(),
+            ("POST", "/ego/cameras/capture"): lambda q, b: runtime.capture_cameras(),
+            ("GET", "/ego/cameras/calibration"): lambda q, b: runtime.camera_calibration(),
+            ("GET", "/ego/gripper/pose"): lambda q, b: runtime.gripper_pose(),
+            ("POST", "/ego/rgb/record/start"): lambda q, b: runtime.link.rgb_recording_start(b),
+            ("GET", "/ego/rgb/record/status"): lambda q, b: runtime.link.rgb_recording_status(q["recording_id"]),
+            ("POST", "/ego/rgb/record/stop"): lambda q, b: runtime.link.rgb_recording_stop(b["recording_id"], b.get("cancel", False)),
+            ("POST", "/ego/rgb/record/export"): lambda q, b: runtime.recording_evidence(b["recording_id"]),
+            ("POST", "/ego/rgb/prepare-novelanything"): lambda q, b: runtime.prepare_novelanything(b["recording_id"], b.get("num_source_views")),
+            ("POST", "/ego/explore"): lambda q, b: runtime.explore(b.get("owner"), b.get("timeoutS", 120.)),
+            ("GET", "/ego/control"): lambda q, b: {**runtime.control(), "assemblyProfile": "toy"},
+            ("GET", "/ego/alerts"): lambda q, b: runtime.alerts_view(),
+            ("GET", "/ego/dropped"): lambda q, b: {"dropped": runtime.dropped()},
+            ("POST", "/ego/alert"): lambda q, b: report(b),
+            ("POST", "/ego/alerts/ack"): lambda q, b: runtime.acknowledge(b.get("id")),
+            ("GET", "/ego/view"): lambda q, b: runtime.view.status(),
+            ("POST", "/ego/view"): lambda q, b: runtime.view.configure(ViewSettings.parse(b)),
+            ("GET", "/ego/view/frame"): lambda q, b: view_frame(q),
+            ("GET", "/ego/plan"): lambda q, b: runtime.plan_view(int(q.get("since", 0))),
+            ("POST", "/ego/plan"): lambda q, b: runtime.set_plan(b),
+            ("POST", "/ego/control"): lambda q, b: control(b),
+            ("POST", "/ego/predict"): lambda q, b: runtime.predict(b["skill"], b.get("params", {})),
+            ("POST", "/ego/annotate"): lambda q, b: runtime.annotate(b),
+            ("POST", "/ego/forget"): lambda q, b: runtime.forget(b),
+            ("POST", "/ego/candidates"): lambda q, b: runtime.candidates(b),
+            ("POST", "/ego/reflect"): lambda q, b: runtime.reflect(b),
+            ("POST", "/ego/inspect"): lambda q, b: runtime.inspect(b["entity"], int(b.get("px", 24))),
+            ("POST", "/ego/match-face"): lambda q, b: runtime.match_face(b.get("entities"), b["reference"], int(b.get("px", 24))),
+            ("GET", "/ego/receipt"): lambda q, b: runtime.receipt(q["id"]),
+            ("POST", "/skill/run"): lambda q, b: runtime.run(b["receipt"], b.get("owner")),
+            ("GET", "/skill/status"): lambda q, b: runtime.job(q["job"]),
+            ("POST", "/skill/wait"): lambda q, b: runtime.wait(b["job"], float(b.get("timeoutS", 120))),
+            ("POST", "/skill/stop"): lambda q, b: runtime.stop_motion(),
+            ("POST", "/clock/sleep"): lambda q, b: {"t": runtime.link.sleep(float(b["seconds"]))},
+            ("GET", "/ego/inputs"): lambda q, b: {"inputs": runtime.inputs},
+        }
+    else:
+        return {
+            ("GET", "/ego/summary"): lambda q, b: runtime.summary(),
+            ("GET", "/ego/state"): lambda q, b: runtime.ego_state().to_dict(),
+            ("GET", "/ego/query"): lambda q, b: {"objects": runtime.query(
+                q.get("category"), q.get("near"), float(q["radius"]) if "radius" in q else None)},
+            ("POST", "/ego/observe"): lambda q, b: runtime.observe(),
+            ("POST", "/ego/cameras/capture"): lambda q, b: runtime.capture_cameras(),
+            ("GET", "/ego/cameras/calibration"): lambda q, b: runtime.camera_calibration(),
+            ("GET", "/ego/gripper/pose"): lambda q, b: runtime.gripper_pose(),
+            ("POST", "/ego/rgb/record/start"): lambda q, b: runtime.link.rgb_recording_start(b),
+            ("GET", "/ego/rgb/record/status"): lambda q, b: runtime.link.rgb_recording_status(q["recording_id"]),
+            ("POST", "/ego/rgb/record/stop"): lambda q, b: runtime.link.rgb_recording_stop(b["recording_id"], b.get("cancel", False)),
+            ("POST", "/ego/rgb/record/export"): lambda q, b: runtime.recording_evidence(b["recording_id"]),
+            ("POST", "/ego/rgb/prepare-novelanything"): lambda q, b: runtime.prepare_novelanything(b["recording_id"], b.get("num_source_views")),
+            ("POST", "/ego/explore"): lambda q, b: runtime.explore(b.get("owner")),
+            ("GET", "/ego/control"): lambda q, b: runtime.control(),
+            ("GET", "/ego/alerts"): lambda q, b: runtime.alerts_view(),
+            ("GET", "/ego/dropped"): lambda q, b: {"dropped": runtime.dropped()},
+            ("POST", "/ego/alert"): lambda q, b: report(b),
+            ("POST", "/ego/alerts/ack"): lambda q, b: runtime.acknowledge(b.get("id")),
+            ("GET", "/ego/view"): lambda q, b: runtime.view.status(),
+            ("POST", "/ego/view"): lambda q, b: runtime.view.configure(ViewSettings.parse(b)),
+            ("GET", "/ego/view/frame"): lambda q, b: view_frame(q),
+            ("GET", "/ego/plan"): lambda q, b: runtime.plan_view(int(q.get("since", 0))),
+            ("POST", "/ego/plan"): lambda q, b: runtime.set_plan(b),
+            ("POST", "/ego/control"): lambda q, b: control(b),
+            ("POST", "/ego/predict"): lambda q, b: runtime.predict(b["skill"], b.get("params", {})),
+            ("POST", "/ego/annotate"): lambda q, b: runtime.annotate(b),
+            ("POST", "/ego/forget"): lambda q, b: runtime.forget(b),
+            ("POST", "/ego/candidates"): lambda q, b: runtime.candidates(b),
+            ("POST", "/ego/reflect"): lambda q, b: runtime.reflect(b),
+            ("POST", "/ego/inspect"): lambda q, b: runtime.inspect(b["entity"], int(b.get("px", 24))),
+            ("POST", "/ego/screw-holes"): lambda q, b: runtime.screw_holes(b["entity"]),
+            ("POST", "/ego/match-face"): lambda q, b: runtime.match_face(b.get("entities"), b["reference"], int(b.get("px", 24))),
+            ("GET", "/ego/receipt"): lambda q, b: runtime.receipt(q["id"]),
+            ("POST", "/skill/run"): lambda q, b: runtime.run(b["receipt"], b.get("owner")),
+            ("GET", "/skill/status"): lambda q, b: runtime.job(q["job"]),
+            ("POST", "/skill/wait"): lambda q, b: runtime.wait(b["job"], float(b.get("timeoutS", 120))),
+            ("POST", "/skill/stop"): lambda q, b: runtime.stop_motion(),
+            ("POST", "/clock/sleep"): lambda q, b: {"t": runtime.link.sleep(float(b["seconds"]))},
+            ("GET", "/ego/inputs"): lambda q, b: {"inputs": runtime.inputs},
+        }

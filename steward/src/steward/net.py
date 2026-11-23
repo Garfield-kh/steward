@@ -7,6 +7,9 @@ that robot's sensor, actuator and telemetry channels, and the Ego API port is lo
 
 from __future__ import annotations
 
+from steward.assembly_profile import enabled as _assembly_enabled
+
+
 import errno
 import json
 import os
@@ -23,6 +26,9 @@ from concurrent.futures import CancelledError
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+
+if _assembly_enabled():
+    from steward.json_types import numpy_json
 
 Handler = Callable[[dict, Any], Any]
 
@@ -78,95 +84,189 @@ class JsonServer:
     """Serves ``routes`` on one port. A fixed port that is still held (a service just restarted on
     it) is retried for up to ``bind_wait_s`` seconds before the bind error is raised."""
 
-    def __init__(self, routes: dict[tuple[str, str], Handler | CancellableHandler], host: str = "127.0.0.1", port: int = 0, name: str = "",
-                 bind_wait_s: float = 0.0):
-        self.routes = routes
-        self.name = name
-        server = self
+    if _assembly_enabled():
+        def __init__(self, routes: dict[tuple[str, str], Handler | CancellableHandler], host: str = "127.0.0.1", port: int = 0, name: str = "",
+                     bind_wait_s: float = 0.0, json_view: Callable[[Any], Any] | None = None):
+            self.routes = routes
+            self.name = name
+            server = self
 
-        class _Handler(BaseHTTPRequestHandler):
-            def log_message(self, *args):  # noqa: D401 - silence default stderr logging
-                return
-
-            def _cancelled(self) -> bool:
-                """Whether the peer has closed after its complete request body was read."""
-                try:
-                    readable = select.select([self.connection], [], [], 0)[0]
-                    return bool(readable) and self.connection.recv(1, socket.MSG_PEEK) == b""
-                except OSError:
-                    return True  # A reset or closed connection cannot receive the result either.
-
-            def _dispatch(self, method: str) -> None:
-                parsed = urllib.parse.urlparse(self.path)
-                query = {k: v[-1] for k, v in urllib.parse.parse_qs(parsed.query).items()}
-                handler = server.routes.get((method, parsed.path))
-                if handler is None:
-                    self._send(404, {"error": f"no route {method} {parsed.path}"})
+            class _Handler(BaseHTTPRequestHandler):
+                def log_message(self, *args):  # noqa: D401 - silence default stderr logging
                     return
-                body = None
-                length = int(self.headers.get("Content-Length") or 0)
-                if length:
+
+                def _cancelled(self) -> bool:
+                    """Whether the peer has closed after its complete request body was read."""
                     try:
-                        body = json.loads(self.rfile.read(length))
-                    except json.JSONDecodeError as exc:
-                        self._send(400, {"error": f"invalid JSON body: {exc}"})
+                        readable = select.select([self.connection], [], [], 0)[0]
+                        return bool(readable) and self.connection.recv(1, socket.MSG_PEEK) == b""
+                    except OSError:
+                        return True  # A reset or closed connection cannot receive the result either.
+
+                def _dispatch(self, method: str) -> None:
+                    parsed = urllib.parse.urlparse(self.path)
+                    query = {k: v[-1] for k, v in urllib.parse.parse_qs(parsed.query).items()}
+                    handler = server.routes.get((method, parsed.path))
+                    if handler is None:
+                        self._send(404, {"error": f"no route {method} {parsed.path}"})
                         return
-                try:
-                    result = handler.callback(query, body, self._cancelled) if isinstance(handler, CancellableHandler) else handler(query, body)
-                except CancelledError:
-                    return  # The cooperative handler has settled; its disconnected peer needs no reply.
-                except HttpError as exc:
-                    self._send(exc.status, {"error": str(exc)})
-                    return
-                except Exception as exc:  # noqa: BLE001 - reported to the caller as a 500 body
-                    self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
-                    return
-                if result is NO_CONTENT:
-                    self.send_response(204)
+                    body = None
+                    length = int(self.headers.get("Content-Length") or 0)
+                    if length:
+                        try:
+                            body = json.loads(self.rfile.read(length))
+                        except json.JSONDecodeError as exc:
+                            self._send(400, {"error": f"invalid JSON body: {exc}"})
+                            return
+                    try:
+                        result = handler.callback(query, body, self._cancelled) if isinstance(handler, CancellableHandler) else handler(query, body)
+                    except CancelledError:
+                        return  # The cooperative handler has settled; its disconnected peer needs no reply.
+                    except HttpError as exc:
+                        self._send(exc.status, {"error": str(exc)})
+                        return
+                    except Exception as exc:  # noqa: BLE001 - reported to the caller as a 500 body
+                        self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
+                        return
+                    if result is NO_CONTENT:
+                        self.send_response(204)
+                        self.end_headers()
+                    elif isinstance(result, Binary):
+                        self.send_response(200)
+                        self.send_header("Content-Type", result.content_type)
+                        self.send_header("Content-Length", str(len(result.data)))
+                        for key, value in result.headers.items():
+                            self.send_header(key, value)
+                        self.end_headers()
+                        self.wfile.write(result.data)
+                    else:
+                        self._send(200, result if result is not None else {})
+
+                def _send(self, status: int, payload: Any) -> None:
+                    try:
+                        if json_view is not None:
+                            payload = json_view(payload)
+                        data = json.dumps(payload, default=numpy_json, allow_nan=False).encode()
+                    except (TypeError, ValueError, RecursionError) as exc:
+                        # NaN/Infinity, unsupported objects and cycles are explicit JSON errors,
+                        # never an uncaught exception that disconnects every status request.
+                        status, data = 500, json.dumps({"error": f"result is not representable as JSON: {exc}"}).encode()
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
                     self.end_headers()
-                elif isinstance(result, Binary):
-                    self.send_response(200)
-                    self.send_header("Content-Type", result.content_type)
-                    self.send_header("Content-Length", str(len(result.data)))
-                    for key, value in result.headers.items():
-                        self.send_header(key, value)
-                    self.end_headers()
-                    self.wfile.write(result.data)
-                else:
-                    self._send(200, result if result is not None else {})
+                    self.wfile.write(data)
 
-            def _send(self, status: int, payload: Any) -> None:
+                def do_GET(self):  # noqa: N802 - http.server naming
+                    self._dispatch("GET")
+
+                def do_POST(self):  # noqa: N802 - http.server naming
+                    self._dispatch("POST")
+
+            deadline, waited = time.monotonic() + bind_wait_s, False
+            while True:
                 try:
-                    data = json.dumps(payload, allow_nan=False).encode()
-                except ValueError as exc:
-                    # JSON has no NaN or Infinity: a result holding one is a server fault, reported as JSON.
-                    status, data = 500, json.dumps({"error": f"result is not representable as JSON: {exc}"}).encode()
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
+                    self._httpd = _Server((host, port), _Handler)
+                    break
+                except OSError as exc:
+                    if not address_in_use(exc) or port == 0 or time.monotonic() >= deadline:
+                        raise
+                    waited = True
+                    time.sleep(0.5)
+            if waited:
+                print(f"{name or 'server'}: port {port} was still held; bound after waiting", file=sys.stderr, flush=True)
+            self._httpd.daemon_threads = True
+            self._thread: threading.Thread | None = None
+    else:
+        def __init__(self, routes: dict[tuple[str, str], Handler | CancellableHandler], host: str = "127.0.0.1", port: int = 0, name: str = "",
+                     bind_wait_s: float = 0.0):
+            self.routes = routes
+            self.name = name
+            server = self
 
-            def do_GET(self):  # noqa: N802 - http.server naming
-                self._dispatch("GET")
+            class _Handler(BaseHTTPRequestHandler):
+                def log_message(self, *args):  # noqa: D401 - silence default stderr logging
+                    return
 
-            def do_POST(self):  # noqa: N802 - http.server naming
-                self._dispatch("POST")
+                def _cancelled(self) -> bool:
+                    """Whether the peer has closed after its complete request body was read."""
+                    try:
+                        readable = select.select([self.connection], [], [], 0)[0]
+                        return bool(readable) and self.connection.recv(1, socket.MSG_PEEK) == b""
+                    except OSError:
+                        return True  # A reset or closed connection cannot receive the result either.
 
-        deadline, waited = time.monotonic() + bind_wait_s, False
-        while True:
-            try:
-                self._httpd = _Server((host, port), _Handler)
-                break
-            except OSError as exc:
-                if not address_in_use(exc) or port == 0 or time.monotonic() >= deadline:
-                    raise
-                waited = True
-                time.sleep(0.5)
-        if waited:
-            print(f"{name or 'server'}: port {port} was still held; bound after waiting", file=sys.stderr, flush=True)
-        self._httpd.daemon_threads = True
-        self._thread: threading.Thread | None = None
+                def _dispatch(self, method: str) -> None:
+                    parsed = urllib.parse.urlparse(self.path)
+                    query = {k: v[-1] for k, v in urllib.parse.parse_qs(parsed.query).items()}
+                    handler = server.routes.get((method, parsed.path))
+                    if handler is None:
+                        self._send(404, {"error": f"no route {method} {parsed.path}"})
+                        return
+                    body = None
+                    length = int(self.headers.get("Content-Length") or 0)
+                    if length:
+                        try:
+                            body = json.loads(self.rfile.read(length))
+                        except json.JSONDecodeError as exc:
+                            self._send(400, {"error": f"invalid JSON body: {exc}"})
+                            return
+                    try:
+                        result = handler.callback(query, body, self._cancelled) if isinstance(handler, CancellableHandler) else handler(query, body)
+                    except CancelledError:
+                        return  # The cooperative handler has settled; its disconnected peer needs no reply.
+                    except HttpError as exc:
+                        self._send(exc.status, {"error": str(exc)})
+                        return
+                    except Exception as exc:  # noqa: BLE001 - reported to the caller as a 500 body
+                        self._send(500, {"error": f"{type(exc).__name__}: {exc}"})
+                        return
+                    if result is NO_CONTENT:
+                        self.send_response(204)
+                        self.end_headers()
+                    elif isinstance(result, Binary):
+                        self.send_response(200)
+                        self.send_header("Content-Type", result.content_type)
+                        self.send_header("Content-Length", str(len(result.data)))
+                        for key, value in result.headers.items():
+                            self.send_header(key, value)
+                        self.end_headers()
+                        self.wfile.write(result.data)
+                    else:
+                        self._send(200, result if result is not None else {})
+
+                def _send(self, status: int, payload: Any) -> None:
+                    try:
+                        data = json.dumps(payload, allow_nan=False).encode()
+                    except ValueError as exc:
+                        # JSON has no NaN or Infinity: a result holding one is a server fault, reported as JSON.
+                        status, data = 500, json.dumps({"error": f"result is not representable as JSON: {exc}"}).encode()
+                    self.send_response(status)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+
+                def do_GET(self):  # noqa: N802 - http.server naming
+                    self._dispatch("GET")
+
+                def do_POST(self):  # noqa: N802 - http.server naming
+                    self._dispatch("POST")
+
+            deadline, waited = time.monotonic() + bind_wait_s, False
+            while True:
+                try:
+                    self._httpd = _Server((host, port), _Handler)
+                    break
+                except OSError as exc:
+                    if not address_in_use(exc) or port == 0 or time.monotonic() >= deadline:
+                        raise
+                    waited = True
+                    time.sleep(0.5)
+            if waited:
+                print(f"{name or 'server'}: port {port} was still held; bound after waiting", file=sys.stderr, flush=True)
+            self._httpd.daemon_threads = True
+            self._thread: threading.Thread | None = None
 
     @property
     def port(self) -> int:
@@ -204,7 +304,10 @@ def fetch(url: str, timeout: float = 10.0) -> tuple[int, bytes, dict[str, str]]:
 
 def call(method: str, url: str, body: Any = None, timeout: float = 10.0) -> Any:
     """Send one JSON request; raise :class:`HttpError` with the server message on failure."""
-    data = None if body is None else json.dumps(body).encode()
+    if _assembly_enabled():
+        data = None if body is None else json.dumps(body, default=numpy_json, allow_nan=False).encode()
+    else:
+        data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request(url, data=data, method=method, headers={"Content-Type": "application/json"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:

@@ -17,9 +17,14 @@ Deformable bodies are rejected: Phase 0 does not simulate them.
 
 from __future__ import annotations
 
+from steward.assembly_profile import enabled as _assembly_enabled
+
+
 import base64
 import hashlib
 import math
+if _assembly_enabled():
+    import os
 import struct
 import xml.etree.ElementTree as ET
 import zlib
@@ -70,10 +75,16 @@ class MjcfBuild:
 
         model = mujoco.MjModel.from_xml_string(self.xml, self.assets or None)
         # Optional anti-creep: MuJoCo noslip solver iterations. Off by default (unchanged behaviour).
-        import os
-        noslip = int(os.environ.get("STEWARD_NOSLIP", "0") or 0)
-        if noslip > 0:
-            model.opt.noslip_iterations = noslip
+        if _assembly_enabled():
+            import os as _os
+            _n = int(_os.environ.get("STEWARD_NOSLIP", "0") or 0)
+            if _n > 0:
+                model.opt.noslip_iterations = _n
+        else:
+            import os
+            noslip = int(os.environ.get("STEWARD_NOSLIP", "0") or 0)
+            if noslip > 0:
+                model.opt.noslip_iterations = noslip
         return model
 
     def apply_initial(self, model: mujoco.MjModel, data: mujoco.MjData) -> None:
@@ -386,6 +397,17 @@ def _emit_link(body: ET.Element, ent: Entity, link_id: str, names: EntityNames, 
         attrs = _geom_attrs(g, textures, appearance)
         attrs.update(name=f"{body_name}::v{k}", contype="0", conaffinity="0", group="1", density="0")
         ET.SubElement(body, "geom", **attrs)
+    if _assembly_enabled():
+        if finger_visual_enabled() and _is_fixed_jaw_gripper(ent, link_id):
+            # Observer-only moving copies of the fixed jaw boxes (STEWARD_FINGER_VISUAL=1). They are
+            # massless, never collide and sit in the hidden group, so physics and every robot camera
+            # are unchanged; WorldSim swaps them in for free-camera (observer) renders only.
+            for k, g in enumerate(visual):
+                if _is_jaw_box(g):
+                    attrs = _geom_attrs(g, textures, appearance)
+                    attrs.update(name=f"{body_name}::{FINGER_DISPLAY_TAG}{k}", contype="0", conaffinity="0",
+                                 group=str(FINGER_DISPLAY_GROUP), density="0")
+                    ET.SubElement(body, "geom", **attrs)
     if not collision and mass is not None:
         inertia = max(mass * 0.005, 1e-5)
         ET.SubElement(body, "inertial", pos="0 0 0", mass=f"{mass}", diaginertia=_fmt([inertia] * 3))
@@ -397,6 +419,32 @@ def _emit_link(body: ET.Element, ent: Entity, link_id: str, names: EntityNames, 
             ET.SubElement(body, "camera", name=cam_name, pos=_fmt(mount["p"]),
                           quat=_fmt(quat_mul(mount["q"], _MOUNT_TO_CAMERA)), fovy=f"{fovy}")
             names.cameras[sensor["id"]] = cam_name
+
+
+if _assembly_enabled():
+    FINGER_DISPLAY_TAG = "fd"   # geom name "<body>::fd<k>" pairs with the fixed visual "<body>::v<k>"
+    FINGER_DISPLAY_GROUP = 4    # same as world.sim.HIDDEN_GROUP: not drawn by default visualisation options
+
+
+    def finger_visual_enabled() -> bool:
+        """World-side display switch; default off (the model is then byte-identical to before)."""
+        return os.environ.get("STEWARD_FINGER_VISUAL", "0") == "1"
+
+
+    def _is_jaw_box(g: dict) -> bool:
+        """A jaw part of a fixed-finger gripper: a box off the link's y = 0 plane."""
+        return (g.get("kind") == "primitive" and g.get("shape") == "box" and len(g.get("size", [])) == 3
+                and abs((g.get("pose") or {}).get("p", [0, 0, 0])[1]) > 1e-9)
+
+
+    def _is_fixed_jaw_gripper(ent: Entity, link_id: str) -> bool:
+        """A robot's grasp-point link without finger joints (those animate through real joints)."""
+        if ent.role != "robot":
+            return False
+        link = ent.rigid.link(link_id)
+        if not any(a.value == "grasp-point" for a in link.affordances):
+            return False
+        return not any(j.parent == link_id and j.type.value == "prismatic" for j in ent.rigid.joints)
 
 
 def _geom_attrs(g: dict, textures: _Textures, appearance: str) -> dict:

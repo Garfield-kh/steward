@@ -40,7 +40,7 @@ function rigidTransform(value: unknown): number[][] {
   return result
 }
 
-function intrinsics(value: unknown) {
+function intrinsics(value: unknown, profile: string | undefined) {
   const view = object(value)
   if (typeof view.width !== 'number' || !Number.isSafeInteger(view.width) || view.width <= 0
     || typeof view.height !== 'number' || !Number.isSafeInteger(view.height) || view.height <= 0) {
@@ -50,21 +50,39 @@ function intrinsics(value: unknown) {
   if (K[0]![0]! <= 0 || K[1]![1]! <= 0 || K[2]!.some((v, i) => v !== (i === 2 ? 1 : 0))) {
     throw new EgoError('Invalid camera pixel intrinsics')
   }
-  return { width: view.width, height: view.height, K, camera_to_reference: rigidTransform(view.camera_to_reference) }
+  if (profile !== 'toy') {
+    return { width: view.width, height: view.height, K, camera_to_reference: rigidTransform(view.camera_to_reference) }
+  }
+  const optics: Record<string, number | number[]> = {}
+  for (const key of ['renderNearM', 'tipPlaneClearanceM']) {
+    if (view[key] !== undefined) {
+      if (typeof view[key] !== 'number' || !Number.isFinite(view[key])) throw new EgoError('Invalid camera optics')
+      optics[key] = view[key] as number
+    }
+  }
+  for (const [key, length] of [['depthRangeM', 2], ['housingSizeM', 3]] as const) {
+    if (view[key] !== undefined) {
+      const values = view[key]
+      if (!Array.isArray(values) || values.length !== length || !values.every(v => typeof v === 'number' && Number.isFinite(v) && v > 0)) throw new EgoError('Invalid camera optics')
+      optics[key] = values
+    }
+  }
+  return { width: view.width, height: view.height, K, camera_to_reference: rigidTransform(view.camera_to_reference), ...optics }
 }
 
-/** Decode fixed robot calibration, stripping absolute poses and other unsupported fields.
+/** Decode timestamped robot calibration, stripping absolute poses and other unsupported fields.
  * @param value - untrusted Ego API response.
- * @returns RGB rig intrinsics and fixed relative extrinsics.
+ * @param profile - connected runtime profile, or the environment for standalone parsing.
+ * @returns RGB rig intrinsics and encoder-derived relative extrinsics.
  */
-export function parseCameraCalibration(value: unknown): JsonObject {
+export function parseCameraCalibration(value: unknown, profile = process.env.STEWARD_ASSEMBLY_PROFILE): JsonObject {
   const packet = object(value), views = object(packet.views)
   const ids = Object.keys(views)
   if (packet.reference_camera !== 'head_camera' || packet.calibration_source !== 'rig_calibration'
     || packet.camera_axes !== 'opencv_x_right_y_down_z_forward'
     || ids.length === 0 || !ids.includes('head_camera') || !ids.every(id => /^[a-z][a-z0-9_]*$/.test(id))) throw new EgoError('Invalid camera rig calibration')
   return { reference_camera: packet.reference_camera, calibration_source: packet.calibration_source,
-    camera_axes: packet.camera_axes, views: Object.fromEntries(ids.map(id => [id, intrinsics(views[id])])) }
+    camera_axes: packet.camera_axes, ...(profile === 'toy' && typeof packet.stamp === 'number' ? { stamp: packet.stamp, joint_encoders: object(packet.joint_encoders) } : {}), views: Object.fromEntries(ids.map(id => [id, intrinsics(views[id], profile)])) }
 }
 
 /** Decode robot-owned gripper pose metadata without carrying extra fields into the transcript.

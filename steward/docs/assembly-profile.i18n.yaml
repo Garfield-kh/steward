@@ -1,0 +1,19 @@
+# Bilingual-pair consistency record for assembly-profile.md (docs/i18n/README.md): per heading
+# section, a hash of its English and Chinese blocks outside code blocks and generated regions.
+# After editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write steward/docs/assembly-profile.md
+/toy-assembly-profile:
+  en: 26e7bb31b71cac45
+  zh: fc7804035b667592
+/toy-assembly-profile/settings:
+  en: 1d034913375723ed
+  zh: 97f974f395711f79
+/toy-assembly-profile/interface-and-startup-behavior:
+  en: d87633cebd61c6d0
+  zh: d91b2afe1fe46bde
+/toy-assembly-profile/running-the-toy-assembly-evaluation-yourself:
+  en: 794b73b9cec0f970
+  zh: ac7c41c74f229dc9
+/toy-assembly-profile/offline-regression-checks:
+  en: 84ce46b609e51564
+  zh: cae6b405d91cd26d

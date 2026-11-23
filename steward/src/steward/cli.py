@@ -327,7 +327,7 @@ class EgoSupervisor:
     runtime still polling when its world is replaced would see the clock go back and start a
     round against a scenario it is not built for. :meth:`reconcile` runs afterwards and starts
     the runtimes the new bodies need. Same robot, same body: the process is kept and reboots
-    itself on the new episode. The console's 重置 replaces every process (:meth:`retire`, then
+    itself on the new episode. The console's reset action replaces every process (:meth:`retire`, then
     :meth:`reconcile`), so nothing the robot believed, planned or recorded is left over.
 
     The first robot keeps the fixed Ego API port (the console chat and `steward chores --api`

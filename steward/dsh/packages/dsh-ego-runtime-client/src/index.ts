@@ -36,10 +36,29 @@ export class EgoRuntimeClient extends EgoService {
   })
 
   private readonly base: string
+  private profileRequest?: Promise<'off' | 'toy'>
+  private profile: 'off' | 'toy' = process.env.STEWARD_ASSEMBLY_PROFILE === 'toy' ? 'toy' : 'off'
 
   constructor(ctx: Context, readonly config: Config) {
     super(ctx)
     this.base = baseUrl(config.endpoint)
+  }
+
+  /** Resolve and cache the profile from the runtime's unrecorded control response. */
+  override assemblyProfile(): Promise<'off' | 'toy'> {
+    return this.profileRequest ??= this.readAssemblyProfile()
+  }
+
+  private async readAssemblyProfile(): Promise<'off' | 'toy'> {
+    const response = await this.call<JsonObject>('GET', '/ego/control')
+    const profile = response.assemblyProfile === undefined ? 'off' : response.assemblyProfile
+    if (profile !== 'off' && profile !== 'toy') throw new EgoError('Unsupported Ego assembly profile')
+    const environment = process.env.STEWARD_ASSEMBLY_PROFILE || 'off'
+    if (environment !== profile) {
+      console.error('STEWARD_HARNESS_PROFILE ' + JSON.stringify({ environment, runtime: profile, selected: profile }))
+    }
+    this.profile = profile
+    return profile
   }
 
   private async call<T>(method: 'GET' | 'POST', path: string, body?: unknown, signal?: AbortSignal,
@@ -76,7 +95,7 @@ export class EgoRuntimeClient extends EgoService {
 
 
   async cameraCalibration(signal?: AbortSignal): Promise<JsonObject> {
-    return parseCameraCalibration(await this.call<unknown>('GET', '/ego/cameras/calibration', undefined, signal))
+    return parseCameraCalibration(await this.call<unknown>('GET', '/ego/cameras/calibration', undefined, signal), this.profile)
   }
 
 
@@ -110,8 +129,8 @@ export class EgoRuntimeClient extends EgoService {
   }
 
 
-  explore(signal?: AbortSignal): Promise<SkillJob> {
-    return this.call('POST', '/ego/explore', { owner: this.config.owner }, signal)
+  explore(signal?: AbortSignal, timeoutS = this.profile === 'toy' ? 120 : undefined): Promise<SkillJob> {
+    return this.call('POST', '/ego/explore', { owner: this.config.owner, ...(timeoutS === undefined ? {} : { timeoutS }) }, signal)
   }
 
   predict(skill: EgoSkill, params: JsonObject, signal?: AbortSignal): Promise<PredictionReceipt> {

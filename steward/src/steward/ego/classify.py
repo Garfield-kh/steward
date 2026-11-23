@@ -8,49 +8,89 @@ is a probability per category; the estimator accumulates these over observations
 
 from __future__ import annotations
 
+from steward.assembly_profile import enabled as _assembly_enabled
+
+
 import math
 
 import numpy as np
 
 # Robot knowledge: typical full extents (long side, short side, height) per category, a scale range
 # for categories that come in several sizes, where they stand, and an optional colour test.
-SHAPES: dict[str, dict] = {
-    "wall": {"dims": (4.0, 0.10, 2.6), "scale": (0.3, 1.6), "floor": True, "min_top": 1.2},
-    # The furniture of this home has distinct finishes: a white counter, a walnut sideboard, a birch
-    # table and a blue-grey cabinet (deployment knowledge, like the sizes).
-    "counter": {"dims": (1.85, 0.62, 0.90), "floor": True, "color": "white"},
-    "table": {"dims": (1.20, 0.80, 0.75), "floor": True, "color": "birch"},
-    "sideboard": {"dims": (1.42, 0.49, 0.85), "floor": True, "color": "walnut"},
-    "cabinet": {"dims": (0.62, 0.52, 0.80), "floor": True, "color": "bluegrey"},
-    "chair": {"dims": (0.47, 0.46, 0.90), "floor": True, "color": "wood"},
-    "plant": {"dims": (0.26, 0.22, 0.40), "scale": (0.7, 2.5), "floor": True, "color": "green"},
-    "drawer": {"dims": (0.56, 0.44, 0.22), "floor": False, "min_bottom": 0.35},
-    "bowl": {"dims": (0.17, 0.17, 0.06), "scale": (0.65, 1.85), "floor": False},
-    "cup": {"dims": (0.08, 0.08, 0.10), "floor": False},
-    "plate": {"dims": (0.24, 0.24, 0.02), "floor": False},
-    "wine_glass": {"dims": (0.08, 0.08, 0.19), "floor": False, "color": "clear"},
-    "mug": {"dims": (0.11, 0.085, 0.095), "floor": False, "color": "dark"},
-    "teddy_bear": {"dims": (0.11, 0.105, 0.18), "floor": False, "color": "brown"},
-    "scissors": {"dims": (0.16, 0.07, 0.012), "floor": False},
-    "toy_airplane": {"dims": (0.22, 0.20, 0.06), "floor": False, "color": "yellow"},
-    "airplane_fuselage": {"dims": (0.18, 0.045, 0.065), "bearing_height": 0.04, "extent_slack": 0.015, "floor": False, "color": "yellow"},
-    "airplane_wing": {"dims": (0.20, 0.055, 0.01), "extent_slack": 0.015, "floor": False, "color": "red"},
-    "airplane_propeller": {"dims": (0.06, 0.06, 0.01), "floor": False, "color": "orange"},
-    "airplane_landing_gear": {"dims": (0.08, 0.03, 0.025), "extent_slack": 0.015, "floor": False},
-    "car_body": {"dims": (0.16, 0.101, 0.07), "floor": False, "color": "blue"},
-    "car_wheel": {"dims": (0.05, 0.05, 0.016), "floor": False, "color": "dark"},
-    # At this scale two depth-voxel boundaries can double the measured diameter.
-    # Tolerate that error in scoring only; completion still uses the physical prior.
-    # extent_slack also covers the larger screw-board toy_screw (~5 cm).
-    "toy_screw": {"dims": (0.016, 0.016, 0.022), "extent_slack": 0.040, "floor": False},
-    "screw_board": {"dims": (0.28, 0.20, 0.018), "floor": False, "color": "light"},
-    "electric_screwdriver": {"dims": (0.16, 0.035, 0.04), "extent_slack": 0.015, "floor": False, "color": "orange"},
-    "manual": {"dims": (0.24, 0.24, 0.004), "plan_scale": (0.25, 1.3), "floor": False},
-    "picture": {"dims": (0.24, 0.24, 0.004), "plan_scale": (0.25, 1.3), "floor": False},
-    "pistol": {"dims": (0.18, 0.12, 0.03), "floor": False, "color": "dark"},
-    "pill_bottle": {"dims": (0.046, 0.046, 0.085), "floor": False},
-    "perfume_bottle": {"dims": (0.065, 0.04, 0.10), "floor": False, "color": "pink"},
-}
+if _assembly_enabled():
+    SHAPES: dict[str, dict] = {
+        "wall": {"dims": (4.0, 0.10, 2.6), "scale": (0.3, 1.6), "floor": True, "min_top": 1.2},
+        # The furniture of this home has distinct finishes: a white counter, a walnut sideboard, a birch
+        # table and a blue-grey cabinet (deployment knowledge, like the sizes).
+        "counter": {"dims": (1.85, 0.62, 0.90), "floor": True, "color": "white"},
+        "table": {"dims": (1.20, 0.80, 0.75), "floor": True, "color": "birch"},
+        "sideboard": {"dims": (1.42, 0.49, 0.85), "floor": True, "color": "walnut"},
+        "cabinet": {"dims": (0.62, 0.52, 0.80), "floor": True, "color": "bluegrey"},
+        "chair": {"dims": (0.47, 0.46, 0.90), "floor": True, "color": "wood"},
+        "plant": {"dims": (0.26, 0.22, 0.40), "scale": (0.7, 2.5), "floor": True, "color": "green"},
+        "drawer": {"dims": (0.56, 0.44, 0.22), "floor": False, "min_bottom": 0.35},
+        "bowl": {"dims": (0.17, 0.17, 0.06), "scale": (0.65, 1.85), "floor": False},
+        "cup": {"dims": (0.08, 0.08, 0.10), "floor": False},
+        "plate": {"dims": (0.24, 0.24, 0.02), "floor": False},
+        "wine_glass": {"dims": (0.08, 0.08, 0.19), "floor": False, "color": "clear"},
+        "mug": {"dims": (0.11, 0.085, 0.095), "floor": False, "color": "dark"},
+        "teddy_bear": {"dims": (0.11, 0.105, 0.18), "floor": False, "color": "brown"},
+        "scissors": {"dims": (0.16, 0.07, 0.012), "floor": False},
+        "toy_airplane": {"dims": (0.22, 0.20, 0.06), "floor": False, "color": "yellow"},
+        "airplane_fuselage": {"dims": (0.18, 0.045, 0.065), "bearing_height": 0.04, "extent_slack": 0.015, "floor": False, "color": "yellow"},
+        "airplane_wing": {"dims": (0.20, 0.055, 0.01), "extent_slack": 0.015, "floor": False, "color": "red"},
+        "airplane_propeller": {"dims": (0.06, 0.06, 0.01), "floor": False, "color": "orange"},
+        "airplane_landing_gear": {"dims": (0.08, 0.03, 0.025), "extent_slack": 0.015, "floor": False},
+        "car_body": {"dims": (0.16, 0.101, 0.07), "floor": False, "color": "blue"},
+        "car_wheel": {"dims": (0.05, 0.05, 0.016), "floor": False, "color": "dark"},
+        # At this scale two depth-voxel boundaries can double the measured diameter.
+        # Tolerate that error in scoring only; completion still uses the physical prior.
+        "toy_screw": {"dims": (0.016, 0.016, 0.022), "extent_slack": 0.020, "floor": False},
+        "electric_screwdriver": {"dims": (0.16, 0.035, 0.04), "extent_slack": 0.015, "floor": False, "color": "orange"},
+        "manual": {"dims": (0.24, 0.24, 0.004), "plan_scale": (0.25, 1.3), "floor": False},
+        "picture": {"dims": (0.24, 0.24, 0.004), "plan_scale": (0.25, 1.3), "floor": False},
+        "pistol": {"dims": (0.18, 0.12, 0.03), "floor": False, "color": "dark"},
+        "pill_bottle": {"dims": (0.046, 0.046, 0.085), "floor": False},
+        "perfume_bottle": {"dims": (0.065, 0.04, 0.10), "floor": False, "color": "pink"},
+    }
+else:
+    SHAPES: dict[str, dict] = {
+        "wall": {"dims": (4.0, 0.10, 2.6), "scale": (0.3, 1.6), "floor": True, "min_top": 1.2},
+        # The furniture of this home has distinct finishes: a white counter, a walnut sideboard, a birch
+        # table and a blue-grey cabinet (deployment knowledge, like the sizes).
+        "counter": {"dims": (1.85, 0.62, 0.90), "floor": True, "color": "white"},
+        "table": {"dims": (1.20, 0.80, 0.75), "floor": True, "color": "birch"},
+        "sideboard": {"dims": (1.42, 0.49, 0.85), "floor": True, "color": "walnut"},
+        "cabinet": {"dims": (0.62, 0.52, 0.80), "floor": True, "color": "bluegrey"},
+        "chair": {"dims": (0.47, 0.46, 0.90), "floor": True, "color": "wood"},
+        "plant": {"dims": (0.26, 0.22, 0.40), "scale": (0.7, 2.5), "floor": True, "color": "green"},
+        "drawer": {"dims": (0.56, 0.44, 0.22), "floor": False, "min_bottom": 0.35},
+        "bowl": {"dims": (0.17, 0.17, 0.06), "scale": (0.65, 1.85), "floor": False},
+        "cup": {"dims": (0.08, 0.08, 0.10), "floor": False},
+        "plate": {"dims": (0.24, 0.24, 0.02), "floor": False},
+        "wine_glass": {"dims": (0.08, 0.08, 0.19), "floor": False, "color": "clear"},
+        "mug": {"dims": (0.11, 0.085, 0.095), "floor": False, "color": "dark"},
+        "teddy_bear": {"dims": (0.11, 0.105, 0.18), "floor": False, "color": "brown"},
+        "scissors": {"dims": (0.16, 0.07, 0.012), "floor": False},
+        "toy_airplane": {"dims": (0.22, 0.20, 0.06), "floor": False, "color": "yellow"},
+        "airplane_fuselage": {"dims": (0.18, 0.045, 0.065), "bearing_height": 0.04, "extent_slack": 0.015, "floor": False, "color": "yellow"},
+        "airplane_wing": {"dims": (0.20, 0.055, 0.01), "extent_slack": 0.015, "floor": False, "color": "red"},
+        "airplane_propeller": {"dims": (0.06, 0.06, 0.01), "floor": False, "color": "orange"},
+        "airplane_landing_gear": {"dims": (0.08, 0.03, 0.025), "extent_slack": 0.015, "floor": False},
+        "car_body": {"dims": (0.16, 0.101, 0.07), "floor": False, "color": "blue"},
+        "car_wheel": {"dims": (0.05, 0.05, 0.016), "floor": False, "color": "dark"},
+        # At this scale two depth-voxel boundaries can double the measured diameter.
+        # Tolerate that error in scoring only; completion still uses the physical prior.
+        # extent_slack also covers the larger screw-board toy_screw (~5 cm).
+        "toy_screw": {"dims": (0.016, 0.016, 0.022), "extent_slack": 0.040, "floor": False},
+        "screw_board": {"dims": (0.28, 0.20, 0.018), "floor": False, "color": "light"},
+        "electric_screwdriver": {"dims": (0.16, 0.035, 0.04), "extent_slack": 0.015, "floor": False, "color": "orange"},
+        "manual": {"dims": (0.24, 0.24, 0.004), "plan_scale": (0.25, 1.3), "floor": False},
+        "picture": {"dims": (0.24, 0.24, 0.004), "plan_scale": (0.25, 1.3), "floor": False},
+        "pistol": {"dims": (0.18, 0.12, 0.03), "floor": False, "color": "dark"},
+        "pill_bottle": {"dims": (0.046, 0.046, 0.085), "floor": False},
+        "perfume_bottle": {"dims": (0.065, 0.04, 0.10), "floor": False, "color": "pink"},
+    }
 
 FLAT = 0.05  # a region thinner than this that is not on the floor is a top surface, not a height
 UNDER = (0.55, 1.2, 0.55)  # tolerance (log ratio) per axis for measuring less than the prototype; the

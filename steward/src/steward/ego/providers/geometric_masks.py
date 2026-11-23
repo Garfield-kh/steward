@@ -8,7 +8,12 @@ Pipeline (Steward camera frame: x forward, y left, z up):
 """
 from __future__ import annotations
 
+from steward.assembly_profile import enabled as _assembly_enabled
+
+
 import math
+if _assembly_enabled():
+    from copy import deepcopy
 from dataclasses import dataclass
 
 import numpy as np
@@ -209,7 +214,17 @@ def _uv_clusters(uv: np.ndarray, cell: float, min_points: int) -> list[np.ndarra
         return []
     keys = np.floor(uv / cell).astype(np.int64)
     keys -= keys.min(0)
-    cells, cell_of = np.unique(keys, axis=0, return_inverse=True)
+    if _assembly_enabled():
+        stride = int(keys[:, 1].max()) + 1
+        max_x = int(keys[:, 0].max())
+        limit = np.iinfo(np.int64).max
+        if keys.min() >= 0 and stride <= limit and max_x * stride + stride - 1 <= limit:
+            packed, cell_of = np.unique(keys[:, 0] * stride + keys[:, 1], return_inverse=True)
+            cells = np.column_stack((packed // stride, packed % stride))
+        else:
+            cells, cell_of = np.unique(keys, axis=0, return_inverse=True)
+    else:
+        cells, cell_of = np.unique(keys, axis=0, return_inverse=True)
     cell_of = cell_of.reshape(-1)
     index = {(int(x), int(y)): n for n, (x, y) in enumerate(cells)}
     group = np.full(len(cells), -1, dtype=np.int64)
@@ -279,225 +294,483 @@ def _voxel_components(pts: np.ndarray, cell: float, min_voxels: int, min_points:
     return comps
 
 
-def support_speck_boxes(
-    depth: np.ndarray,
-    fovy_deg: float,
-    up_cam: np.ndarray | None = None,
-    *,
-    min_pixels: int,
-    max_pixels: int,
-) -> list[tuple[int, int, int, int]]:
-    """Image windows around compact clusters above a support that are smaller than ``max_pixels``.
+if _assembly_enabled():
+    class _DepthGeometry:
+        """Lazy geometry shared only by consumers of one immutable depth frame.
 
-    Geometric fill drops a cluster under its pixel floor. Each window is the cluster plus a few
-    pixels of padding, so a later crop can enlarge that spot and ask a segmenter about it.
+        Fitting does not read ``min_pixels``; the two consumers apply their own
+        pixel floors before calling here. All other settings participate in the
+        key. No data survives Segmenter.clusters, and no previous frame is reused.
+        """
 
-    :param depth: (H, W) metres, camera x forward.
-    :param min_pixels: smallest cluster that is worth a window.
-    :param max_pixels: clusters this large are left to geometric fill.
-    :returns: ``(y0, y1, x0, x1)`` windows, largest cluster first.
-    """
-    cfg = GeometricMaskConfig()
-    rng = np.random.default_rng(cfg.seed)
-    depth = np.asarray(depth, dtype=np.float32)
-    h, w = depth.shape
-    valid = (depth > cfg.min_depth) & (depth < cfg.max_range) & np.isfinite(depth)
-    if int(valid.sum()) < min_pixels:
-        return []
-    pts, ys, xs = _backproject(depth, fovy_deg, valid)
-    default_up = np.array([-0.5, 0.0, math.sqrt(3.0) / 2.0])
-    up = np.asarray(up_cam if up_cam is not None else default_up, dtype=np.float64)
-    up = up / (np.linalg.norm(up) + 1e-12)
-    planes = _ransac_horizontal_planes(pts, cfg, rng, up, _level_pixels(depth, fovy_deg, valid, up, cfg)[ys, xs])
-    if planes:
-        grav = np.mean([n for n, _, _ in planes], axis=0)
-        if np.linalg.norm(grav) > 1e-6:
-            up = grav / np.linalg.norm(grav)
-    h_along = pts @ up
-    h_ref = float(np.percentile(h_along, cfg.elevated_min_inlier_z_pct))
-    found: list[tuple[int, tuple[int, int, int, int]]] = []
-    claimed = np.zeros(len(pts), dtype=bool)
-    for n, center, inl in planes:
-        plane_h = float(center @ up)
-        if plane_h <= h_ref + 0.08:
+        def __init__(self, depth: np.ndarray, fovy_deg: float, up_cam: np.ndarray | None):
+            self.depth = np.asarray(depth, dtype=np.float32)
+            self.fovy_deg = fovy_deg
+            self.up_cam = up_cam
+            self._prepared = {}
+            self._height_refs = {}
+            self._plane_geometry = {}
+
+        @staticmethod
+        def _key(cfg):
+            return tuple((k, v) for k, v in vars(cfg).items() if k != 'min_pixels')
+
+        def prepare(self, cfg: GeometricMaskConfig, valid: np.ndarray):
+            key = self._key(cfg)
+            if key not in self._prepared:
+                rng = np.random.default_rng(cfg.seed)
+                pts, ys, xs = _backproject(self.depth, self.fovy_deg, valid)
+                default_up = np.array([-0.5, 0.0, math.sqrt(3.0) / 2.0])
+                up = np.asarray(self.up_cam if self.up_cam is not None else default_up, dtype=np.float64)
+                up = up / (np.linalg.norm(up) + 1e-12)
+                planes = _ransac_horizontal_planes(pts, cfg, rng, up,
+                    _level_pixels(self.depth, self.fovy_deg, valid, up, cfg)[ys, xs])
+                if planes:
+                    grav = np.mean([n for n, _, _ in planes], axis=0)
+                    if np.linalg.norm(grav) > 1e-6:
+                        up = grav / np.linalg.norm(grav)
+                self._prepared[key] = pts, ys, xs, up, planes, deepcopy(rng.bit_generator.state)
+            return self._prepared[key]
+
+        def height_reference(self, cfg: GeometricMaskConfig, valid: np.ndarray):
+            key = self._key(cfg)
+            if key not in self._height_refs:
+                pts, _, _, up, _, _ = self.prepare(cfg, valid)
+                h_along = pts @ up
+                self._height_refs[key] = float(np.percentile(h_along, cfg.elevated_min_inlier_z_pct))
+            return self._height_refs[key]
+
+        def plane_geometry(self, cfg: GeometricMaskConfig, valid: np.ndarray, index: int):
+            key = self._key(cfg), index
+            if key not in self._plane_geometry:
+                pts, _, _, _, planes, _ = self.prepare(cfg, valid)
+                n, center, inl = planes[index]
+                signed = (pts - center) @ n
+                t1, t2 = _plane_basis(n)
+                uv = np.stack([(pts - center) @ t1, (pts - center) @ t2], axis=1)
+                sheet_uv = uv[inl]
+                mn, mx = sheet_uv.min(0) - cfg.above_uv_pad_m, sheet_uv.max(0) + cfg.above_uv_pad_m
+                in_foot = (
+                    (uv[:, 0] >= mn[0]) & (uv[:, 0] <= mx[0])
+                    & (uv[:, 1] >= mn[1]) & (uv[:, 1] <= mx[1])
+                )
+                # Consumers own their claimed masks and acceptance rules, never these arrays.
+                for array in (signed, uv, in_foot):
+                    array.setflags(write=False)
+                self._plane_geometry[key] = signed, uv, in_foot
+            return self._plane_geometry[key]
+
+
+if _assembly_enabled():
+    def support_speck_boxes(
+        depth: np.ndarray,
+        fovy_deg: float,
+        up_cam: np.ndarray | None = None,
+        *,
+        min_pixels: int,
+        max_pixels: int,
+        _geometry: _DepthGeometry | None = None,
+    ) -> list[tuple[int, int, int, int]]:
+        """Image windows around compact clusters above a support that are smaller than ``max_pixels``.
+
+        Geometric fill drops a cluster under its pixel floor. Each window is the cluster plus a few
+        pixels of padding, so a later crop can enlarge that spot and ask a segmenter about it.
+
+        :param depth: (H, W) metres, camera x forward.
+        :param min_pixels: smallest cluster that is worth a window.
+        :param max_pixels: clusters this large are left to geometric fill.
+        :returns: ``(y0, y1, x0, x1)`` windows, largest cluster first.
+        """
+        cfg = GeometricMaskConfig()
+        depth = np.asarray(depth, dtype=np.float32)
+        h, w = depth.shape
+        valid = (depth > cfg.min_depth) & (depth < cfg.max_range) & np.isfinite(depth)
+        if int(valid.sum()) < min_pixels:
+            return []
+        geometry = _geometry or _DepthGeometry(depth, fovy_deg, up_cam)
+        pts, ys, xs, up, planes, _rng_state = geometry.prepare(cfg, valid)
+        h_ref = geometry.height_reference(cfg, valid)
+        found: list[tuple[int, tuple[int, int, int, int]]] = []
+        claimed = np.zeros(len(pts), dtype=bool)
+        for plane_index, (n, center, inl) in enumerate(planes):
+            plane_h = float(center @ up)
+            if plane_h <= h_ref + 0.08:
+                claimed[inl] = True
+                continue
+            signed, uv, in_foot = geometry.plane_geometry(cfg, valid, plane_index)
             claimed[inl] = True
-            continue
-        signed = (pts - center) @ n
-        t1, t2 = _plane_basis(n)
-        uv = np.stack([(pts - center) @ t1, (pts - center) @ t2], axis=1)
-        sheet_uv = uv[inl]
-        mn, mx = sheet_uv.min(0) - cfg.above_uv_pad_m, sheet_uv.max(0) + cfg.above_uv_pad_m
-        in_foot = (
-            (uv[:, 0] >= mn[0]) & (uv[:, 0] <= mx[0])
-            & (uv[:, 1] >= mn[1]) & (uv[:, 1] <= mx[1])
-        )
-        claimed[inl] = True
-        above = (~claimed) & (signed >= cfg.above_min_m) & (signed <= cfg.above_max_m) & in_foot
-        if int(above.sum()) < min_pixels:
-            continue
-        local_ids = np.nonzero(above)[0]
-        for cidx in _uv_clusters(uv[local_ids], cfg.above_cluster_m, min_pixels):
-            idx = local_ids[cidx]
-            cuv = uv[idx]
-            span = cuv.max(0) - cuv.min(0)
-            height = float(signed[idx].max() - signed[idx].min())
-            if max(float(span[0]), float(span[1])) > cfg.above_max_span_m:
+            above = (~claimed) & (signed >= cfg.above_min_m) & (signed <= cfg.above_max_m) & in_foot
+            if int(above.sum()) < min_pixels:
                 continue
-            if max(float(span[0]), float(span[1]), height) < 0.015:
-                continue
-            if len(idx) >= max_pixels:
+            local_ids = np.nonzero(above)[0]
+            for cidx in _uv_clusters(uv[local_ids], cfg.above_cluster_m, min_pixels):
+                idx = local_ids[cidx]
+                cuv = uv[idx]
+                span = cuv.max(0) - cuv.min(0)
+                height = float(signed[idx].max() - signed[idx].min())
+                if max(float(span[0]), float(span[1])) > cfg.above_max_span_m:
+                    continue
+                if max(float(span[0]), float(span[1]), height) < 0.015:
+                    continue
+                if len(idx) >= max_pixels:
+                    claimed[idx] = True
+                    continue
+                py, px = ys[idx], xs[idx]
+                pad = 6
+                box = (max(0, int(py.min()) - pad), min(h, int(py.max()) + 1 + pad),
+                       max(0, int(px.min()) - pad), min(w, int(px.max()) + 1 + pad))
+                found.append((len(idx), box))
                 claimed[idx] = True
+        found.sort(key=lambda item: -item[0])
+        return [box for _, box in found]
+else:
+    def support_speck_boxes(
+        depth: np.ndarray,
+        fovy_deg: float,
+        up_cam: np.ndarray | None = None,
+        *,
+        min_pixels: int,
+        max_pixels: int,
+    ) -> list[tuple[int, int, int, int]]:
+        """Image windows around compact clusters above a support that are smaller than ``max_pixels``.
+
+        Geometric fill drops a cluster under its pixel floor. Each window is the cluster plus a few
+        pixels of padding, so a later crop can enlarge that spot and ask a segmenter about it.
+
+        :param depth: (H, W) metres, camera x forward.
+        :param min_pixels: smallest cluster that is worth a window.
+        :param max_pixels: clusters this large are left to geometric fill.
+        :returns: ``(y0, y1, x0, x1)`` windows, largest cluster first.
+        """
+        cfg = GeometricMaskConfig()
+        rng = np.random.default_rng(cfg.seed)
+        depth = np.asarray(depth, dtype=np.float32)
+        h, w = depth.shape
+        valid = (depth > cfg.min_depth) & (depth < cfg.max_range) & np.isfinite(depth)
+        if int(valid.sum()) < min_pixels:
+            return []
+        pts, ys, xs = _backproject(depth, fovy_deg, valid)
+        default_up = np.array([-0.5, 0.0, math.sqrt(3.0) / 2.0])
+        up = np.asarray(up_cam if up_cam is not None else default_up, dtype=np.float64)
+        up = up / (np.linalg.norm(up) + 1e-12)
+        planes = _ransac_horizontal_planes(pts, cfg, rng, up, _level_pixels(depth, fovy_deg, valid, up, cfg)[ys, xs])
+        if planes:
+            grav = np.mean([n for n, _, _ in planes], axis=0)
+            if np.linalg.norm(grav) > 1e-6:
+                up = grav / np.linalg.norm(grav)
+        h_along = pts @ up
+        h_ref = float(np.percentile(h_along, cfg.elevated_min_inlier_z_pct))
+        found: list[tuple[int, tuple[int, int, int, int]]] = []
+        claimed = np.zeros(len(pts), dtype=bool)
+        for n, center, inl in planes:
+            plane_h = float(center @ up)
+            if plane_h <= h_ref + 0.08:
+                claimed[inl] = True
                 continue
-            py, px = ys[idx], xs[idx]
-            pad = 6
-            box = (max(0, int(py.min()) - pad), min(h, int(py.max()) + 1 + pad),
-                   max(0, int(px.min()) - pad), min(w, int(px.max()) + 1 + pad))
-            found.append((len(idx), box))
-            claimed[idx] = True
-    found.sort(key=lambda item: -item[0])
-    return [box for _, box in found]
-
-
-def masks_from_depth(
-    depth: np.ndarray,
-    fovy_deg: float,
-    config: GeometricMaskConfig | None = None,
-    up_cam: np.ndarray | None = None,
-    supports_only: bool = False,
-) -> np.ndarray:
-    """Instance ids (H, W) uint8 of the depth clusters of one frame, 0 where there is none.
-
-    :param depth: (H, W) metres along the camera's forward axis; pixels at or below
-        ``min_depth`` are left out, which is how a caller removes what it does not want clustered.
-    :param up_cam: the world's up direction in the camera frame (x forward, z up).
-    :param supports_only: keep only the clusters standing on a raised horizontal surface. The
-        rest of the cloud (walls, furniture, whatever a corner of the room looks like) is not
-        clustered at all."""
-    cfg = config or GeometricMaskConfig()
-    rng = np.random.default_rng(cfg.seed)
-    depth = np.asarray(depth, dtype=np.float32)
-    h, w = depth.shape
-    mask = np.zeros((h, w), dtype=np.uint8)
-    valid = (depth > cfg.min_depth) & (depth < cfg.max_range) & np.isfinite(depth)
-    if int(valid.sum()) < cfg.min_pixels:
-        return mask
-
-    pts, ys, xs = _backproject(depth, fovy_deg, valid)
-    # Steward head camera pitches ~30° down; world +z ≈ (-sin θ, 0, cos θ) in camera frame.
-    default_up = np.array([-0.5, 0.0, math.sqrt(3.0) / 2.0])
-    up = np.asarray(up_cam if up_cam is not None else default_up, dtype=np.float64)
-    up = up / (np.linalg.norm(up) + 1e-12)
-
-    planes = _ransac_horizontal_planes(pts, cfg, rng, up, _level_pixels(depth, fovy_deg, valid, up, cfg)[ys, xs])
-    # refine gravity from dominant plane normals if available
-    if planes:
-        grav = np.mean([n for n, _, _ in planes], axis=0)
-        if np.linalg.norm(grav) > 1e-6:
-            up = grav / np.linalg.norm(grav)
-
-    claimed = np.zeros(len(pts), dtype=bool)
-    instances: list[np.ndarray] = []
-
-    # height along gravity for elevation test
-    h_along = pts @ up
-    h_ref = float(np.percentile(h_along, cfg.elevated_min_inlier_z_pct))
-
-    for n, center, inl in planes:
-        plane_h = float(center @ up)
-        elevated = plane_h > h_ref + 0.08  # table/counter above lower cloud
-        signed = (pts - center) @ n
-        t1, t2 = _plane_basis(n)
-        uv = np.stack([(pts - center) @ t1, (pts - center) @ t2], axis=1)
-        if not elevated:
+            signed = (pts - center) @ n
+            t1, t2 = _plane_basis(n)
+            uv = np.stack([(pts - center) @ t1, (pts - center) @ t2], axis=1)
+            sheet_uv = uv[inl]
+            mn, mx = sheet_uv.min(0) - cfg.above_uv_pad_m, sheet_uv.max(0) + cfg.above_uv_pad_m
+            in_foot = (
+                (uv[:, 0] >= mn[0]) & (uv[:, 0] <= mx[0])
+                & (uv[:, 1] >= mn[1]) & (uv[:, 1] <= mx[1])
+            )
             claimed[inl] = True
-            continue
-        sheet_uv = uv[inl]
-        mn, mx = sheet_uv.min(0) - cfg.above_uv_pad_m, sheet_uv.max(0) + cfg.above_uv_pad_m
-        in_foot = (
-            (uv[:, 0] >= mn[0]) & (uv[:, 0] <= mx[0])
-            & (uv[:, 1] >= mn[1]) & (uv[:, 1] <= mx[1])
-        )
-        # Drop support-surface inliers so tabletop objects detach; keep residual furniture separately.
-        claimed[inl] = True
-        above = (
-            (~claimed)
-            & (signed >= cfg.above_min_m)
-            & (signed <= cfg.above_max_m)
-            & in_foot
-        )
-        if int(above.sum()) < cfg.above_min_points:
-            continue
-        local_ids = np.nonzero(above)[0]
-        for cidx in _uv_clusters(uv[local_ids], cfg.above_cluster_m, cfg.above_min_points):
-            idx = local_ids[cidx]
-            cuv = uv[idx]
-            span_uv = cuv.max(0) - cuv.min(0)
-            height = float(signed[idx].max() - signed[idx].min())
-            if max(float(span_uv[0]), float(span_uv[1])) > cfg.above_max_span_m:
+            above = (~claimed) & (signed >= cfg.above_min_m) & (signed <= cfg.above_max_m) & in_foot
+            if int(above.sum()) < min_pixels:
                 continue
-            if max(float(span_uv[0]), float(span_uv[1]), height) < cfg.above_min_extent_m:
-                continue
-            instances.append(idx)
-            claimed[idx] = True
+            local_ids = np.nonzero(above)[0]
+            for cidx in _uv_clusters(uv[local_ids], cfg.above_cluster_m, min_pixels):
+                idx = local_ids[cidx]
+                cuv = uv[idx]
+                span = cuv.max(0) - cuv.min(0)
+                height = float(signed[idx].max() - signed[idx].min())
+                if max(float(span[0]), float(span[1])) > cfg.above_max_span_m:
+                    continue
+                if max(float(span[0]), float(span[1]), height) < 0.015:
+                    continue
+                if len(idx) >= max_pixels:
+                    claimed[idx] = True
+                    continue
+                py, px = ys[idx], xs[idx]
+                pad = 6
+                box = (max(0, int(py.min()) - pad), min(h, int(py.max()) + 1 + pad),
+                       max(0, int(px.min()) - pad), min(w, int(px.max()) + 1 + pad))
+                found.append((len(idx), box))
+                claimed[idx] = True
+        found.sort(key=lambda item: -item[0])
+        return [box for _, box in found]
 
-    residual = np.zeros(len(pts), dtype=bool) if supports_only else ~claimed
-    if int(residual.sum()) >= cfg.min_pixels:
-        res_ids = np.nonzero(residual)[0]
-        for cidx in _voxel_components(
-            pts[res_ids], cfg.residual_voxel_m, cfg.min_voxels, cfg.min_pixels
-        ):
-            idx = res_ids[cidx]
-            cloud = pts[idx]
-            sp = cloud.max(0) - cloud.min(0)
-            # height along gravity
-            hh = float((cloud @ up).max() - (cloud @ up).min())
-            xy_span = max(float(sp[0]), float(sp[1]))
-            thin = min(float(sp[0]), float(sp[1]))
-            is_wall = hh >= cfg.wall_min_height_m and thin <= cfg.wall_max_thickness_m
-            is_furniture = (
-                hh >= cfg.furniture_min_height_m
-                and xy_span <= cfg.furniture_max_span_m
-                and xy_span >= 0.25
-                and len(idx) >= cfg.residual_min_points
-            )
-            # compact mid blobs (chairs / floating synthetic objects) without a support plane
-            is_compact = (
-                xy_span <= 0.9
-                and hh >= 0.08
-                and len(idx) >= max(cfg.min_pixels, 40)
-                and xy_span >= 0.08
-            )
-            # skip leftover floor/sheet scraps
-            if hh < 0.12 and xy_span > 0.6:
+
+if _assembly_enabled():
+    def masks_from_depth(
+        depth: np.ndarray,
+        fovy_deg: float,
+        config: GeometricMaskConfig | None = None,
+        up_cam: np.ndarray | None = None,
+        supports_only: bool = False,
+        *,
+        _geometry: _DepthGeometry | None = None,
+    ) -> np.ndarray:
+        """Instance ids (H, W) uint8 of the depth clusters of one frame, 0 where there is none.
+
+        :param depth: (H, W) metres along the camera's forward axis; pixels at or below
+            ``min_depth`` are left out, which is how a caller removes what it does not want clustered.
+        :param up_cam: the world's up direction in the camera frame (x forward, z up).
+        :param supports_only: keep only the clusters standing on a raised horizontal surface. The
+            rest of the cloud (walls, furniture, whatever a corner of the room looks like) is not
+            clustered at all."""
+        cfg = config or GeometricMaskConfig()
+        rng = np.random.default_rng(cfg.seed)
+        depth = np.asarray(depth, dtype=np.float32)
+        h, w = depth.shape
+        mask = np.zeros((h, w), dtype=np.uint8)
+        valid = (depth > cfg.min_depth) & (depth < cfg.max_range) & np.isfinite(depth)
+        if int(valid.sum()) < cfg.min_pixels:
+            return mask
+
+        geometry = _geometry or _DepthGeometry(depth, fovy_deg, up_cam)
+        pts, ys, xs, up, planes, rng_state = geometry.prepare(cfg, valid)
+        # Instance ids use the RNG *after* fitting, including all rejected trials.
+        # A private copy also makes repeated consumers independent of call order.
+        rng.bit_generator.state = deepcopy(rng_state)
+
+        claimed = np.zeros(len(pts), dtype=bool)
+        instances: list[np.ndarray] = []
+
+        # height along gravity for elevation test
+        h_ref = geometry.height_reference(cfg, valid)
+
+        for plane_index, (n, center, inl) in enumerate(planes):
+            plane_h = float(center @ up)
+            elevated = plane_h > h_ref + 0.08  # table/counter above lower cloud
+            if not elevated:
+                claimed[inl] = True
                 continue
-            if is_wall or is_furniture or is_compact:
+            signed, uv, in_foot = geometry.plane_geometry(cfg, valid, plane_index)
+            # Drop support-surface inliers so tabletop objects detach; keep residual furniture separately.
+            claimed[inl] = True
+            above = (
+                (~claimed)
+                & (signed >= cfg.above_min_m)
+                & (signed <= cfg.above_max_m)
+                & in_foot
+            )
+            if int(above.sum()) < cfg.above_min_points:
+                continue
+            local_ids = np.nonzero(above)[0]
+            for cidx in _uv_clusters(uv[local_ids], cfg.above_cluster_m, cfg.above_min_points):
+                idx = local_ids[cidx]
+                cuv = uv[idx]
+                span_uv = cuv.max(0) - cuv.min(0)
+                height = float(signed[idx].max() - signed[idx].min())
+                if max(float(span_uv[0]), float(span_uv[1])) > cfg.above_max_span_m:
+                    continue
+                if max(float(span_uv[0]), float(span_uv[1]), height) < cfg.above_min_extent_m:
+                    continue
                 instances.append(idx)
                 claimed[idx] = True
 
-    used = np.zeros((h, w), dtype=bool)
-    kept: list[tuple[np.ndarray, np.ndarray]] = []
+        residual = np.zeros(len(pts), dtype=bool) if supports_only else ~claimed
+        if int(residual.sum()) >= cfg.min_pixels:
+            res_ids = np.nonzero(residual)[0]
+            for cidx in _voxel_components(
+                pts[res_ids], cfg.residual_voxel_m, cfg.min_voxels, cfg.min_pixels
+            ):
+                idx = res_ids[cidx]
+                cloud = pts[idx]
+                sp = cloud.max(0) - cloud.min(0)
+                # height along gravity
+                hh = float((cloud @ up).max() - (cloud @ up).min())
+                xy_span = max(float(sp[0]), float(sp[1]))
+                thin = min(float(sp[0]), float(sp[1]))
+                is_wall = hh >= cfg.wall_min_height_m and thin <= cfg.wall_max_thickness_m
+                is_furniture = (
+                    hh >= cfg.furniture_min_height_m
+                    and xy_span <= cfg.furniture_max_span_m
+                    and xy_span >= 0.25
+                    and len(idx) >= cfg.residual_min_points
+                )
+                # compact mid blobs (chairs / floating synthetic objects) without a support plane
+                is_compact = (
+                    xy_span <= 0.9
+                    and hh >= 0.08
+                    and len(idx) >= max(cfg.min_pixels, 40)
+                    and xy_span >= 0.08
+                )
+                # skip leftover floor/sheet scraps
+                if hh < 0.12 and xy_span > 0.6:
+                    continue
+                if is_wall or is_furniture or is_compact:
+                    instances.append(idx)
+                    claimed[idx] = True
 
-    def accept(idx: np.ndarray) -> None:
-        py, px = ys[idx], xs[idx]
-        sel = ~used[py, px]
-        if int(sel.sum()) < cfg.min_pixels:
-            return
-        py, px = py[sel], px[sel]
-        used[py, px] = True
-        kept.append((py, px))
+        used = np.zeros((h, w), dtype=bool)
+        kept: list[tuple[np.ndarray, np.ndarray]] = []
 
-    instances.sort(key=len)
-    for idx in instances:
-        if len(kept) >= cfg.max_instances:
-            break
-        accept(idx)
+        def accept(idx: np.ndarray) -> None:
+            py, px = ys[idx], xs[idx]
+            sel = ~used[py, px]
+            if int(sel.sum()) < cfg.min_pixels:
+                return
+            py, px = py[sel], px[sel]
+            used[py, px] = True
+            kept.append((py, px))
 
-    if not kept:
+        instances.sort(key=len)
+        for idx in instances:
+            if len(kept) >= cfg.max_instances:
+                break
+            accept(idx)
+
+        if not kept:
+            return mask
+        ids = rng.permutation(np.arange(1, len(kept) + 1))
+        for (py, px), iid in zip(kept, ids):
+            mask[py, px] = int(iid)
         return mask
-    ids = rng.permutation(np.arange(1, len(kept) + 1))
-    for (py, px), iid in zip(kept, ids):
-        mask[py, px] = int(iid)
-    return mask
+else:
+    def masks_from_depth(
+        depth: np.ndarray,
+        fovy_deg: float,
+        config: GeometricMaskConfig | None = None,
+        up_cam: np.ndarray | None = None,
+        supports_only: bool = False,
+    ) -> np.ndarray:
+        """Instance ids (H, W) uint8 of the depth clusters of one frame, 0 where there is none.
+
+        :param depth: (H, W) metres along the camera's forward axis; pixels at or below
+            ``min_depth`` are left out, which is how a caller removes what it does not want clustered.
+        :param up_cam: the world's up direction in the camera frame (x forward, z up).
+        :param supports_only: keep only the clusters standing on a raised horizontal surface. The
+            rest of the cloud (walls, furniture, whatever a corner of the room looks like) is not
+            clustered at all."""
+        cfg = config or GeometricMaskConfig()
+        rng = np.random.default_rng(cfg.seed)
+        depth = np.asarray(depth, dtype=np.float32)
+        h, w = depth.shape
+        mask = np.zeros((h, w), dtype=np.uint8)
+        valid = (depth > cfg.min_depth) & (depth < cfg.max_range) & np.isfinite(depth)
+        if int(valid.sum()) < cfg.min_pixels:
+            return mask
+
+        pts, ys, xs = _backproject(depth, fovy_deg, valid)
+        # Steward head camera pitches ~30° down; world +z ≈ (-sin θ, 0, cos θ) in camera frame.
+        default_up = np.array([-0.5, 0.0, math.sqrt(3.0) / 2.0])
+        up = np.asarray(up_cam if up_cam is not None else default_up, dtype=np.float64)
+        up = up / (np.linalg.norm(up) + 1e-12)
+
+        planes = _ransac_horizontal_planes(pts, cfg, rng, up, _level_pixels(depth, fovy_deg, valid, up, cfg)[ys, xs])
+        # refine gravity from dominant plane normals if available
+        if planes:
+            grav = np.mean([n for n, _, _ in planes], axis=0)
+            if np.linalg.norm(grav) > 1e-6:
+                up = grav / np.linalg.norm(grav)
+
+        claimed = np.zeros(len(pts), dtype=bool)
+        instances: list[np.ndarray] = []
+
+        # height along gravity for elevation test
+        h_along = pts @ up
+        h_ref = float(np.percentile(h_along, cfg.elevated_min_inlier_z_pct))
+
+        for n, center, inl in planes:
+            plane_h = float(center @ up)
+            elevated = plane_h > h_ref + 0.08  # table/counter above lower cloud
+            signed = (pts - center) @ n
+            t1, t2 = _plane_basis(n)
+            uv = np.stack([(pts - center) @ t1, (pts - center) @ t2], axis=1)
+            if not elevated:
+                claimed[inl] = True
+                continue
+            sheet_uv = uv[inl]
+            mn, mx = sheet_uv.min(0) - cfg.above_uv_pad_m, sheet_uv.max(0) + cfg.above_uv_pad_m
+            in_foot = (
+                (uv[:, 0] >= mn[0]) & (uv[:, 0] <= mx[0])
+                & (uv[:, 1] >= mn[1]) & (uv[:, 1] <= mx[1])
+            )
+            # Drop support-surface inliers so tabletop objects detach; keep residual furniture separately.
+            claimed[inl] = True
+            above = (
+                (~claimed)
+                & (signed >= cfg.above_min_m)
+                & (signed <= cfg.above_max_m)
+                & in_foot
+            )
+            if int(above.sum()) < cfg.above_min_points:
+                continue
+            local_ids = np.nonzero(above)[0]
+            for cidx in _uv_clusters(uv[local_ids], cfg.above_cluster_m, cfg.above_min_points):
+                idx = local_ids[cidx]
+                cuv = uv[idx]
+                span_uv = cuv.max(0) - cuv.min(0)
+                height = float(signed[idx].max() - signed[idx].min())
+                if max(float(span_uv[0]), float(span_uv[1])) > cfg.above_max_span_m:
+                    continue
+                if max(float(span_uv[0]), float(span_uv[1]), height) < cfg.above_min_extent_m:
+                    continue
+                instances.append(idx)
+                claimed[idx] = True
+
+        residual = np.zeros(len(pts), dtype=bool) if supports_only else ~claimed
+        if int(residual.sum()) >= cfg.min_pixels:
+            res_ids = np.nonzero(residual)[0]
+            for cidx in _voxel_components(
+                pts[res_ids], cfg.residual_voxel_m, cfg.min_voxels, cfg.min_pixels
+            ):
+                idx = res_ids[cidx]
+                cloud = pts[idx]
+                sp = cloud.max(0) - cloud.min(0)
+                # height along gravity
+                hh = float((cloud @ up).max() - (cloud @ up).min())
+                xy_span = max(float(sp[0]), float(sp[1]))
+                thin = min(float(sp[0]), float(sp[1]))
+                is_wall = hh >= cfg.wall_min_height_m and thin <= cfg.wall_max_thickness_m
+                is_furniture = (
+                    hh >= cfg.furniture_min_height_m
+                    and xy_span <= cfg.furniture_max_span_m
+                    and xy_span >= 0.25
+                    and len(idx) >= cfg.residual_min_points
+                )
+                # compact mid blobs (chairs / floating synthetic objects) without a support plane
+                is_compact = (
+                    xy_span <= 0.9
+                    and hh >= 0.08
+                    and len(idx) >= max(cfg.min_pixels, 40)
+                    and xy_span >= 0.08
+                )
+                # skip leftover floor/sheet scraps
+                if hh < 0.12 and xy_span > 0.6:
+                    continue
+                if is_wall or is_furniture or is_compact:
+                    instances.append(idx)
+                    claimed[idx] = True
+
+        used = np.zeros((h, w), dtype=bool)
+        kept: list[tuple[np.ndarray, np.ndarray]] = []
+
+        def accept(idx: np.ndarray) -> None:
+            py, px = ys[idx], xs[idx]
+            sel = ~used[py, px]
+            if int(sel.sum()) < cfg.min_pixels:
+                return
+            py, px = py[sel], px[sel]
+            used[py, px] = True
+            kept.append((py, px))
+
+        instances.sort(key=len)
+        for idx in instances:
+            if len(kept) >= cfg.max_instances:
+                break
+            accept(idx)
+
+        if not kept:
+            return mask
+        ids = rng.permutation(np.arange(1, len(kept) + 1))
+        for (py, px), iid in zip(kept, ids):
+            mask[py, px] = int(iid)
+        return mask
 
 
 def replace_frame_mask(frame: dict, config: GeometricMaskConfig | None = None) -> dict:

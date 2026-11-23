@@ -1,0 +1,536 @@
+{
+  "default": {
+    "execution": {
+      "__invalid__": {
+        "dispatch": [],
+        "state": "failed"
+      },
+      "_assembly_observe": {
+        "dispatch": [],
+        "state": "failed"
+      },
+      "_fastener_contact": {
+        "dispatch": [],
+        "state": "failed"
+      },
+      "_fastener_reset": {
+        "dispatch": [],
+        "state": "failed"
+      },
+      "_inhand_view": {
+        "dispatch": [],
+        "state": "failed"
+      },
+      "_pivot_align": {
+        "dispatch": [],
+        "state": "failed"
+      },
+      "_simple_driver": {
+        "dispatch": [],
+        "state": "failed"
+      },
+      "_stage_screw": {
+        "dispatch": [],
+        "state": "failed"
+      },
+      "_upright_tool": {
+        "dispatch": [],
+        "state": "failed"
+      },
+      "assemble_onto": {
+        "dispatch": [
+          "_assemble_onto"
+        ],
+        "state": "succeeded"
+      },
+      "close": {
+        "dispatch": [
+          "_close"
+        ],
+        "state": "succeeded"
+      },
+      "complete_assembly": {
+        "dispatch": [],
+        "state": "failed"
+      },
+      "drive_screw": {
+        "dispatch": [
+          "_fasten"
+        ],
+        "state": "succeeded"
+      },
+      "fasten_onto": {
+        "dispatch": [
+          "_fasten"
+        ],
+        "state": "succeeded"
+      },
+      "flip_assembly": {
+        "dispatch": [
+          "_fasten"
+        ],
+        "state": "succeeded"
+      },
+      "insert_screw_into_hole": {
+        "dispatch": [
+          "_insert_screw_into_hole"
+        ],
+        "state": "succeeded"
+      },
+      "navigate": {
+        "dispatch": [
+          "_drive"
+        ],
+        "state": "succeeded"
+      },
+      "open": {
+        "dispatch": [
+          "_open"
+        ],
+        "state": "succeeded"
+      },
+      "pick": {
+        "dispatch": [
+          "_pick"
+        ],
+        "state": "succeeded"
+      },
+      "place": {
+        "dispatch": [
+          "_place"
+        ],
+        "state": "succeeded"
+      },
+      "pour": {
+        "dispatch": [
+          "_pour"
+        ],
+        "state": "succeeded"
+      },
+      "regrasp_upright": {
+        "dispatch": [
+          "_fasten"
+        ],
+        "state": "succeeded"
+      },
+      "seat_screw": {
+        "dispatch": [
+          "_fasten"
+        ],
+        "state": "succeeded"
+      }
+    },
+    "prediction": {
+      "__invalid__": false,
+      "_assembly_observe": false,
+      "_fastener_contact": true,
+      "_fastener_reset": true,
+      "_inhand_view": false,
+      "_pivot_align": false,
+      "_simple_driver": true,
+      "_stage_screw": true,
+      "_upright_tool": true,
+      "assemble_onto": true,
+      "close": true,
+      "complete_assembly": false,
+      "drive_screw": true,
+      "fasten_onto": true,
+      "flip_assembly": true,
+      "insert_screw_into_hole": true,
+      "navigate": true,
+      "open": true,
+      "pick": true,
+      "place": true,
+      "pour": true,
+      "regrasp_upright": true,
+      "seat_screw": true
+    },
+    "routeHelpers": {
+      "control": "def control(b):\n    if b.get('action') == 'acquire':\n        return runtime.acquire_control(b.get('owner', ''))\n    if b.get('action') == 'release':\n        return runtime.release_control(b.get('owner', ''))\n    raise ValueError('action must be acquire or release')",
+      "report": "def report(b):\n    message = str(b.get('message', '')).strip()\n    if not message:\n        raise ValueError('an alert needs a message')\n    return runtime.alert(message, str(b.get('source', 'agent')), str(b.get('level', 'blocked')), goal=str(b.get('goal') or ''), step=str(b.get('step') or ''), diagnosis=str(b.get('diagnosis') or ''))",
+      "view_frame": "def view_frame(q):\n    frame = runtime.view.latest(int(q['after']) if q.get('after') else None)\n    if frame is not None:\n        return frame_response(frame, runtime.view.status())\n    status = runtime.view.status()\n    if status['settings'] is None:\n        raise HttpError(409, 'the ego view is not configured; POST /ego/view first')\n    if status['error'] and status['frame'] is None:\n        raise HttpError(503, f\"the ego view cannot render: {status['error']}\")\n    return NO_CONTENT"
+    },
+    "routeParameters": {
+      "GET /ego/alerts": "lambda q, b: runtime.alerts_view()",
+      "GET /ego/cameras/calibration": "lambda q, b: runtime.camera_calibration()",
+      "GET /ego/control": "lambda q, b: runtime.control()",
+      "GET /ego/dropped": "lambda q, b: {'dropped': runtime.dropped()}",
+      "GET /ego/gripper/pose": "lambda q, b: runtime.gripper_pose()",
+      "GET /ego/inputs": "lambda q, b: {'inputs': runtime.inputs}",
+      "GET /ego/plan": "lambda q, b: runtime.plan_view(int(q.get('since', 0)))",
+      "GET /ego/query": "lambda q, b: {'objects': runtime.query(q.get('category'), q.get('near'), float(q['radius']) if 'radius' in q else None)}",
+      "GET /ego/receipt": "lambda q, b: runtime.receipt(q['id'])",
+      "GET /ego/rgb/record/status": "lambda q, b: runtime.link.rgb_recording_status(q['recording_id'])",
+      "GET /ego/state": "lambda q, b: runtime.ego_state().to_dict()",
+      "GET /ego/summary": "lambda q, b: runtime.summary()",
+      "GET /ego/view": "lambda q, b: runtime.view.status()",
+      "GET /ego/view/frame": "lambda q, b: view_frame(q)",
+      "GET /skill/status": "lambda q, b: runtime.job(q['job'])",
+      "POST /clock/sleep": "lambda q, b: {'t': runtime.link.sleep(float(b['seconds']))}",
+      "POST /ego/alert": "lambda q, b: report(b)",
+      "POST /ego/alerts/ack": "lambda q, b: runtime.acknowledge(b.get('id'))",
+      "POST /ego/annotate": "lambda q, b: runtime.annotate(b)",
+      "POST /ego/cameras/capture": "lambda q, b: runtime.capture_cameras()",
+      "POST /ego/candidates": "lambda q, b: runtime.candidates(b)",
+      "POST /ego/control": "lambda q, b: control(b)",
+      "POST /ego/explore": "lambda q, b: runtime.explore(b.get('owner'))",
+      "POST /ego/forget": "lambda q, b: runtime.forget(b)",
+      "POST /ego/inspect": "lambda q, b: runtime.inspect(b['entity'], int(b.get('px', 24)))",
+      "POST /ego/match-face": "lambda q, b: runtime.match_face(b.get('entities'), b['reference'], int(b.get('px', 24)))",
+      "POST /ego/observe": "lambda q, b: runtime.observe()",
+      "POST /ego/plan": "lambda q, b: runtime.set_plan(b)",
+      "POST /ego/predict": "lambda q, b: runtime.predict(b['skill'], b.get('params', {}))",
+      "POST /ego/reflect": "lambda q, b: runtime.reflect(b)",
+      "POST /ego/rgb/prepare-novelanything": "lambda q, b: runtime.prepare_novelanything(b['recording_id'], b.get('num_source_views'))",
+      "POST /ego/rgb/record/export": "lambda q, b: runtime.recording_evidence(b['recording_id'])",
+      "POST /ego/rgb/record/start": "lambda q, b: runtime.link.rgb_recording_start(b)",
+      "POST /ego/rgb/record/stop": "lambda q, b: runtime.link.rgb_recording_stop(b['recording_id'], b.get('cancel', False))",
+      "POST /ego/screw-holes": "lambda q, b: runtime.screw_holes(b['entity'])",
+      "POST /ego/view": "lambda q, b: runtime.view.configure(ViewSettings.parse(b))",
+      "POST /skill/run": "lambda q, b: runtime.run(b['receipt'], b.get('owner'))",
+      "POST /skill/stop": "lambda q, b: runtime.stop_motion()",
+      "POST /skill/wait": "lambda q, b: runtime.wait(b['job'], float(b.get('timeoutS', 120)))"
+    },
+    "routes": [
+      "GET /ego/alerts",
+      "GET /ego/cameras/calibration",
+      "GET /ego/control",
+      "GET /ego/dropped",
+      "GET /ego/gripper/pose",
+      "GET /ego/inputs",
+      "GET /ego/plan",
+      "GET /ego/query",
+      "GET /ego/receipt",
+      "GET /ego/rgb/record/status",
+      "GET /ego/state",
+      "GET /ego/summary",
+      "GET /ego/view",
+      "GET /ego/view/frame",
+      "GET /skill/status",
+      "POST /clock/sleep",
+      "POST /ego/alert",
+      "POST /ego/alerts/ack",
+      "POST /ego/annotate",
+      "POST /ego/cameras/capture",
+      "POST /ego/candidates",
+      "POST /ego/control",
+      "POST /ego/explore",
+      "POST /ego/forget",
+      "POST /ego/inspect",
+      "POST /ego/match-face",
+      "POST /ego/observe",
+      "POST /ego/plan",
+      "POST /ego/predict",
+      "POST /ego/reflect",
+      "POST /ego/rgb/prepare-novelanything",
+      "POST /ego/rgb/record/export",
+      "POST /ego/rgb/record/start",
+      "POST /ego/rgb/record/stop",
+      "POST /ego/screw-holes",
+      "POST /ego/view",
+      "POST /skill/run",
+      "POST /skill/stop",
+      "POST /skill/wait"
+    ],
+    "unrecorded": [
+      "GET /ego/alerts",
+      "GET /ego/control",
+      "GET /ego/dropped",
+      "GET /ego/inputs",
+      "GET /ego/plan",
+      "GET /ego/receipt",
+      "GET /ego/state",
+      "GET /ego/view",
+      "GET /ego/view/frame",
+      "GET /skill/status",
+      "POST /clock/sleep",
+      "POST /ego/view",
+      "POST /skill/wait"
+    ]
+  },
+  "toy": {
+    "execution": {
+      "__invalid__": {
+        "dispatch": [],
+        "state": "failed"
+      },
+      "_assembly_observe": {
+        "dispatch": [],
+        "state": "failed"
+      },
+      "_fastener_contact": {
+        "dispatch": [],
+        "state": "failed"
+      },
+      "_fastener_reset": {
+        "dispatch": [],
+        "state": "failed"
+      },
+      "_inhand_view": {
+        "dispatch": [],
+        "state": "failed"
+      },
+      "_pivot_align": {
+        "dispatch": [],
+        "state": "failed"
+      },
+      "_simple_driver": {
+        "dispatch": [],
+        "state": "failed"
+      },
+      "_stage_screw": {
+        "dispatch": [],
+        "state": "failed"
+      },
+      "_upright_tool": {
+        "dispatch": [],
+        "state": "failed"
+      },
+      "assemble_onto": {
+        "dispatch": [
+          "_assemble_onto"
+        ],
+        "state": "succeeded"
+      },
+      "close": {
+        "dispatch": [
+          "_close"
+        ],
+        "state": "succeeded"
+      },
+      "complete_assembly": {
+        "dispatch": [
+          "_fasten"
+        ],
+        "state": "succeeded"
+      },
+      "drive_screw": {
+        "dispatch": [
+          "_fasten"
+        ],
+        "state": "succeeded"
+      },
+      "fasten_onto": {
+        "dispatch": [
+          "_fasten"
+        ],
+        "state": "succeeded"
+      },
+      "flip_assembly": {
+        "dispatch": [
+          "_fasten"
+        ],
+        "state": "succeeded"
+      },
+      "insert_screw_into_hole": {
+        "dispatch": [],
+        "state": "failed"
+      },
+      "navigate": {
+        "dispatch": [
+          "_drive"
+        ],
+        "state": "succeeded"
+      },
+      "open": {
+        "dispatch": [
+          "_open"
+        ],
+        "state": "succeeded"
+      },
+      "pick": {
+        "dispatch": [
+          "_pick"
+        ],
+        "state": "succeeded"
+      },
+      "place": {
+        "dispatch": [
+          "_place"
+        ],
+        "state": "succeeded"
+      },
+      "pour": {
+        "dispatch": [
+          "_pour"
+        ],
+        "state": "succeeded"
+      },
+      "regrasp_upright": {
+        "dispatch": [
+          "_fasten"
+        ],
+        "state": "succeeded"
+      },
+      "seat_screw": {
+        "dispatch": [
+          "_fasten"
+        ],
+        "state": "succeeded"
+      }
+    },
+    "prediction": {
+      "__invalid__": false,
+      "_assembly_observe": true,
+      "_fastener_contact": true,
+      "_fastener_reset": true,
+      "_inhand_view": true,
+      "_pivot_align": {
+        "requiredParameter": "'part'"
+      },
+      "_simple_driver": true,
+      "_stage_screw": true,
+      "_upright_tool": true,
+      "assemble_onto": true,
+      "close": true,
+      "complete_assembly": true,
+      "drive_screw": true,
+      "fasten_onto": true,
+      "flip_assembly": true,
+      "insert_screw_into_hole": false,
+      "navigate": true,
+      "open": true,
+      "pick": true,
+      "place": true,
+      "pour": true,
+      "regrasp_upright": true,
+      "seat_screw": true
+    },
+    "routeHelpers": {
+      "control": "def control(b):\n    if b.get('action') == 'acquire':\n        return runtime.acquire_control(b.get('owner', ''))\n    if b.get('action') == 'release':\n        return runtime.release_control(b.get('owner', ''))\n    raise ValueError('action must be acquire or release')",
+      "report": "def report(b):\n    message = str(b.get('message', '')).strip()\n    if not message:\n        raise ValueError('an alert needs a message')\n    return runtime.alert(message, str(b.get('source', 'agent')), str(b.get('level', 'blocked')), goal=str(b.get('goal') or ''), step=str(b.get('step') or ''), diagnosis=str(b.get('diagnosis') or ''))",
+      "view_frame": "def view_frame(q):\n    frame = runtime.view.latest(int(q['after']) if q.get('after') else None)\n    if frame is not None:\n        return frame_response(frame, runtime.view.status())\n    status = runtime.view.status()\n    if status['settings'] is None:\n        raise HttpError(409, 'the ego view is not configured; POST /ego/view first')\n    if status['error'] and status['frame'] is None:\n        raise HttpError(503, f\"the ego view cannot render: {status['error']}\")\n    return NO_CONTENT"
+    },
+    "routeParameters": {
+      "GET /ego/alerts": "lambda q, b: runtime.alerts_view()",
+      "GET /ego/cameras/calibration": "lambda q, b: runtime.camera_calibration()",
+      "GET /ego/control": "lambda q, b: runtime.control()",
+      "GET /ego/dropped": "lambda q, b: {'dropped': runtime.dropped()}",
+      "GET /ego/gripper/pose": "lambda q, b: runtime.gripper_pose()",
+      "GET /ego/inputs": "lambda q, b: {'inputs': runtime.inputs}",
+      "GET /ego/plan": "lambda q, b: runtime.plan_view(int(q.get('since', 0)))",
+      "GET /ego/query": "lambda q, b: {'objects': runtime.query(q.get('category'), q.get('near'), float(q['radius']) if 'radius' in q else None)}",
+      "GET /ego/receipt": "lambda q, b: runtime.receipt(q['id'])",
+      "GET /ego/rgb/record/status": "lambda q, b: runtime.link.rgb_recording_status(q['recording_id'])",
+      "GET /ego/state": "lambda q, b: runtime.ego_state().to_dict()",
+      "GET /ego/summary": "lambda q, b: runtime.summary()",
+      "GET /ego/view": "lambda q, b: runtime.view.status()",
+      "GET /ego/view/frame": "lambda q, b: view_frame(q)",
+      "GET /skill/status": "lambda q, b: runtime.job(q['job'])",
+      "POST /clock/sleep": "lambda q, b: {'t': runtime.link.sleep(float(b['seconds']))}",
+      "POST /ego/alert": "lambda q, b: report(b)",
+      "POST /ego/alerts/ack": "lambda q, b: runtime.acknowledge(b.get('id'))",
+      "POST /ego/annotate": "lambda q, b: runtime.annotate(b)",
+      "POST /ego/cameras/capture": "lambda q, b: runtime.capture_cameras()",
+      "POST /ego/candidates": "lambda q, b: runtime.candidates(b)",
+      "POST /ego/control": "lambda q, b: control(b)",
+      "POST /ego/explore": "lambda q, b: runtime.explore(b.get('owner'), b.get('timeoutS', 120.0))",
+      "POST /ego/forget": "lambda q, b: runtime.forget(b)",
+      "POST /ego/inspect": "lambda q, b: runtime.inspect(b['entity'], int(b.get('px', 24)))",
+      "POST /ego/match-face": "lambda q, b: runtime.match_face(b.get('entities'), b['reference'], int(b.get('px', 24)))",
+      "POST /ego/observe": "lambda q, b: runtime.observe()",
+      "POST /ego/plan": "lambda q, b: runtime.set_plan(b)",
+      "POST /ego/predict": "lambda q, b: runtime.predict(b['skill'], b.get('params', {}))",
+      "POST /ego/reflect": "lambda q, b: runtime.reflect(b)",
+      "POST /ego/rgb/prepare-novelanything": "lambda q, b: runtime.prepare_novelanything(b['recording_id'], b.get('num_source_views'))",
+      "POST /ego/rgb/record/export": "lambda q, b: runtime.recording_evidence(b['recording_id'])",
+      "POST /ego/rgb/record/start": "lambda q, b: runtime.link.rgb_recording_start(b)",
+      "POST /ego/rgb/record/stop": "lambda q, b: runtime.link.rgb_recording_stop(b['recording_id'], b.get('cancel', False))",
+      "POST /ego/view": "lambda q, b: runtime.view.configure(ViewSettings.parse(b))",
+      "POST /skill/run": "lambda q, b: runtime.run(b['receipt'], b.get('owner'))",
+      "POST /skill/stop": "lambda q, b: runtime.stop_motion()",
+      "POST /skill/wait": "lambda q, b: runtime.wait(b['job'], float(b.get('timeoutS', 120)))"
+    },
+    "routes": [
+      "GET /ego/alerts",
+      "GET /ego/cameras/calibration",
+      "GET /ego/control",
+      "GET /ego/dropped",
+      "GET /ego/gripper/pose",
+      "GET /ego/inputs",
+      "GET /ego/plan",
+      "GET /ego/query",
+      "GET /ego/receipt",
+      "GET /ego/rgb/record/status",
+      "GET /ego/state",
+      "GET /ego/summary",
+      "GET /ego/view",
+      "GET /ego/view/frame",
+      "GET /skill/status",
+      "POST /clock/sleep",
+      "POST /ego/alert",
+      "POST /ego/alerts/ack",
+      "POST /ego/annotate",
+      "POST /ego/cameras/capture",
+      "POST /ego/candidates",
+      "POST /ego/control",
+      "POST /ego/explore",
+      "POST /ego/forget",
+      "POST /ego/inspect",
+      "POST /ego/match-face",
+      "POST /ego/observe",
+      "POST /ego/plan",
+      "POST /ego/predict",
+      "POST /ego/reflect",
+      "POST /ego/rgb/prepare-novelanything",
+      "POST /ego/rgb/record/export",
+      "POST /ego/rgb/record/start",
+      "POST /ego/rgb/record/stop",
+      "POST /ego/view",
+      "POST /skill/run",
+      "POST /skill/stop",
+      "POST /skill/wait"
+    ],
+    "unrecorded": [
+      "GET /ego/alerts",
+      "GET /ego/control",
+      "GET /ego/dropped",
+      "GET /ego/inputs",
+      "GET /ego/plan",
+      "GET /ego/receipt",
+      "GET /ego/state",
+      "GET /ego/view",
+      "GET /ego/view/frame",
+      "GET /skill/status",
+      "POST /clock/sleep",
+      "POST /ego/view",
+      "POST /skill/wait"
+    ]
+  },
+  "source": {
+    "default": "upstream default reference snapshot",
+    "toy": "assembly reference snapshot",
+    "probe": "tests/profile_runtime_surface.py",
+    "toyEnvironment": {
+      "SUBGOAL_SUCCESS": "0",
+      "STEWARD_WRIST_CAMERA": "1",
+      "STEWARD_RGBD_STORED": "1",
+      "STEWARD_PERCEPTION_HZ": "5",
+      "STEWARD_ASSEMBLY_DRIVE_BUDGET_S": "600",
+      "STEWARD_ASSEMBLY_LANDING_CHECK": "0",
+      "STEWARD_ASSEMBLY_DESTINATION_CHECK": "0",
+      "STEWARD_ASSEMBLY_RELEASE_OBSERVATION": "0",
+      "STEWARD_ASSEMBLY_COMPONENT_LANDING_CHECK": "0",
+      "STEWARD_ASSEMBLY_SESSION_FACES": "0",
+      "STEWARD_ASSEMBLY_INSERTION_SEARCH": "0",
+      "STEWARD_ASSEMBLY_SESSION_INVENTORY": "0",
+      "STEWARD_ASSEMBLY_RELEASE_CONDITIONS": "0",
+      "STEWARD_ASSEMBLY_RELEASE_RETENTION": "0",
+      "STEWARD_ASSEMBLY_RELEASE_PLANE": "0",
+      "STEWARD_ASSEMBLY_FIRST_INTERFACE": "0",
+      "STEWARD_ASSEMBLY_SESSION_IDENTITY": "0",
+      "STEWARD_FASTEN_MODE": "seat",
+      "STEWARD_NOSLIP": "5"
+    },
+    "snapshotFilesSha256": {
+      "src/steward/ego/runtime.py": "93ab8f14df24ccc305760645ea23329eb0536265768694d8ddc9b1a34c5d16dc",
+      "src/steward/ego/esim.py": "dad2233642e347fefb139c6a7c992a2fb4e2ef4f8080e3e4ad7f135c1d50c43f",
+      "src/steward/ego/skills.py": "4ead9df196aac5f0ba35960e522e7e2ba425425300b2a2792b75504ba7071bc8",
+      "src/steward/ego/server.py": "1724b9bad59d533764a0775fa8efc680a25074bd94fee734d84c889b1048dac4",
+      "src/steward/world/chat.py": "91a067debe4c8e4ece221c3c992ca614e328ef8afda79d0cae4f11c60655e35a",
+      "src/steward/diagnosis.py": "90e10eff76d8cd5184160fb3e1f1d2b78c96e2a8d165096b3a677e6230d5eae9",
+      "dsh/packages/dsh-tool-ego/src/index.ts": "d939e292cf2adbb319d9273982cedc98502d42ca896e13601f74dbe4115e9a43",
+      "dsh/packages/dsh-ego-reflection/src/index.ts": "5a4c8fe26565fa332e2e107c15d6e0511aefcc3cd4feedc08d547a7e47b96fa7"
+    }
+  }
+}

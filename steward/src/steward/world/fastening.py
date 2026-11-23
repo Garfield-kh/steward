@@ -1,6 +1,9 @@
 """World-only adapter for fastener detection and activation of preallocated welds."""
 from __future__ import annotations
 
+from steward.assembly_profile import enabled as _assembly_enabled
+
+
 import mujoco
 import numpy as np
 
@@ -69,26 +72,54 @@ class Fastening:
         used = occupied(sim.template)
         holes = [f.at(self.pose(f)) for f in self.inventory["screw-hole"] if f.key not in used]
         candidates = {}
-        for feature in self.inventory["screw"]:
-            if feature.entity in held or STATE_KEY in sim.template.entity(feature.entity).state_vars:
-                continue
-            screw = feature.at(self.pose(feature))
-            for driver in drivers:
-                if driver is not None and not driving(driver, screw, cfg):
+        if _assembly_enabled():
+            entries = np.array([h["entry"] for h in holes]) if holes else None
+            near_reach = 1.5 * (cfg.radial + cfg.gap)
+            for feature in self.inventory["screw"]:
+                if feature.entity in held or STATE_KEY in sim.template.entity(feature.entity).state_vars:
                     continue
-                for upper in holes:
-                    for lower in holes:
-                        if not mating(upper, lower, screw, cfg):
-                            continue
-                        # Never join separately held components: two ideal grasps would fight.
-                        joined = self.component(upper["entity"]) | self.component(lower["entity"])
-                        if len(held & joined) > 1:
-                            continue
-                        if cfg.mode == "seat" and not all(self.is_stationary(eid) for eid in
-                                (feature.entity, upper["entity"], lower["entity"])):
-                            continue
-                        key = (driver["entity"] if driver else None, feature.entity, upper["key"], lower["key"])
-                        candidates[key] = (feature, screw, upper, lower)
+                screw = feature.at(self.pose(feature))
+                # mating() needs the tip within radial (lateral) and gap (axial) of an upper entry,
+                # so a screw whose tip is farther than that from every free entry cannot mate.
+                if not holes or float(np.linalg.norm(entries - screw["tip"], axis=1).min()) > near_reach:
+                    continue
+                for driver in drivers:
+                    if driver is not None and not driving(driver, screw, cfg):
+                        continue
+                    for upper in holes:
+                        for lower in holes:
+                            if not mating(upper, lower, screw, cfg):
+                                continue
+                            # Never join separately held components: two ideal grasps would fight.
+                            joined = self.component(upper["entity"]) | self.component(lower["entity"])
+                            if len(held & joined) > 1:
+                                continue
+                            if cfg.mode == "seat" and not all(self.is_stationary(eid) for eid in
+                                    (feature.entity, upper["entity"], lower["entity"])):
+                                continue
+                            key = (driver["entity"] if driver else None, feature.entity, upper["key"], lower["key"])
+                            candidates[key] = (feature, screw, upper, lower)
+        else:
+            for feature in self.inventory["screw"]:
+                if feature.entity in held or STATE_KEY in sim.template.entity(feature.entity).state_vars:
+                    continue
+                screw = feature.at(self.pose(feature))
+                for driver in drivers:
+                    if driver is not None and not driving(driver, screw, cfg):
+                        continue
+                    for upper in holes:
+                        for lower in holes:
+                            if not mating(upper, lower, screw, cfg):
+                                continue
+                            # Never join separately held components: two ideal grasps would fight.
+                            joined = self.component(upper["entity"]) | self.component(lower["entity"])
+                            if len(held & joined) > 1:
+                                continue
+                            if cfg.mode == "seat" and not all(self.is_stationary(eid) for eid in
+                                    (feature.entity, upper["entity"], lower["entity"])):
+                                continue
+                            key = (driver["entity"] if driver else None, feature.entity, upper["key"], lower["key"])
+                            candidates[key] = (feature, screw, upper, lower)
         ready = self.dwell.update(candidates, sim.time, cfg.dwell)
         # With centimetre tolerances adjacent bores can both qualify. Prefer the
         # closest screw-to-upper and upper-to-lower pair, independent of ID order.

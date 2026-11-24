@@ -11,6 +11,7 @@ import math
 import time
 
 from steward import net
+from steward.ego.priors import compatible
 from steward.net import HttpError
 
 API_TIMEOUT_S = 120.0
@@ -103,8 +104,10 @@ def _refresh(api: str, obj: dict) -> dict:
     The estimator renumbers a track whenever it merges or rebuilds it, so an id held across a
     navigation or a prediction can name something that no longer exists. Take over whatever stands
     where this one stood: same role with a matching footprint first; for small objects a nearby
-    track of another label with the same footprint (a nested bowl re-read as a plate); for
-    furniture, a large slab whose label went missing."""
+    track whose label is a perception alias of this one with the same footprint (a nested bowl
+    re-read as a plate — see :func:`steward.ego.priors.compatible`); for furniture, a large slab
+    whose label went missing. Distinct categories that are not aliases (airplane vs screw) are
+    not adopted by footprint alone."""
     objects = call("GET", f"{api}/ego/summary")["objects"]
     found = next((o for o in objects if o["id"] == obj["id"]), None)
     if found is not None:
@@ -123,6 +126,9 @@ def _refresh(api: str, obj: dict) -> dict:
         def footprint_ok(o: dict) -> bool:
             return abs(_footprint_m(o) - want) <= fp_tol
 
+        def alias_ok(o: dict) -> bool:
+            return compatible(role, o.get("role") or o["category"]) or compatible(role, o["category"])
+
         def rank(o: dict) -> tuple:
             return (0 if color and o.get("color") == color else 1,
                     abs(_footprint_m(o) - want),
@@ -133,11 +139,10 @@ def _refresh(api: str, obj: dict) -> dict:
         role_and_size = [o for o in same_role if footprint_ok(o)]
         if role_and_size:
             return min(role_and_size, key=rank)
-        by_footprint = [o for o in nearby if footprint_ok(o)]
-        if want < 0.5 and by_footprint:
-            # Nested bowls share nearly the same xy; a rim view may rename the track. Prefer size
-            # over a same-role neighbour that is clearly another bowl.
-            return min(by_footprint, key=rank)
+        # Nested tableware: rim views rename bowl↔plate; only perception aliases, not any neighbour.
+        by_alias = [o for o in nearby if footprint_ok(o) and alias_ok(o)]
+        if want < 0.5 and by_alias:
+            return min(by_alias, key=rank)
         if want >= 0.5:
             # The label can go missing before the thing does: a table seen only as its top slab
             # is re-read as "unknown" in the same place with the same footprint.

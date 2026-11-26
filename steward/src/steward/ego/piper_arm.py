@@ -152,6 +152,11 @@ class PiperArm(Arm):
         out["armLateral"] = lateral
         return out
 
+    def invalidate_target(self) -> None:
+        """Discard virtual IK targets after another arm may have moved the shared torso or homed."""
+        with self._lock:
+            self._target = self._solved = None
+
     def resting(self) -> bool:
         """The planar target is unset before the first command and after joint-space homing."""
         with self._lock:

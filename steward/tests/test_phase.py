@@ -581,7 +581,10 @@ def test_a_potted_plant_is_recognised_from_its_size_and_green_foliage():
     assert max(big, key=big.get) == "plant", f"a larger plant is still a plant: {big}"
 
 
-def test_a_well_known_object_folded_into_a_newer_larger_track_keeps_its_id():
+def test_a_well_known_object_folded_into_a_larger_track_leaves_the_larger_ids_standing():
+    """Ids never swap in a merge, however well the smaller track was seen: a track that changes id
+    mid-episode is, to every consumer, a second object appearing. The larger track keeps its id and
+    the folded one is recorded under it."""
     from steward.ego.estimator import EgoEstimator
 
     est = EgoEstimator(robot_model=steward_bot().to_dict())
@@ -590,10 +593,11 @@ def test_a_well_known_object_folded_into_a_newer_larger_track_keeps_its_id():
     est.tracks["e:90"] = _remembered("e:90", "table", [0.65, -0.9, 0.375], [1.4, 0.9, 0.75])
     est.tracks["e:90"].observations = 3
     est._merge_parts(np.array([-1.5, -1.2, 1.2]))
-    assert list(est.tracks) == ["e:3"] and est.tracks["e:3"].observations == 43
+    assert list(est.tracks) == ["e:90"] and est.tracks["e:90"].observations == 43
     record = est.dropped[-1]
     assert {k: record[k] for k in ("id", "observations", "reason", "into")} == \
-        {"id": "e:90", "observations": 3, "reason": "merged: part of a larger object", "into": "e:3"}
+        {"id": "e:3", "observations": 40, "reason": "merged: part of a larger object", "into": "e:90"}
+    assert est.merged_into == {"e:3": "e:90"} and est.canonical_id("e:3") == "e:90"
 
 
 def test_a_well_known_table_that_looks_hollow_from_afar_is_kept_while_an_unknown_box_is_not():

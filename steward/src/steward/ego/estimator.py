@@ -132,6 +132,10 @@ class Track:
     tip_roll_source: str = "unknown"  # "observed" once a detection snapped tip; else "unknown"
     tip_pending: float | None = None
     tip_pending_n: int = 0
+    # The place spot the belief was told without seeing it (a release's planned spot); the next
+    # real view of the object clears it, so consumers can tell a predicted pose from an observed one.
+    predicted_spot: np.ndarray | None = None
+    fastened_holes: list[str] | None = None  # screw-hole ids of this part that the robot has driven a screw into
     held_yaw: float = 0.0  # while held: its heading relative to the gripper link's heading
     grasp_world_yaw: float | None = None  # estimated frame before transport, not a measured directed heading
     grasp_association: dict | None = None  # frozen perception before the load follows the gripper
@@ -339,6 +343,9 @@ class EgoEstimator:
         self._assembly_views = {}
         self._ids = itertools.count(1)
         self.dropped: collections.deque = collections.deque(maxlen=500)
+        self.merged_into: dict[str, str] = {}
+        """Id a track was merged under (the surviving track's canonical id), for ids consumers may
+        still hold (:meth:`canonical_id`)."""
         self._shed: list[np.ndarray] = []
         self._opened_drawers: set[str] = set()
         self._pulled_open: set[str] = set()
@@ -1111,7 +1118,9 @@ class EgoEstimator:
 
         def reading(point: np.ndarray) -> tuple[float, float] | None:
             x, y, z = pose_compose(inv, {"p": point.tolist(), "q": [1, 0, 0, 0]})["p"]
-            if x < 0.3 or x > self.config.max_range * 0.8:
+            # Behind the camera plane only: the pixel projection degenerates there. Near fields
+            # (a docked robot's target sits at x≈0.2-0.4 m) read like any other range.
+            if x <= 0.0 or x > self.config.max_range * 0.8:
                 return None
             u, v = int(round((w - 1) / 2 - y * f / x)), int(round((h - 1) / 2 - z * f / x))
             if not (0 <= u < w and 0 <= v < h):
@@ -1197,16 +1206,26 @@ class EgoEstimator:
                 distinct.append(view)
         return len(distinct)
 
-    def _rename(self, track: Track, new_id: str) -> None:
-        del self.tracks[track.id]
-        track.id = new_id
-        self.tracks[new_id] = track
+    def canonical_id(self, track_id: str) -> str:
+        """The id the object an old id named now lives under: a track merged into another left its
+        id there (:attr:`merged_into`), and consumers holding the old id resolve it here."""
+        seen: set[str] = set()
+        while track_id in self.merged_into and track_id not in seen:
+            seen.add(track_id)
+            track_id = self.merged_into[track_id]
+        return track_id
 
     def _drop(self, track: Track, reason: str, into: Track | None = None) -> None:
-        """Remove a track and record why, for the operator and for diagnosis."""
+        """Remove a track and record why, for the operator and for diagnosis. A merge keeps the
+        surviving track's own id and records the dropped one under it (``into``): ids never swap."""
         if track.pinned:
             return
         del self.tracks[track.id]
+        if into is not None:
+            self.merged_into[track.id] = into.id
+            for gone, host in list(self.merged_into.items()):
+                if host == track.id:
+                    self.merged_into[gone] = into.id
         self.dropped.append({"t": round(self.stamp, 2), "id": track.id, "category": track.category,
                              "observations": track.observations, "reason": reason,
                              "position": [round(float(v), 3) for v in track.pos],
@@ -1663,14 +1682,11 @@ class EgoEstimator:
                 for cat, n in small.category_counts.items():
                     big.category_counts[cat] = big.category_counts.get(cat, 0.0) + n
                 _absorb_semantics(big, small)
-                big_views = big.observations
                 big.observations += small.observations
                 big.existence = max(big.existence, small.existence)
+                # The larger track keeps its id however well the small one was seen: a track that
+                # swaps ids mid-episode is, to every consumer, a second object appearing.
                 self._drop(small, "merged: part of a larger object", into=big)
-                if small.observations > big_views:
-                    # The better-known object keeps its id; the newer track is the one that ends.
-                    self.dropped[-1].update(id=big.id, observations=big_views, into=small.id)
-                    self._rename(big, small.id)
                 if big.voxels is not None:
                     self._rebuild_geometry(big, cam_p, 2.0)
 
@@ -3619,6 +3635,7 @@ class EgoEstimator:
         if track.category == "bowl" and incoming_long > 0.32 and 0.05 < held_long <= 0.28:
             return
         track.settled = True
+        track.predicted_spot = None  # seen again where it stands: the planned spot is superseded
         if not (seg.border and len(track.recent) >= WHOLE_VIEWS):
             # A view cut by the image border boxes a part of the object, and it is often the nearest
             # view, which is the one the size of a small object is taken from. Until enough views
@@ -4596,6 +4613,7 @@ class EgoEstimator:
         gain = prior_var / (prior_var + r)
         track.pos = track.pos + gain * (pos - track.pos)
         track.var = (1.0 - gain) * prior_var
+        track.predicted_spot = None  # a view of it again: the planned release spot is superseded
         turned = abs(wrap_angle(yaw - track.yaw)) > YAW_MOVED
         if turned and track.yaw_var < YAW_MOVED**2:
             # Its heading is settled: one view at another heading is more likely a neighbour's
@@ -4646,7 +4664,9 @@ class EgoEstimator:
         def in_view(pos: np.ndarray) -> bool:
             for inv, half_h, half_v in views:
                 local = pose_compose(inv, {"p": pos.tolist(), "q": [1, 0, 0, 0]})["p"]
-                if (0.3 < local[0] < self.config.max_range * 0.8 and abs(math.atan2(local[1], local[0])) <= half_h
+                # No near-field exemption: a docked robot stands metres-deep inside its own view's
+                # blind ring otherwise, and phantom tracks there never fade.
+                if (0.0 < local[0] < self.config.max_range * 0.8 and abs(math.atan2(local[1], local[0])) <= half_h
                         and abs(math.atan2(local[2], local[0])) <= half_v):
                     return True
             return False
@@ -4684,6 +4704,7 @@ class EgoEstimator:
         load or encoder reading from before is about this episode. The body model stays; the id
         counter goes on so a console label never means two different objects."""
         self.tracks = {}
+        self.merged_into = {}
         self.assembly_memory = AssemblyMemory()
         self.stationary_assemblies = StationaryAssemblies()
         self.manipulation_envelopes = {}
@@ -5439,6 +5460,9 @@ class EgoEstimator:
         self.assembly_memory.released(track_id, track.pos, target, track.placement["releasedAt"])
         self.stationary_assemblies.released(track_id, track.pos, target, track.placement["releasedAt"])
         track.var = np.maximum(track.var, 0.02**2)
+        # The xy is the plan's prediction, not a look: it is marked as such and the next view of
+        # the object replaces it, rather than an unobserved spot standing as an observation.
+        track.predicted_spot = track.pos.copy()
         track.voxels = None
         track.interface_motion_at = float(self.stamp)
         track.interface_last_geometry = None
@@ -5572,6 +5596,26 @@ class EgoEstimator:
                       {"skill": "place", "on": support.id, "offset": offset,
                        "yaw": desired_yaw, "alignHoles": False, "clearance": 0.0}],
         }
+
+    def mark_fastened(self, screw_id: str, part_id: str, hole_id: str | None = None) -> bool:
+        """Record a screw the robot just drove into its hole: the part keeps its id, the hole is
+        marked done, and the screw — no longer a separate object — folds into the part (recorded
+        like any merge), so no later view of the fastener opens a fresh track beside the part.
+
+        :returns: whether both tracks were still believed (a view may have dropped either)."""
+        part = self.tracks.get(part_id)
+        screw = self.tracks.get(screw_id)
+        if part is None or screw is None or part.id == screw.id:
+            return False
+        if hole_id and hole_id not in (part.fastened_holes or []):
+            part.fastened_holes = [*(part.fastened_holes or []), hole_id]
+        if screw.voxels is not None and part.voxels is not None:
+            part.voxels = self._union(part.voxels, screw.voxels)
+        part.observations += screw.observations
+        part.existence = max(part.existence, screw.existence)
+        self._drop(screw, f"fastened into {part.id}", into=part)
+        self.version += 1
+        return True
 
     def _on_drawer_floor(self, drawer: Track) -> list[str]:
         """Small tracks on a drawer's floor, including ones just in front of its box."""
@@ -6148,6 +6192,8 @@ class EgoEstimator:
             if hole.get("through") or prior_holes.get(hole["id"], {}).get("through"):
                 marker["through"] = True
             affordances.append(Est(value={"screw-hole": marker}, src=hole_src))
+        affordances.extend(Est(value={"fastened-hole": hole_id}, src="inferred")
+                           for hole_id in (track.fastened_holes or []))
         link = Link(
             id="body", name=track.category,
             geometry={"collision": [primitive("box", size)]},

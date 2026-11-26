@@ -2,6 +2,7 @@
 
     steward build-kitchen            generate, validate and publish the Phase 0 kitchen
     steward build-toy-assembly       two tables of disassembled airplane and car toys with screws
+    steward build-screw-board        table with a four-hole board, four screws, and a screwdriver
     steward world                    run WSim + Observer + WCA + robot ports
     steward ego                      run the mobile robot's Ego Runtime + Ego API
     steward cobot-ego                run the Cobot Magic twin's Ego Runtime + Ego API (+ its scripted mission)
@@ -9,7 +10,7 @@
     steward demo                     scripted "cup to table" mission, checked against World State
     steward shuttle                  carry objects around table → cabinet → sideboard, step by step
     steward chores                   sort tableware, stack it on the sideboard, swap drawer contents; repeat
-    steward cobot                    the twin with its console in one process, rounds driven by world edits
+    steward cobot                    Cobot Magic twin + console; Ego Harness drives by default
     steward services                 list the remote perception services and check that each is reachable
 """
 
@@ -40,9 +41,11 @@ MISNAMES_CONFIG = STEWARD_DIR / "config" / "misnames.toml"
 # is somebody else's world.
 COBOT_WCA_PORT = 7430
 COBOT_ROBOT_PORT = 7440
+COBOT_API_PORT = 7450
 # The twin's scripted missions (steward.ego.cobot_runtime.MISSIONS), named here so parsing the
-# command line does not import the skill layer and its IK solver.
-COBOT_MISSIONS = ("bowl-on-plate", "nest-bowls", "carry-to-counter")
+# command line does not import the skill layer and its IK solver. Default ``steward cobot`` runs
+# the Ego Harness instead; pass ``--no-dispatch-task`` for these scripts.
+COBOT_MISSIONS = ("bowl-on-plate", "nest-bowls", "carry-to-counter", "drive-screws")
 
 
 def _tableware(ent) -> bool:
@@ -78,6 +81,14 @@ def cmd_build_toy_assembly(args) -> int:
     from steward.authoring.service import AuthoringService, build_toy_assembly
 
     out = build_toy_assembly(AuthoringService(args.root))
+    print(json.dumps(out, indent=2, ensure_ascii=False))
+    return 0
+
+
+def cmd_build_screw_board(args) -> int:
+    from steward.authoring.service import AuthoringService, build_screw_board
+
+    out = build_screw_board(AuthoringService(args.root))
     print(json.dumps(out, indent=2, ensure_ascii=False))
     return 0
 
@@ -520,8 +531,91 @@ def cmd_build_cobot_errand(args) -> int:
     return 0
 
 
+def cmd_build_cobot_screw_board(args) -> int:
+    from steward.authoring.service import AuthoringService, build_cobot_screw_board
+
+    out = build_cobot_screw_board(AuthoringService(args.root))
+    print(json.dumps(out, indent=2, ensure_ascii=False))
+    return 0
+
+
+def _cobot_mission_plan(task: str, goal: str, *, round_n: int, state: str = "running",
+                        current: str = "", difficulty: str = "",
+                        step_status: dict[str, str] | None = None) -> dict:
+    """High-level plan the cobot console shows while a scripted mission runs."""
+    catalogs = {
+        "bowl-on-plate": ["感知桌面", "左臂取碗", "放到盘子上"],
+        "nest-bowls": ["感知碗具", "叠放小碗", "收臂复位"],
+        "carry-to-counter": ["取碗", "开到操作台", "放下并复位"],
+        "drive-screws": ["感知螺丝板与零件", "左臂取螺丝并插入孔", "右臂取刀并拧紧", "完成全部螺丝"],
+    }
+    names = catalogs.get(task, ["执行任务"])
+    status = step_status or {}
+    steps = [{"name": name, "status": status.get(name, "pending")} for name in names]
+    if state == "running" and steps and all(st["status"] == "pending" for st in steps):
+        steps[0]["status"] = "active"
+    return {"goal": goal, "source": "mission", "steps": steps, "round": round_n,
+            "current": current or (steps[0]["name"] if steps else task),
+            "difficulty": difficulty, "state": state}
+
+
 def cmd_cobot(args) -> int:
-    """Run the Cobot Magic twin with its console; the mission is driven by the robot's own perception."""
+    """Run the Cobot Magic twin with its console.
+
+    Default: same shape as ``steward up`` — a full Ego Runtime process (``steward ego --body
+    cobot-magic``) plus World/Ego Harness chat, with the scenario task dispatched so the model
+    drives the twin. Pass ``--no-dispatch-task`` (or ``--ground-truth``) for the in-process
+    scripted mission that used to be the only path.
+    """
+    default_scenario = {"nest-bowls": "cobot-kitchen", "carry-to-counter": "cobot-errand",
+                        "drive-screws": "cobot-screw-board"}
+    args.scenario = args.scenario or default_scenario.get(args.task, "cobot-table")
+    if args.ground_truth and args.task not in ("bowl-on-plate", "nest-bowls"):
+        raise SystemExit(f"steward cobot: --ground-truth is written against the table topologies "
+                         f"(bowl/plate ids), not the {args.task} scenario")
+
+    # Ego Harness path: a real Ego Runtime behind the twin, so observe / predict / skill / plan /
+    # llm and run_code waits all show on the console the same way as ``steward up``.
+    if args.dispatch_task and not args.ground_truth:
+        return _cobot_harness(args)
+
+    return _cobot_scripted(args)
+
+
+def _cobot_harness(args) -> int:
+    """``steward up`` for a Cobot scenario: Ego Runtime process + harness chat + dispatched task."""
+    run_dir = Path(args.root) / "runs" / ("cobot-" + time.strftime("%Y%m%d-%H%M%S"))
+    host = _host(args, run_dir, start=False)
+    egos = EgoSupervisor(args, run_dir)
+    try:
+        egos.reconcile(host)
+    except BaseException:
+        egos.stop()
+        host.stop()
+        raise
+    host.before_episode_load = lambda scenario: egos.depart(host, scenario)
+    host.on_episode_loaded = lambda: egos.reconcile(host)
+    host.before_episode_reset = lambda: egos.retire(host)
+    host.start()
+    primary = next(iter(host.scenario["robots"]), None)
+    print(json.dumps({"console": f"{host.wca.url}/console", "wca": host.wca.url,
+                      "robot": host.robot_servers[primary].url if primary else None,
+                      "egoApi": egos.primary_url(),
+                      "task": host.scenario["task"], "phase": host.phase,
+                      "chat": bool(host.chat.agents), "dispatchTask": True, "driver": "ego-harness",
+                      "runDir": str(run_dir)}, ensure_ascii=False), flush=True)
+    host.dispatch_scenario_task()
+
+    def pump(timeout: float) -> None:
+        host.pump(timeout)
+        egos.check()
+
+    _wait_forever([egos.stop, host.stop], pump)
+    return 0
+
+
+def _cobot_scripted(args) -> int:
+    """In-process scripted mission (``--no-dispatch-task`` / ``--ground-truth`` escape hatch)."""
     from steward.assets.cobot import cobot_magic
     from steward.ego.cobot_runtime import MISSIONS
     from steward.ego.cobot_server import cobot_ego_api
@@ -530,8 +624,6 @@ def cmd_cobot(args) -> int:
     from steward.ego.perception import decode_rgbd
     from steward.phases import phase_modules
 
-    default_scenario = {"nest-bowls": "cobot-kitchen", "carry-to-counter": "cobot-errand"}
-    args.scenario = args.scenario or default_scenario.get(args.task, "cobot-table")
     run_dir = Path(args.root) / "runs" / ("cobot-" + time.strftime("%Y%m%d-%H%M%S"))
     host = _host(args, run_dir)  # builds the builtin scenario on first use
     sim = host.sim
@@ -539,11 +631,11 @@ def cmd_cobot(args) -> int:
     skills = CobotSkills(command=lambda cmd: sim.command(robot_id, cmd), state=lambda: sim.sensors(robot_id))
     est = EgoEstimator(robot_model=cobot_magic().to_dict())
     rgbd = phase_modules(host.phase)["perception"] == "rgbd"
-    # The console's Ego State panel is rendered from the mission's own estimator, so the operator
-    # watches the belief the skills are acting on -- not a second, independent one. Its self part
-    # reads the twin's encoders on every frame, so the arm on that panel moves with the arm.
-    ego = cobot_ego_api(est, port=0, live=lambda: sim.proprioception(robot_id))
-    host.attach_ego_api(robot_id, ego.url, skills=False)
+    ego = cobot_ego_api(est, port=0, live=lambda: sim.proprioception(robot_id), skills=skills)
+    board = ego.cobot_view
+    host.attach_ego_api(robot_id, ego.url, skills=True)
+    if host.chat.config is not None:
+        host.chat.config.ego_api = ego.url
 
     def sensed_frame() -> dict:
         return decode_rgbd(sim.rgbd(robot_id, "wide_camera")) if rgbd else sim.sensors(robot_id)
@@ -552,6 +644,7 @@ def cmd_cobot(args) -> int:
                       "robot": host.robot_servers[robot_id].url, "egoApi": ego.url,
                       "task": host.scenario["task"], "phase": host.phase,
                       "perception": "ground-truth" if args.ground_truth else ("rgbd" if rgbd else "detections"),
+                      "chat": bool(host.chat.agents), "dispatchTask": False, "driver": "scripted",
                       "runDir": str(run_dir)}, ensure_ascii=False), flush=True)
 
     outcome: dict = {}
@@ -569,9 +662,6 @@ def cmd_cobot(args) -> int:
         from steward.assets.cobot import park
 
         try:
-            # Command the park and let physics settle rather than waiting for a skill to converge:
-            # the point is only to get the forearms out of the head cameras' view, and the next
-            # motion re-seeds its IK from the encoders anyway.
             for arm in ("L", "R"):
                 sim.command(robot_id, {"joints": dict(zip(skills.ik.joint_names(arm), park(arm), strict=True))})
             for entity_id, at in homes.items():
@@ -607,22 +697,38 @@ def cmd_cobot(args) -> int:
     def run_sensed_mission() -> None:
         rounds = args.rounds
         mission = MISSIONS[args.task]
-        # Station parameters are the scenario's: the same mission runs in a different kitchen by
-        # loading a different scenario, not by editing code.
         kwargs = dict(host.scenario.get("missionConfig") or {})
+        goal = (host.scenario.get("task") or args.task).strip()
         done, crashes = 0, 0
         while True:
+            board.set_plan(_cobot_mission_plan(args.task, goal, round_n=done + 1,
+                                               current=f"第 {done + 1} 轮：开始"))
+            host.chat.post_note("robot", f"脚本任务 {args.task} 第 {done + 1} 轮开始")
             try:
                 result = mission(est, skills, sensed_frame, rgbd=rgbd, **kwargs)
                 outcome.update(result)
                 print(json.dumps({"mission": args.task, "round": done + 1, **result},
                                  ensure_ascii=False), flush=True)
+                ok = bool(result.get("ok"))
+                final = _cobot_mission_plan(
+                    args.task, goal, round_n=done + 1,
+                    state="succeeded" if ok else "failed",
+                    current="任务完成" if ok else "任务未完成",
+                    difficulty="" if ok else "; ".join((result.get("log") or [])[-3:]))
+                for step in final["steps"]:
+                    step["status"] = "done" if ok else "failed"
+                board.set_plan(final)
+                host.chat.post_note("robot", f"脚本任务 {args.task} 第 {done + 1} 轮"
+                                            f"{'完成' if ok else '失败'}")
             except Exception as exc:  # noqa: BLE001 - reported to the operator, console stays up
                 crashes += 1
                 outcome["error"] = f"{type(exc).__name__}: {exc}"
+                board.set_plan(_cobot_mission_plan(args.task, goal, round_n=done + 1, state="failed",
+                                                   current="任务异常结束", difficulty=outcome["error"]))
+                host.chat.post_error("robot", f"脚本任务异常：{outcome['error']}")
                 print(json.dumps({"round": done + 1, **outcome}, ensure_ascii=False), flush=True)
                 if args.rounds or crashes >= 3:
-                    return  # a single-shot run reports the error; a loop stops only if it repeats
+                    return
             else:
                 crashes = 0
             done += 1
@@ -631,9 +737,6 @@ def cmd_cobot(args) -> int:
             time.sleep(1.0)
             reset_for_next_round()
 
-    if args.ground_truth and args.task not in ("bowl-on-plate", "nest-bowls"):
-        raise SystemExit(f"steward cobot: --ground-truth is written against the table topologies "
-                         f"(bowl/plate ids), not the {args.task} scenario")
     worker = threading.Thread(target=run_truth_mission if args.ground_truth else run_sensed_mission,
                               name="cobot-mission", daemon=True)
     worker.start()
@@ -859,9 +962,11 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     sub.add_parser("build-kitchen").set_defaults(fn=cmd_build_kitchen)
     sub.add_parser("build-toy-assembly").set_defaults(fn=cmd_build_toy_assembly)
+    sub.add_parser("build-screw-board").set_defaults(fn=cmd_build_screw_board)
     sub.add_parser("build-cobot").set_defaults(fn=cmd_build_cobot)
     sub.add_parser("build-cobot-kitchen").set_defaults(fn=cmd_build_cobot_kitchen)
     sub.add_parser("build-cobot-errand").set_defaults(fn=cmd_build_cobot_errand)
+    sub.add_parser("build-cobot-screw-board").set_defaults(fn=cmd_build_cobot_screw_board)
     defaults = {"demo": "phase0-kitchen", "shuttle": "phase0-shuttle"}
     for name, fn in (("world", cmd_world), ("up", cmd_up), ("demo", cmd_demo), ("shuttle", cmd_shuttle),
                      ("chores", cmd_chores), ("cobot", cmd_cobot)):
@@ -890,6 +995,9 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--pause-on-perception-fault", action=argparse.BooleanOptionalAction, default=True,
                            help="pause the world when the Observer finds a gross perception fault (phantom object, "
                                 "robot inside an object) until the operator acknowledges the alert")
+        # Console chat (World / Ego Harness) is available on `up`/`world` and on `cobot`, so the twin's
+        # console shows the same plan and conversation panels as a full `steward up` run.
+        if not in_process or name == "cobot":
             p.add_argument("--world-harness", default=str(STEWARD_DIR / "var" / "dsh" / "world"),
                            help="DSH home of the World Harness used by the console chat; '' disables it")
             p.add_argument("--robot-harness", default=str(STEWARD_DIR / "var" / "dsh" / "robot-1"),
@@ -915,15 +1023,23 @@ def main(argv: list[str] | None = None) -> int:
         if name == "shuttle":
             p.add_argument("--steps", type=int, default=6, help="number of moves; 0 repeats until Ctrl-C")
         if name == "cobot":
-            p.add_argument("--task", choices=COBOT_MISSIONS, default="bowl-on-plate",
-                           help="what the twin does in the scene: bowl onto the plate, or nest the three "
-                                "coloured bowls of the kitchen (the cobot-kitchen scenario)")
+            p.add_argument("--task", choices=COBOT_MISSIONS, default="drive-screws",
+                           help="scenario selector: bowl-on-plate, nest-bowls, carry-to-counter, or drive-screws "
+                                "(default); with Ego Harness this picks the scenario, with --no-dispatch-task "
+                                "it also names the scripted mission")
             p.add_argument("--ground-truth", action="store_true",
-                           help="aim the skills at true object poses instead of the robot's estimates (debugging)")
+                           help="scripted escape hatch: aim skills at true object poses (implies no harness dispatch)")
             p.add_argument("--rounds", type=int, default=0,
-                           help="rounds of bowl-on-plate to run; 0 repeats until Ctrl-C (default)")
+                           help="scripted mission rounds when --no-dispatch-task; 0 repeats until Ctrl-C")
             p.add_argument("--api", help="Ego API of a running `steward up`; omit to run in-process")
             p.add_argument("--wca", default="http://127.0.0.1:7400", help="WCA of the running world (with --api)")
+            p.add_argument("--api-port", type=int, default=COBOT_API_PORT,
+                           help="Ego API port for the twin's Ego Runtime (Ego Harness path)")
+            p.add_argument("--bind-wait", type=float, default=10.0,
+                           help="seconds to wait for a fixed Ego API port still held by a service that just stopped")
+            p.add_argument("--dispatch-task", action=argparse.BooleanOptionalAction, default=True,
+                           help="start the Ego Harness on the scenario task (default on); "
+                                "--no-dispatch-task runs the in-process scripted mission instead")
         p.set_defaults(fn=fn)
     for name, fn in (("ego", cmd_ego), ("cobot-ego", cmd_cobot_ego)):
         p = sub.add_parser(name)

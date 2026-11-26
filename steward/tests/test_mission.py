@@ -113,6 +113,37 @@ def test_refresh_prefers_matching_footprint_among_same_role_neighbours(monkeypat
     assert found["id"] == "e:31"
 
 
+def test_refresh_does_not_bind_a_lost_airplane_to_a_nearby_screw(monkeypatch):
+    """Footprint rematch is only for perception aliases; toy_airplane is not an alias of toy_screw."""
+    lost = {
+        "id": "e:320", "category": "toy_airplane", "role": "toy_airplane",
+        "categories": {"toy_airplane": 0.9}, "position": [2.71, 0.60, 0.63],
+        "sizeM": [0.18, 0.08, 0.05], "extentM": [0.18, 0.08, 0.05],
+        "color": None, "existence": 1.0, "uncertaintyM": 0.02,
+    }
+    screw = {
+        "id": "e:321", "category": "toy_screw", "role": "toy_screw",
+        "categories": {"toy_screw": 0.9}, "position": [2.70, 0.59, 0.62],
+        "sizeM": [0.04, 0.04, 0.02], "extentM": [0.04, 0.04, 0.02],
+        "color": None, "existence": 0.5, "uncertaintyM": 0.04,
+    }
+    # Similar footprint (seed2 drawers): still refused — not a nestable tableware alias.
+    screw_wide = {**screw, "sizeM": [0.16, 0.07, 0.04], "extentM": [0.16, 0.07, 0.04]}
+    monkeypatch.setattr(mission_mod, "call", lambda *a, **k: {"objects": [screw_wide]})
+    with pytest.raises(MissionFailed, match="e:320"):
+        _refresh("http://unused", lost)
+
+
+def test_nestable_tableware_labels_are_perception_aliases():
+    from steward.ego.priors import compatible
+
+    assert compatible("bowl", "plate") and compatible("plate", "bowl")
+    assert compatible("cup", "mug")
+    assert not compatible("toy_airplane", "toy_screw")
+    assert not compatible("pistol", "teddy_bear")
+    assert not compatible("wine_glass", "bowl")
+
+
 def test_refresh_still_fails_when_nothing_nearby_matches(monkeypatch):
     lost = _bowl("e:4", [1.5, 0.0, 0.90], [0.13, 0.13, 0.05])
     far = _bowl("e:9", [3.0, 3.0, 0.9], [0.13, 0.13, 0.05])

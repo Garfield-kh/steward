@@ -54,6 +54,11 @@ class MotionConfig:
     retreat_height: float = 0.15   # lift after closing the fingers
     line_step: float = 0.04        # straight-line descents and lifts are walked in these increments
     max_tool_tilt: float = 0.7     # rad the tool may tilt off the requested orientation (wrist limits)
+    # insert_screw_into_hole needs the shaft nearly vertical: a 0.5 rad wrist tilt lays the tip
+    # sideways in the hole and the screw falls over on release.
+    max_insert_tilt: float = 0.12
+    # drive_screw bit-down can lean a little more (pressing a head), still far below general pick tilt.
+    max_drive_tilt: float = 0.25
     tcp_tolerance: float = 0.015   # a solved pose further than this from the pinch point is refused
     grasp_grip_wait_s: float = 0.4
     # Chassis motion, the mobile robot's numbers: the TRACER is not faster in the twin.
@@ -74,6 +79,11 @@ class Job:
     started: float = 0.0
     finished: float = 0.0
     log: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        return {"id": self.id, "skill": self.skill, "receipt": self.receipt, "state": self.state,
+                "message": self.message, "started": self.started, "finished": self.finished,
+                "log": self.log[-20:]}
 
 
 class CobotSkills:
@@ -135,6 +145,10 @@ class CobotSkills:
                 self.pick(job, plan)
             elif skill == "place":
                 self.place(job, plan)
+            elif skill == "insert_screw_into_hole":
+                self.insert_screw_into_hole(job, plan)
+            elif skill == "drive_screw":
+                self.drive_screw(job, plan)
             elif skill == "push":
                 self.push(job, plan)
             elif skill == "drawer":
@@ -166,7 +180,8 @@ class CobotSkills:
                 self._on_finish(job)
 
     # ------------------------------------------------------------------- verbs
-    def _move_above(self, job: Job, arm: str, at: list[float], tool: list[float]) -> list[float]:
+    def _move_above(self, job: Job, arm: str, at: list[float], tool: list[float],
+                    *, max_tilt: float | None = None) -> list[float]:
         """Reach a pre-grasp pose above ``at``, lowering the approach until the wrist can hold it.
 
         A pre-grasp pose is the highest point of the motion, and the far side of the table sits at
@@ -178,7 +193,7 @@ class CobotSkills:
                        self.config.approach_height * 0.5, 0.03):
             point = [at[0], at[1], at[2] + height]
             try:
-                self.move_to(job, arm, point, tool)
+                self.move_to(job, arm, point, tool, max_tilt=max_tilt)
             except SkillFailed as exc:
                 last = exc
                 continue
@@ -186,7 +201,6 @@ class CobotSkills:
                 job.log.append(f"{arm} approach lowered to {height:.2f} m above the target")
             return point
         raise last if last is not None else SkillFailed(f"{arm} arm cannot reach above {_fmt(at)}")
-
     def pick(self, job: Job, plan: dict) -> None:
         """Reach the pinch point over ``plan['at']``, descend, close, and lift clear."""
         arm = self._arm(plan)
@@ -212,7 +226,10 @@ class CobotSkills:
         arm = self._arm(plan)
         at = _xyz(plan["at"], "plan.at")
         grip = plan.get("gripper", f"{arm}_link6")
-        tool = _tool_down()
+        orientation = plan.get("orientation")
+        if orientation is not None and len(orientation) != 4:
+            raise SkillFailed(f"plan.orientation must be a wxyz quaternion, got {orientation!r}")
+        tool = orientation or _tool_down()
         try:
             above = self._move_above(job, arm, at, tool)
         except SkillFailed:
@@ -226,6 +243,130 @@ class CobotSkills:
         self.move_to(job, arm, at, tool, line=True)
         self.gripper(job, grip, close=False)
         self.move_to(job, arm, [at[0], at[1], at[2] + self.config.retreat_height], tool, line=True)
+
+    def insert_screw_into_hole(self, job: Job, plan: dict) -> None:
+        """Seat a held screw tip-down (axis vertical, tip into the hole).
+
+        The held screw must stay nearly vertical: tip along world −z, head up. A tilted tool
+        lays the tip sideways and the screw falls over on release. ``plan``: ``at`` seat point,
+        ``arm``/``gripper``, optional ``orientation`` (default tool-down), optional ``maxTilt``,
+        optional wrist refine, soft release (open, linger, rise still tip-down).
+        """
+        arm = self._arm(plan)
+        at = _xyz(plan["at"], "plan.at")
+        grip = plan.get("gripper", f"{arm}_link6")
+        tool = plan.get("orientation") or _tool_down()
+        tilt = float(plan.get("maxTilt", self.config.max_insert_tilt))
+        if plan.get("refine") and plan.get("wristCamera") and plan.get("refineAt"):
+            at = self._wrist_refine(job, arm, tool, at, plan, max_tilt=tilt)
+        linger = float(plan.get("releaseLingerS", 0.35))
+        rise = float(plan.get("retreatHeight", self.config.retreat_height))
+        above = self._move_above(job, arm, at, tool, max_tilt=tilt)
+        job.log.append(f"{arm} tip-down insert {_fmt(above)} → seat {_fmt(at)} (maxTilt={tilt:.2f})")
+        self.move_to(job, arm, at, tool, line=True, max_tilt=tilt)
+        self.gripper(job, grip, close=False)
+        time.sleep(max(0.0, linger))
+        # Rise while still tip-down so a half-seated screw is not flicked over by a wrist tilt.
+        self.move_to(job, arm, [at[0], at[1], at[2] + rise], tool, line=True, max_tilt=tilt)
+        job.message = f"inserted screw tip-down at {_fmt(at)}"
+
+    def drive_screw(self, job: Job, plan: dict) -> None:
+        """Press a held screwdriver bit-down onto a seated screw head; keep holding the driver.
+
+        The driver is picked lying flat; tool-down alone keeps the bit horizontal. Default
+        orientation tips ±π/2 about tool +x so the bit points world −z (kitchen-robot
+        ``wristRoll`` sign). If that pose is out of reach, the opposite roll is tried, then
+        tool-down as a last resort. ``plan``: ``at``, ``pressAt``, ``arm``/``gripper``, optional
+        ``orientation`` / ``wristRoll``, wrist refine, ``driveS``.
+        """
+        arm = self._arm(plan)
+        at = _xyz(plan["at"], "plan.at")
+        press = _xyz(plan.get("pressAt") or [at[0], at[1], at[2] - 0.012], "plan.pressAt")
+        tilt = float(plan.get("maxTilt", self.config.max_drive_tilt))
+        if plan.get("orientation") is not None:
+            tools = [plan["orientation"]]
+        else:
+            # Prefer a full tip; Piper often needs a slightly smaller roll to stay in reach.
+            # Never fall back to flat tool-down — that presses the shaft side onto the head.
+            roll = float(plan.get("wristRoll", -math.pi / 2))
+            tools = []
+            for mag in (abs(roll), 1.35, 1.20, 1.05):
+                if mag < 1.0:
+                    continue
+                tools.append(_tool_bit_down(math.copysign(mag, roll)))
+                tools.append(_tool_bit_down(-math.copysign(mag, roll)))
+        tool = tools[0]
+        last_err: SkillFailed | None = None
+        for candidate in tools:
+            try:
+                # Probe reach at the hover before committing the press.
+                self._move_above(job, arm, at, candidate, max_tilt=tilt)
+                tool = candidate
+                if candidate is not tools[0]:
+                    job.log.append(f"{arm} bit-down fallback orientation")
+                last_err = None
+                break
+            except SkillFailed as exc:
+                last_err = exc
+        if last_err is not None:
+            raise last_err
+        job.log.append(f"{arm} bit-down drive orientation locked")
+        if plan.get("refine") and plan.get("wristCamera") and plan.get("refineAt"):
+            at = self._wrist_refine(job, arm, tool, at, plan, max_tilt=tilt)
+            press = [at[0], at[1], press[2]]
+        hold = float(plan.get("driveS", 1.5))
+        above = [at[0], at[1], at[2] + self.config.approach_height * 0.5]
+        job.log.append(f"{arm} bit-down drive {_fmt(above)} → press {_fmt(press)}")
+        # Descend with the locked tip; if the press height is out of reach, soften tip again
+        # (same candidates as the hover probe) rather than pressing flat.
+        press_tools = tools if plan.get("orientation") is None else [tool]
+        last_press: SkillFailed | None = None
+        for candidate in press_tools:
+            try:
+                if candidate is not tool:
+                    self._move_above(job, arm, at, candidate, max_tilt=tilt)
+                    tool = candidate
+                    job.log.append(f"{arm} softened bit-down for press")
+                self.move_to(job, arm, at, tool, line=True, max_tilt=tilt)
+                self.move_to(job, arm, press, tool, line=True, max_tilt=tilt)
+                last_press = None
+                break
+            except SkillFailed as exc:
+                last_press = exc
+        if last_press is not None:
+            raise last_press
+        time.sleep(max(0.05, hold))
+        job.log.append(f"held bit on screw for {hold:.1f}s")
+        self.move_to(job, arm, at, tool, line=True, max_tilt=tilt)
+        job.message = f"drove screw bit-down at {_fmt(press)}"
+
+    def _wrist_refine(self, job: Job, arm: str, tool: list[float], at: list[float],
+                      plan: dict, *, max_tilt: float | None = None) -> list[float]:
+        """Hover, then shift planar aim by ``refineAt - at`` projected (belief from wrist view).
+
+        The mission updates the estimator from the wrist camera before this call; ``refineAt`` is
+        the refined world point (hole centre / screw head). Only XY is applied; Z stays on ``at``.
+        """
+        refine = _xyz(plan["refineAt"], "plan.refineAt")
+        cam = plan.get("wristCamera")
+        # Same lowering ladder as ``_move_above``: a high wrist hover often sits past Piper reach.
+        last: SkillFailed | None = None
+        for height in (self.config.approach_height, self.config.approach_height * 0.75,
+                       self.config.approach_height * 0.5, 0.06):
+            hover = [at[0], at[1], max(at[2] + height, refine[2] + height)]
+            try:
+                self.move_to(job, arm, hover, tool, max_tilt=max_tilt)
+                last = None
+                break
+            except SkillFailed as exc:
+                last = exc
+        if last is not None:
+            raise last
+        dx, dy = refine[0] - at[0], refine[1] - at[1]
+        nudged = [at[0] + dx, at[1] + dy, at[2]]
+        if math.hypot(dx, dy) > 1e-4:
+            job.log.append(f"{arm} wrist refine via {cam}: Δxy=({dx * 100:.1f}, {dy * 100:.1f}) cm → {_fmt(nudged)}")
+        return nudged
 
     def push(self, job: Job, plan: dict) -> None:
         """Push an object side-on: approach behind it, then travel ``plan['by']`` along the surface."""
@@ -368,23 +509,32 @@ class CobotSkills:
                 raise SkillFailed(f"base did not reach the waypoint (error {err:.2f} m)")
 
     def _drive(self, job: Job, path: list, final_yaw: float) -> None:
-        for wx, wy in path:
+        for waypoint in path:
+            wx, wy = waypoint[:2]
             o = self._state()["odometry"]
             if math.hypot(wx - o["x"], wy - o["y"]) < self.config.position_tol:
                 continue
             heading = math.atan2(wy - o["y"], wx - o["x"])
-            self._turn_to(heading)
+            if len(waypoint) == 3:
+                heading = waypoint[2]
+                if abs(wrap_angle(o['yaw']-heading)) > self.config.yaw_tol:
+                    raise SkillFailed('escape heading changed; predict again')
+            else:
+                self._turn_to(heading)
             self._translate_to(wx, wy, heading)
             job.log.append(f"reached waypoint ({wx:.2f}, {wy:.2f})")
         self._turn_to(final_yaw)
 
     # -------------------------------------------------------------- primitives
     def move_to(self, job: Job, arm: str, tcp: list[float], orientation: list[float] | None = None,
-                line: bool = False) -> list[float]:
+                line: bool = False, *, max_tilt: float | None = None) -> list[float]:
         """Move the arm so the pinch point reaches ``tcp``; returns the joint targets.
 
         ``line=True`` walks the pinch point straight there in ``line_step`` increments instead of
-        one joint interpolation, which is what a descent or a lift has to be."""
+        one joint interpolation, which is what a descent or a lift has to be.
+        ``max_tilt`` caps how far the tool may lean from ``orientation`` (defaults to
+        ``MotionConfig.max_tool_tilt``; tip-down insert passes a tighter limit).
+        """
         if line:
             here = self.tcp(arm)
             distance = sum((a - b) ** 2 for a, b in zip(tcp, here, strict=True)) ** 0.5
@@ -392,23 +542,26 @@ class CobotSkills:
             for i in range(1, steps + 1):
                 frac = i / steps
                 waypoint = [here[j] + (tcp[j] - here[j]) * frac for j in range(3)]
-                self._move_to(job, arm, waypoint, orientation)
+                self._move_to(job, arm, waypoint, orientation, max_tilt=max_tilt)
         else:
-            self._move_to(job, arm, tcp, orientation)
+            self._move_to(job, arm, tcp, orientation, max_tilt=max_tilt)
         return self.ik.current(arm)
 
-    def _move_to(self, job: Job, arm: str, tcp: list[float], orientation: list[float] | None) -> None:
+    def _move_to(self, job: Job, arm: str, tcp: list[float], orientation: list[float] | None,
+                 *, max_tilt: float | None = None) -> None:
         self._sync(arm)
         seed = self.ik.current(arm)
         target = self._link6_target(tcp, orientation)
+        tilt_limit = self.config.max_tool_tilt if max_tilt is None else max_tilt
         try:
             if orientation is None:
                 joints = self.ik.solve(arm, target["p"], target["q"], q_init=seed)
             else:
                 # The wrist cannot hold a strictly vertical tool everywhere, so a small tilt is
-                # accepted rather than declaring a reachable place unreachable.
+                # accepted rather than declaring a reachable place unreachable — except tip-down
+                # insert/drive, which pass a tight ``max_tilt`` so the shaft stays vertical.
                 joints, tilt = self.ik.solve_tool(arm, target["p"], target["q"],
-                                                  max_tilt=self.config.max_tool_tilt, q_init=seed)
+                                                  max_tilt=tilt_limit, q_init=seed)
                 # Report the pinch point, not the wrist: a tilted tool that keeps its wrist on
                 # target is exactly how a descent ends up a few centimetres off the plate.
                 reached = self._tcp_of(self.ik.fk(arm, joints))
@@ -419,7 +572,7 @@ class CobotSkills:
                 if tilt > 0.02:
                     job.log.append(f"{arm} tool tilted {tilt:.2f} rad to reach {_fmt(tcp)}")
         except IkError as exc:
-            raise SkillFailed(f"{arm} arm cannot reach {_fmt(tcp)}: {exc}") from exc
+            raise SkillFailed(f"{arm} arm cannot reach {_fmt(tcp)} in a usable tool orientation: {exc}") from exc
         self._command({"joints": dict(zip(self.ik.joint_names(arm), joints, strict=True))})
         self._wait_joints(arm, joints)
         job.log.append(f"{arm} at {_fmt(self.tcp(arm))}")
@@ -558,6 +711,16 @@ class CobotSkills:
 def _tool_down() -> list[float]:
     """Tool pointing straight down: link6 +z along world -z (180 degrees about x)."""
     return [0.0, 1.0, 0.0, 0.0]
+
+
+def _tool_bit_down(wrist_roll: float = -math.pi / 2) -> list[float]:
+    """Tool-down, then roll about tool +x so a laterally held screwdriver bit points world −z.
+
+    ``wrist_roll`` uses the kitchen-robot sign: −π/2 sends gripper +y toward world −z.
+    """
+    from steward.math3d import quat_from_axis_angle, quat_mul
+
+    return quat_mul(_tool_down(), quat_from_axis_angle([1.0, 0.0, 0.0], -wrist_roll))
 
 
 def _tool_sideways(direction: list[float]) -> list[float]:

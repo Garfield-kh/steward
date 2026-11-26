@@ -2019,6 +2019,34 @@ def test_a_pistol_on_the_sideboard_top_is_dropped_and_the_one_in_the_drawer_stay
     assert "e:96" not in est.tracks and "e:104" in est.tracks
 
 
+def test_a_mission_staged_pistol_on_the_sideboard_top_is_kept():
+    """Chores parks the real pistol on the top; a stage anchor must outrank the false-end drop."""
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    side = _remembered("e:25", "sideboard", [-2.74, 0.585, 0.42], [1.42, 0.51, 0.84])
+    drawer = _remembered("e:26", "drawer", [-2.71, 0.585, 0.665], [0.58, 0.46, 0.22])
+    staged = _remembered("e:200", "pistol", [-2.72, 0.32, 0.86], [0.18, 0.12, 0.03])
+    rail = _remembered("e:96", "pistol", [-2.77, 0.915, 0.805], [0.30, 0.06, 0.04])
+    inside = _remembered("e:104", "pistol", [-2.71, 0.685, 0.63], [0.16, 0.16, 0.03])
+    est.tracks = {"e:25": side, "e:26": drawer, "e:200": staged, "e:96": rail, "e:104": inside}
+    est.protect_stage_spot([-2.72, 0.32], role="pistol", radius=0.35)
+    est._drop_pistols_off_the_drawer()
+    assert "e:200" in est.tracks and "e:104" in est.tracks
+    assert "e:96" not in est.tracks
+    est.clear_stage_spot([-2.72, 0.32])
+    est._drop_pistols_off_the_drawer()
+    assert "e:200" not in est.tracks
+
+
+def test_a_pinned_pistol_on_the_sideboard_top_is_kept():
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    side = _remembered("e:25", "sideboard", [-2.74, 0.585, 0.42], [1.42, 0.51, 0.84])
+    staged = _remembered("e:201", "pistol", [-2.70, 0.40, 0.86], [0.18, 0.12, 0.03])
+    staged.pinned = True
+    est.tracks = {"e:25": side, "e:201": staged}
+    est._drop_pistols_off_the_drawer()
+    assert "e:201" in est.tracks
+
+
 def test_a_plate_off_the_table_and_a_plate_flush_with_the_counter_are_dropped():
     est = EgoEstimator(robot_model=steward_bot().to_dict())
     table = _remembered("e:3", "table", [0.6, -0.9, 0.375], [1.2, 0.8, 0.75])
@@ -2495,6 +2523,17 @@ def test_a_bear_on_the_table_gives_way_to_the_wine_glass():
     assert est.tracks["e:239"].category == "wine_glass"
 
 
+def test_a_mission_staged_bear_is_not_merged_away_for_a_wine_glass():
+    """Sideboard staging parks a real teddy; the table stem heuristic must not drop it."""
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    bear = _remembered("e:210", "teddy_bear", [-2.82, 0.332, 0.94], [0.14, 0.10, 0.17])
+    glass = _remembered("e:1154", "wine_glass", [-2.83, 0.33, 0.94], [0.10, 0.10, 0.18])
+    est.tracks = {"e:210": bear, "e:1154": glass}
+    est.protect_stage_spot([-2.82, 0.332], role="teddy_bear", radius=0.35)
+    est._merge_same_place(np.zeros(3))
+    assert "e:210" in est.tracks and est.tracks["e:210"].category == "teddy_bear"
+
+
 def test_a_tall_yellow_box_beside_a_drawer_is_the_airplane():
     from steward.ego.estimator import _voxelize
 
@@ -2659,6 +2698,55 @@ def test_a_stem_shaped_bear_on_the_table_is_the_wine_glass():
     est.tracks = {"e:9": bear}
     est._rebuild_geometry(bear, np.array([-1.6, -1.3, 1.2]), 1.0)
     assert bear.category == "wine_glass"
+
+
+def test_a_mission_staged_stem_shaped_bear_stays_a_teddy():
+    """Stage-protect on the sideboard top outranks the table stem→glass rename."""
+    from steward.ego.estimator import _voxelize
+
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    bear = _remembered("e:210", "teddy_bear", [-2.82, 0.332, 0.94], [0.14, 0.10, 0.17])
+    xs = np.linspace(-2.89, -2.75, 4)
+    ys = np.linspace(0.28, 0.38, 4)
+    zs = (0.85, 1.02)
+    bear.voxels = _voxelize(np.array([[x, y, z] for x in xs for y in ys for z in zs]))
+    est.tracks = {"e:210": bear}
+    est.protect_stage_spot([-2.82, 0.332], role="teddy_bear", radius=0.35)
+    est._rebuild_geometry(bear, np.array([-1.6, 0.3, 1.2]), 1.0)
+    assert bear.category == "teddy_bear"
+
+
+def test_a_mission_staged_spot_restores_a_glass_misread_to_teddy():
+    """A track already flipped to wine_glass at the stage XY is renamed back to teddy_bear."""
+    from steward.ego.estimator import _voxelize
+
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    glass = _remembered("e:210", "wine_glass", [-2.82, 0.332, 0.94], [0.10, 0.10, 0.17])
+    xs = np.linspace(-2.87, -2.77, 4)
+    ys = np.linspace(0.29, 0.37, 4)
+    zs = (0.86, 1.01)
+    glass.voxels = _voxelize(np.array([[x, y, z] for x in xs for y in ys for z in zs]))
+    est.tracks = {"e:210": glass}
+    est.protect_stage_spot([-2.82, 0.332], role="teddy_bear", radius=0.35)
+    est._rebuild_geometry(glass, np.array([-1.6, 0.3, 1.2]), 1.0)
+    assert glass.category == "teddy_bear"
+
+
+def test_stage_protect_does_not_rename_the_sideboard_to_teddy():
+    """Furniture centres often lie inside the stage radius; named=None must not invent a teddy."""
+    from steward.ego.estimator import _voxelize
+
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    # Sideboard centre ≈0.27 m from a front-edge stage spot (radius 0.35 m).
+    side = _remembered("e:19", "sideboard", [-2.73, 0.59, 0.42], [1.42, 0.49, 0.84])
+    xs = np.linspace(-3.40, -2.06, 8)
+    ys = np.linspace(0.35, 0.83, 5)
+    zs = (0.05, 0.80)
+    side.voxels = _voxelize(np.array([[x, y, z] for x in xs for y in ys for z in zs]))
+    est.tracks = {"e:19": side}
+    est.protect_stage_spot([-2.815, 0.332], role="teddy_bear", radius=0.35)
+    est._rebuild_geometry(side, np.array([-1.6, 0.3, 1.2]), 1.0)
+    assert side.category == "sideboard"
 
 
 def test_a_bear_pushed_through_the_back_is_dropped_when_one_remains_inside():

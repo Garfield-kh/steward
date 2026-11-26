@@ -3,7 +3,7 @@
 # masses and actuators remain simulation approximations; no wheel dynamics are imported.
 
 id: cobot-magic
-display: AgileX Cobot Magic (TRACER 2.0 base + dual Piper + two-camera head)
+display: AgileX Cobot Magic (TRACER 2.0 base + dual Piper + top head + wrist cameras)
 
 reference:
   file: robot.usd
@@ -63,23 +63,37 @@ mechanical:
   leader_arms: 2         # teleoperation only; autonomy uses the two follower arms
 
 sensors:
-  # The mobile kitchen robot's head (generators.head_link) on a mast fixed to the chassis, so both
-  # bodies perceive alike and either one can take any scenario. MEASURE: the real Orbbec mounts.
+  # Cobot Magic factory: Orbbec DaBai ×3 — one top/main view between the follower arms, plus one
+  # wrist camera per follower Piper. The mast head (generators.head_link) stands in for the top
+  # view so kitchen-robot scenarios stay interchangeable; wrist mounts match AgileX
+  # piper_description_v100_camera.urdf ``hand_camera_joint`` on link6. MEASURE real Orbbec poses.
   cameras:
     - id: head_camera
       kind: rgbd
       mount_link: head    # head fixed on the chassis at [0.16, 0, 1.50]; does not ride the lift
       mount: {p: [0.05, 0, 0], pitch_deg: 30}
       intrinsics: {width: 320, height: 240, fovy: 60}
-      role: survey
+      role: survey        # top/main-view stand-in
     - id: wide_camera
       kind: rgbd
       mount_link: head
       mount: {p: [0.05, 0, -0.05], pitch_deg: 45}
       intrinsics: {width: 480, height: 360, fovy: 100}
       role: work          # sees both arms' workspace down to the chassis front
+    - id: L_wrist_camera
+      kind: rgbd
+      mount_link: L_link6
+      mount: {p: [0.0, 0.075, 0.03], rpy: [0.0, -0.3, 1.57]}  # hand_camera_joint
+      intrinsics: {width: 640, height: 400, fovy: 45.3}       # DaBai-class vertical FOV
+      role: wrist
+    - id: R_wrist_camera
+      kind: rgbd
+      mount_link: R_link6
+      mount: {p: [0.0, 0.075, 0.03], rpy: [0.0, -0.3, 1.57]}
+      intrinsics: {width: 640, height: 400, fovy: 45.3}
+      role: wrist
   visibility_contract:
-    sees_own_gripper: wide_camera (work view); head_camera (survey view) loses the hands at a tabletop pick
+    sees_own_gripper: L/R_wrist_camera (eye-in-hand); wide_camera (work view); head_camera loses close hands
     near_field_blind: arms in front of the head -> FK-projection self-filter
     invisible_materials: transparent glass (Astra structured light + SAM3 both fail; task subset avoids)
 
@@ -87,7 +101,7 @@ self_model:
   kinematics: {source: robot.usd, implementation: src/steward/assets/cobot.py, sim: mjcf-converted}
   ik: {solver: mink, note: "6-DoF; PyRoki rejects 6-DoF (YAM precedent)"}   # ASPIRE yam_real is the porting reference
   collision: primitive approximation per link; fingers visual-only
-  camera_fk: any-link FK chain (head fixed on the chassis)
+  camera_fk: any-link FK chain (head fixed on the chassis; wrist cameras follow L/R_link6)
   actuator: position control, joint velocity limits MEASURE from Piper spec
 
 control_face:            # what EH sees; implementation per backend
@@ -103,8 +117,8 @@ execution_stack:         # all services run locally on the agilex workstation RT
 sim2real:
   real_backend: piper_sdk   # pip package, SocketCAN can0 @1Mbps; no ROS dependency
   safety: [hardware e-stop REQUIRED before any motion, '"--allow-motion" software interlock', joint velocity caps]
-  calibration: [head camera intrinsics, head-to-arm extrinsics, arm mount transforms]  # MEASURE, replaces placeholders above
-  observer_gt: apriltag + head camera
+  calibration: [head/wrist intrinsics, hand_camera_joint, head-to-arm extrinsics, arm mounts]  # MEASURE
+  observer_gt: apriltag + head / wrist cameras
   wh_role: operator console; human perturbations
 
 tasks:

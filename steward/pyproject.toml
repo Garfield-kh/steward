@@ -14,6 +14,7 @@ dependencies = [
 
 [project.optional-dependencies]
 providers = ["requests>=2.31"]
+localization = ["scipy>=1.11"]
 usd = ["mujoco==4.0.0", "mujoco-usd==4.0.0"]
 
 [project.scripts]

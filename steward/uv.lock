@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.12'",
@@ -1068,6 +1068,10 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+localization = [
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "scipy", version = "1.18.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+]
 providers = [
     { name = "requests" },
 ]
@@ -1093,9 +1097,10 @@ requires-dist = [
     { name = "pillow", specifier = ">=10.0" },
     { name = "requests", marker = "extra == 'providers'", specifier = ">=2.31" },
     { name = "scipy", specifier = ">=1.11" },
+    { name = "scipy", marker = "extra == 'localization'", specifier = ">=1.11" },
     { name = "zstandard", specifier = ">=0.23" },
 ]
-provides-extras = ["providers", "usd"]
+provides-extras = ["providers", "localization", "usd"]
 
 [package.metadata.requires-dev]
 dev = [

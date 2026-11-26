@@ -329,7 +329,7 @@ def test_drive_screw_requires_screwdriver_and_seated_screw():
     assert ok["feasible"], ok["issues"]
     assert ok["plan"]["target"] == "e:screw"
     assert ok["plan"].get("bitDown") is True
-    assert "wristYaw" not in ok["plan"]
+    assert ok["plan"]["wristYaw"] == pytest.approx(0.0)
     assert abs(abs(ok["plan"]["wristRoll"]) - math.pi / 2) <= 0.2
     assert ok["plan"]["pressLift"] < ok["plan"]["lift"]
     # Centred grasp: after stand the bit hangs under the body centre ≡ pinch, so grip≈spot.

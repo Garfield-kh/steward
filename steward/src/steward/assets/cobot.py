@@ -50,8 +50,9 @@ _PIPER_FINGERS: list[dict] = [
 ]
 
 # Where the head (the two head cameras the mobile kitchen robot carries) sits on the chassis: a
-# mast at the front centre line, between the arm mounts, at the same height as on that robot.
-HEAD_AT = [0.16, 0.0]
+# mast at the front centre line, between the arm mounts. The camera origins sit ahead of
+# the lift carriage collision box throughout its travel, including when it crosses head height.
+HEAD_AT = [0.28, 0.0]
 # USD base_link -> Steward base: identity rotation, z from the wheel mesh lower bound.
 USD_BASE_HEIGHT = 0.32052979804575443
 USD_LIFT_ORIGIN = [0.22448, 0.0, 1.1147]

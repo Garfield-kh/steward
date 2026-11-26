@@ -154,6 +154,9 @@ class EsimConfig:
     drive_hold_s: float = 1.5
     # Magnitude; drive_screw uses the negative sign so bit tips down after yawing onto +lateral.
     drive_stand_roll: float = math.pi / 2
+    drive_max_tilt: float = math.radians(20)
+    drive_roll_candidates: tuple[float, ...] = (1.35, 1.25)
+    drive_yaw_offsets: tuple[float, ...] = (0.0, math.pi / 4, -math.pi / 4, math.pi / 2, -math.pi / 2, 3*math.pi/4, -3*math.pi/4)
     # insert_screw_into_hole: place tip-down, verify seated upright, re-pick and retry this many times.
     insert_max_attempts: int = 3
 
@@ -206,7 +209,8 @@ class Esim:
 
     def _held(self, es: SceneState) -> Entity | None:
         for rel in es.relations:
-            if rel.type == "attached" and rel.b.get("entity") == es.self_id:
+            if (rel.type == "attached" and rel.b.get("entity") == es.self_id
+                    and rel.b.get("link", "gripper") in (self.arm.geometry.gripper, "gripper")):
                 return es.find(rel.a["entity"])
         return None
 
@@ -533,7 +537,7 @@ class Esim:
                   heading_cost: Callable[[float], float] | None = None,
                   pitches: Sequence[float | None] = (0.0,), lifts: Sequence[float] | None = None,
                   wrist: Callable[[float], tuple[float, float]] | None = None,
-                  approach_path: Callable[[float, float, float], bool] | None = None,
+                  approach_path: Callable[[float, float, float, float], bool] | None = None,
                   require_tilt: bool = False,
                   dock_clear: set[str] | None = None,
                   mouth_only: bool = False) -> dict:
@@ -658,7 +662,7 @@ class Esim:
                 reasons.append(f"side {normal}: the arm cannot hold its gripper {reach:.2f} m out at {height:.2f} m "
                                f"(yaw {wrist_yaw:.2f}, roll {wrist_roll:.2f})")
                 continue
-            accept = (lambda near: approach_path(yaw, reach, near)) if approach_path is not None else None
+            accept = (lambda near: approach_path(yaw, reach, near, pitch)) if approach_path is not None else None
             retract = (self._retract_reach(reach, (lifts or [height])[-1], pitch, wrist_yaw, wrist_roll, accept)
                        if pitch or approach_path is not None else None)
             if (pitch or approach_path is not None) and retract is None:
@@ -2301,7 +2305,8 @@ class Esim:
                        heading_issue: Callable[[float], str | None] | None = None,
                        lifts: Sequence[float] | None = None,
                        tool_roll: float | None = None, exact_rotation: bool = False,
-                       tool_over_spot: bool = False,
+                       tool_over_spot: bool = False, endpoint_offset: np.ndarray | None = None,
+                       fixed_pitch: float | None = None, record_path: bool = False,
                        dock_clear: set[str] | None = None,
                        mouth_only: bool = False) -> tuple[dict, tuple[float, float]]:
         """The approach that brings the held object's centre over ``spot``, and the gripper's spot
@@ -2311,6 +2316,10 @@ class Esim:
         uses π; a place ``roll`` uses that angle); without it the current roll is kept.
         ``tool_over_spot`` aims the gripper pinch at ``spot``; tip-down drive/insert should leave
         it false and pass ``tool_roll`` so reach-axis hold still shifts the gripper.
+        ``endpoint_offset`` is a tool endpoint in the current gripper frame; ``fixed_pitch``
+        restricts the candidate tilt. ``record_path`` retains the checked approach waypoints
+        and also checks the press heights and reverse withdrawal. Other placements use
+        ``tool_roll`` to preserve the reach-axis grasp offset.
         ``dock_clear`` / ``mouth_only`` are forwarded to :meth:`_approach` (open-drawer place).
         """
         def grip_at(heading: float) -> tuple[float, float]:
@@ -2318,6 +2327,11 @@ class Esim:
                 turn = wrist_turn(heading)
             except PredictionError:
                 turn = 0.0  # a side the wrist cannot turn at is refused by heading_issue
+            if endpoint_offset is not None:
+                rotation = (matrix_from_quat(quat_from_yaw(heading))
+                            @ self.arm.tool_rotation(current.get('wrist_yaw', 0.) + turn, roll, fixed_pitch or 0.))
+                offset = rotation @ endpoint_offset
+                return spot[0] - float(offset[0]), spot[1] - float(offset[1])
             if exact_rotation:
                 lx,ly,*_ = self._held_relative(es)
                 offset = np.array([lx-self.tool_offset-current.get('reach',0.), ly-self.lateral,
@@ -2338,7 +2352,9 @@ class Esim:
         def wrist_at(heading: float) -> tuple[float, float]:
             return (current.get("wrist_yaw", 0.0) + wrist_turn(heading), roll)
 
-        def path(heading: float, reach: float, near: float) -> bool:
+        checked_paths = {}
+
+        def path(heading: float, reach: float, near: float, pitch: float) -> bool:
             # Driving preserves the arm's base-relative posture; these stages begin after docking.
             # The carrying posture may lie outside the planning range: the path starts at the nearest
             # posture in range, and its first waypoint is still solved continuously from the encoders.
@@ -2348,20 +2364,33 @@ class Esim:
             at["reach"] = min(max(at["reach"], g.reach_min), g.reach_max)
             at["lift"] = min(max(at["lift"], g.lift_min), g.lift_max)
             targets = [at]
-            stages = [{"reach": near}, {"wrist_yaw": yaw}, {"wrist_roll": roll},
-                      {"lift": (lifts or [height])[0]}, {"reach": reach}]
-            stages += [{"lift": h} for h in (lifts or [height])[1:]]
-            for change in stages:
+            stages = [{"reach": near}, {"wrist_yaw": yaw}, {"wrist_pitch": pitch},
+                      {"wrist_roll": roll}, {"lift": (lifts or [height])[0]}, {"reach": reach}]
+            if record_path:
+                # Raise with the horizontal load before standing the driver, then extend.
+                stages = [{"reach": near}, {"wrist_yaw": yaw}, {"lift": height},
+                          {"wrist_pitch": pitch}, {"wrist_roll": roll}, {"reach": reach}]
+            waypoints = [dict(at)]
+            for change in stages + [{"lift": h} for h in (lifts or [height])[1:]]:
                 end = {**at, **change}
                 steps = max(1, *(math.ceil(abs(end[k] - at[k]) /
                                           (self.config.lift_check_step if k in ("lift", "reach")
                                            else self.config.wrist_check_step)) for k in change))
                 targets.extend({k: at[k] + (end[k] - at[k]) * i / steps for k in at} for i in range(1, steps + 1))
                 at = end
-            return self.arm.reachable_path(targets, start_joints=start_joints)
+                waypoints.append(dict(at))
+            # The reverse approach is the checked loaded withdrawal after the press.
+            if record_path:
+                targets += list(reversed(targets[:-1]))
+            ok = self.arm.reachable_path(targets, start_joints=start_joints)
+            if ok:
+                checked_paths[(heading, reach, near, pitch)] = waypoints[:len(stages) + 1]
+            return ok
 
         hold_pitch = self._held_pitch(es)
-        if flip and self.config.flip_in_air:
+        if fixed_pitch is not None:
+            hold_pitch = [fixed_pitch]
+        elif flip and self.config.flip_in_air:
             hold_pitch = [self.arm.geometry.wrist_pitch_max]
         # After a tilted pick the skill untilts on exit: FK then reports ~0 while a deep place/pour
         # dock still sits past the tool-down envelope. Try tool-down first, then ``pitch_for``.
@@ -2371,6 +2400,9 @@ class Esim:
                                   pitches=hold_pitch, lifts=lifts, wrist=wrist_at,
                                   approach_path=None if flip and self.config.flip_in_air else path,
                                   dock_clear=dock_clear, mouth_only=mouth_only)
+        if record_path:
+            approach['armApproach'] = checked_paths[(approach['yaw'], approach['reach'],
+                                                     approach['retractReach'], approach.get('wristPitch', 0.))]
         return approach, grip_at(approach["yaw"])
 
     def _wrist_for(self, es: SceneState, held: Entity, yaw: float, dock_yaw: float, flip: bool = False) -> float:
@@ -2665,22 +2697,6 @@ class Esim:
                 f"drive_screw target must be a toy_screw, got {target.id} ({target.category.value})")
         support, seat_issues = self._ensure_screw_seated_for_drive(es, target)
         _, _, screw_top = entity_box(target)
-        held_box, hb, ht = entity_box(held)
-        long_half = max(held_box.hx, held_box.hy)
-        hold_dz = self._hold_dz(es, held)
-        bit_dot = self._screwdriver_bit_down_dot(held)
-        already_down = bit_dot < -0.7
-        # Bit tip hangs ~long_half under the body centre once stood; when already upright, hold_dz
-        # is the live centre-to-pinch height on top of that.
-        bit_hang = long_half + (hold_dz if already_down else 0.0)
-        press_h = screw_top + self.config.drive_press_clearance + bit_hang
-        approach_h = press_h + self.config.drive_approach_clearance
-        if not already_down:
-            # Extra hover while rolling the shaft upright before the press.
-            approach_h = max(approach_h, press_h + max(0.05, abs(hold_dz)))
-        if approach_h > self.lift_max:
-            raise PredictionError(
-                f"driving {target.id} needs lift {approach_h:.2f} m, above {self.lift_max} m")
         spot = [float(target.pose.value["p"][0]), float(target.pose.value["p"][1])]
         anchor = self._anchor(es, support) if self._affords(support, "support-surface") else support
         if not self._affords(anchor, "support-surface"):
@@ -2694,16 +2710,54 @@ class Esim:
             return None
 
         # Stand from the grasp: wrist roll tips gripper ±y; yaw cannot move the bit off the roll axis.
-        stand, wrist_turn, stand_issue = self._drive_stand_from_grasp(es, held, params)
-        tool_roll = stand
-
-        # Aim the body centre (bit tip under it after stand) at the screw. tool_roll collapses
-        # lateral hold; reach-axis hold must stay so an off-centre grasp does not put the pinch
-        # on the screw with the bit beside it.
-        approach, grip = self._grip_approach(
-            es, anchor, held, spot, approach_h, wrist_turn, False, turn, tool_roll=tool_roll)
+        stand, _, _ = self._drive_stand_from_grasp(es, held, params)
+        current = self._arm_joints(es)
+        # The bit endpoint, rather than the driver centre, is the contact target.
+        from steward.ego.fasten_plan import tool_estimate
+        feature = tool_estimate(held, es.stamp)
+        if feature is None:
+            raise PredictionError("driver endpoint estimate unavailable; observe the held driver")
+        rx, ry, base_yaw = self._robot_xy_yaw(es)
+        c, ss = math.cos(base_yaw), math.sin(base_yaw)
+        ahead = self.tool_offset + current.get('reach', 0.)
+        pinch = np.array([rx + ahead*c - self.lateral*ss, ry + ahead*ss + self.lateral*c,
+                          current.get('lift', held.pose.value['p'][2])])
+        r0 = (matrix_from_quat(quat_from_yaw(base_yaw)) @ self.arm.tool_rotation(
+            current.get('wrist_yaw', 0.), current.get('wrist_roll', 0.), current.get('wrist_pitch', 0.)))
+        tip_local = r0.T @ (np.asarray(feature['tip']) - np.asarray(feature.get('grip', pinch)))
+        axis_local = r0.T @ np.asarray(feature['axis'])
+        desired = current.get('wrist_roll', 0.) if stand is None else stand
+        rolls = [desired, -desired] if stand is not None else [desired]
+        if stand is not None and abs(abs(stand) - math.pi/2) < .35 and params.get('roll') is None:
+            rolls += [sign*m for m in self.config.drive_roll_candidates if m < abs(stand) for sign in (1., -1.)]
+        failure = None
+        for tool_roll in rolls:
+            for delta in self.config.drive_yaw_offsets:
+                tool_yaw = current.get('wrist_yaw', 0.) + delta
+                if abs(tool_yaw) > self.arm.geometry.wrist_yaw_max:
+                    continue
+                rotation = self.arm.tool_rotation(tool_yaw, tool_roll, 0.)
+                if float((rotation @ axis_local)[2]) > -math.cos(self.config.drive_max_tilt):
+                    continue
+                bit_hang = -float((rotation @ tip_local)[2])
+                press_h = screw_top + self.config.drive_press_clearance + bit_hang
+                approach_h = press_h + self.config.drive_approach_clearance
+                try:
+                    approach, grip = self._grip_approach(
+                        es, anchor, held, spot, approach_h, lambda _: delta, False, turn,
+                        tool_roll=tool_roll, endpoint_offset=tip_local, fixed_pitch=0.,
+                        lifts=[approach_h, press_h, approach_h], record_path=True)
+                except PredictionError as exc:
+                    failure = exc
+                    continue
+                break
+            else:
+                continue
+            break
+        else:
+            raise PredictionError(f"no continuous bit-down drive approach: {failure or 'no admissible tool orientation'}")
         issues = seat_issues + [
-            f"{stand_issue}; hold {self.config.drive_hold_s:.1f}s on {target.id}; "
+            f"bit points down at yaw={tool_yaw:.3f}, roll={tool_roll:.3f}; hold {self.config.drive_hold_s:.1f}s on {target.id}; "
             "screwdriver stays in the gripper",
             f"bit aimed at screw (grip [{grip[0]:.3f}, {grip[1]:.3f}] → spot "
             f"[{spot[0]:.3f}, {spot[1]:.3f}], hang {bit_hang:.3f} m)",
@@ -2722,8 +2776,9 @@ class Esim:
             "bitDown": True,
             "bitHang": bit_hang,
         }
-        if stand is not None and abs(stand) > 0.05:
-            plan["wristRoll"] = stand
+        plan["wristRoll"] = tool_roll
+        plan["wristYaw"] = tool_yaw
+        plan["wristPitch"] = 0.0
         return self._receipt(es, "drive_screw", params, 0.08, issues, plan)
 
     def _predict_insert_screw_into_hole(self, es: SceneState, params: dict) -> dict:

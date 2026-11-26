@@ -323,7 +323,7 @@ def contact(planner, es, params):
             return yaw, float(roll)
         def heading_issue(heading):
             return 'wrist yaw limit' if abs(wrist(heading)[0]) > planner.arm.geometry.wrist_yaw_max else None
-        def path(heading, reach, near):
+        def path(heading, reach, near, _pitch):
             yaw, rr = wrist(heading)
             at = dict(current)
             stages = [{'lift': safe}, {'reach': near}, {'wrist_yaw': yaw}, {'wrist_roll': rr}, {'wrist_pitch':float(trial_pitch)},

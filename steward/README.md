@@ -12,7 +12,13 @@ See the [perception model skills guide](docs/novel-view-generation/README.md) fo
 
 Steward is an embodied robotics system built on DeepSeek Harness. See [steward.md](../steward.md) for the design, its “13. Implementation Progress” section for progress and launch commands, and [13.7](../steward.md#137-phase-1-感知方法与泛化) for Phase 1 RGB-D geometry, classification and generalization.
 
+Cobot object loads are tracked per physical gripper. An explicit `arm` selects the working hand without releasing the other hand; `self.holdingByGripper` reports both attachments, while `self.holding` reports the working hand. Opening one gripper releases only its load and carried contents. Drawer-handle following remains limited to one working hand; release a held handle before switching arms.
+
+A held-driver `drive_screw` plans from the grasp-relative bit endpoint using the same tool rotation as Piper IK. It searches wrist yaw and bit-down roll within `EsimConfig.drive_yaw_offsets`, `drive_roll_candidates` and `drive_max_tilt`, checks the approach, press and reverse withdrawal from physical encoders, and executes the checked waypoints while retaining the driver. A feasible receipt checks kinematic continuity; task success still requires an independent observation of the screw.
+
 ## Quick start
+
+The shared robot Harness session belongs to the scenario’s first robot; thinking previews and full-text reads use that robot’s actual ID. Other robots do not inherit its session.
 
 Face matching captures copied robot observations at one recorded world instant, then releases input scheduling and the world-clock hold before correlation. State queries can run during correlation. Closing the HTTP connection cancels calculation between pieces and quarter turns; acquiring the observation snapshot still completes. Results retain the snapshot timestamp and reference pose, so observe again if objects moved. `/ego/inputs` records snapshot acquisition, including requests later cancelled, and is not a completion log.
 
@@ -33,6 +39,10 @@ Focus either preview with a click or Tab: WASD moves the shared view horizontall
 The console's current-thinking panel labels each block with its model step, separates the text from subsequent tool calls, and highlights the latest step. The highlight identifies the latest recorded step, not whether the model is still generating. Blocks up to 2,000 characters appear unchanged; longer blocks show the last 2,000 characters with a truncation label and expand/collapse controls. Full text loads on demand from `GET /console/thinking?robot=<id>&entry=<id>`; expansion survives polling for the same entry and clears when that entry leaves the visible window. A failed load retains the preview and offers retry; episode resets exclude old sessions from full-text reads too.
 
 The robot has two head RGB-D cameras: `head_camera` looks ahead; the short-focal-length `wide_camera` sees the nearby worktop and gripper. Both contribute to perception; see [steward.md 13.8](../steward.md#138-机器人本体的双相机).
+
+`ego_predict` accepts `arm: "L"` or `arm: "R"` for `cobot-magic`. Prediction uses that arm’s geometry, and executing the receipt selects the same physical arm and gripper. Omitting `arm` retains the working arm, initially L. Predictions do not switch a running skill. Each gripper retains its own object load; release a drawer handle before switching arms. Single-arm bodies reject an explicit arm selection.
+
+The Cobot head camera origins sit 0.33 m ahead of the base centre, beyond the lift carriage’s forward collision extent. Their base-fixed calibration keeps tabletop detections available while the carriage crosses camera height. Rebuild saved Cobot scenes to use the updated mount; previously captured camera evidence keeps its recorded calibration.
 
 In `phase1-sam`, either Cobot gripper's opening, holding or handle-holding state can request a near-camera keyframe. Between segmented frames, robot state updates retain both grippers' feedback and move a held load with its holding arm.
 

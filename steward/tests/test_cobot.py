@@ -120,3 +120,18 @@ def test_sim_rgbd_per_camera() -> None:
         assert frame["depth"].shape == shape
         assert frame["mask"].shape == shape
         assert str(frame["camera"]) == expect
+
+
+@pytest.mark.parametrize("lift", [0.0, 0.31, 0.406, 0.53, 0.60])
+def test_head_cameras_keep_a_tabletop_object_visible_across_carriage_travel(lift):
+    sim = WorldSim(_cobot_scene([1.0, 0.0, 0.75]))
+    try:
+        joint = sim.build.names["w:cobot"].joints["lift"]
+        jid = mujoco.mj_name2id(sim.model, mujoco.mjtObj.mjOBJ_JOINT, joint)
+        sim.data.qpos[sim.model.jnt_qposadr[jid]] = lift
+        mujoco.mj_forward(sim.model, sim.data)
+        detections = sim.sensors("w:cobot")["detections"]
+        assert any(d["category"] == "bowl" and d["camera"] in ("head_camera", "wide_camera")
+                   for d in detections), f"carriage at {lift} hides the tabletop from both head cameras"
+    finally:
+        sim.stop()

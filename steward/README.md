@@ -12,7 +12,13 @@ See the [perception model skills guide](docs/novel-view-generation/README.md) fo
 
 Steward is an embodied robotics system built on DeepSeek Harness. See [steward.md](../steward.md) for the design, its “13. Implementation Progress” section for progress and launch commands, and [13.7](../steward.md#137-phase-1-感知方法与泛化) for Phase 1 RGB-D geometry, classification and generalization.
 
+Cobot object loads are tracked per physical gripper. An explicit `arm` selects the working hand without releasing the other hand; `self.holdingByGripper` reports both attachments, while `self.holding` reports the working hand. Opening one gripper releases only its load and carried contents. Drawer-handle following remains limited to one working hand; release a held handle before switching arms.
+
+A held-driver `drive_screw` plans from the grasp-relative bit endpoint using the same tool rotation as Piper IK. It searches wrist yaw and bit-down roll within `EsimConfig.drive_yaw_offsets`, `drive_roll_candidates` and `drive_max_tilt`, checks the approach, press and reverse withdrawal from physical encoders, and executes the checked waypoints while retaining the driver. A feasible receipt checks kinematic continuity; task success still requires an independent observation of the screw.
+
 ## Quick start
+
+The shared robot Harness session belongs to the scenario’s first robot; thinking previews and full-text reads use that robot’s actual ID. Other robots do not inherit its session.
 
 The optional [segmentation-assisted CPU localization experiment](docs/localization/README.md) uses RGB-D, semantic masks and an EKF. Add `--localization-experiment` to `steward up` or a compatible pytest motion case to enable cumulative odometry drift and fused-pose feedback together. Use `--odom-drift` or `--apply-localization` to enable one independently. Both default to off.
 
@@ -40,6 +46,12 @@ The robot has two head RGB-D cameras: `head_camera` looks ahead; the short-focal
 
 In `phase1-sam`, the console's SAM segmentation panel shows each camera's latest completed keyframe with coloured instance masks, category scores and source simulation time. It uses the merged and cropped SAM results before depth filling and peeling; instance numbers belong to that frame, not persistent tracks. Preview reads do not invoke SAM. Failures retain the last completed image with an error; phase changes and episode resets clear it. `GET /ego/segmentation?camera=head_camera` serves the preview, relayed by `/console/segmentation?robot=w:robot-1&camera=head_camera`; `after=<frame-id>` omits unchanged image pixels.
 
+`ego_predict` accepts `arm: "L"` or `arm: "R"` for `cobot-magic`. Prediction uses that arm’s geometry, and executing the receipt selects the same physical arm and gripper. Omitting `arm` retains the working arm, initially L. Predictions do not switch a running skill. Each gripper retains its own object load; release a drawer handle before switching arms. Single-arm bodies reject an explicit arm selection.
+
+The Cobot head camera origins sit 0.33 m ahead of the base centre, beyond the lift carriage’s forward collision extent. Their base-fixed calibration keeps tabletop detections available while the carriage crosses camera height. Rebuild saved Cobot scenes to use the updated mount; previously captured camera evidence keeps its recorded calibration.
+
+In `phase1-sam`, either Cobot gripper's opening, holding or handle-holding state can request a near-camera keyframe. Between segmented frames, robot state updates retain both grippers' feedback and move a held load with its holding arm.
+
 The `cobot-magic` arms start with joint1–joint6 at zero radians and their fingers open. The `cobot-magic` grippers use simplified palm, guide, slider and finger geometry. Their fingers extend along the tool axis and open symmetrically to a 100 mm inner aperture; the grasp point lies between the pads, 5 mm behind the tips. These visual primitives are not manufacturer CAD or contact-based gripping.
 
 The `cobot-magic` arm/lift geometry follows manufacturer `robot.usd`; the [embodiment profile](embodiments/cobot-magic.yaml) records coordinate mappings, unit assumptions and retained simulation approximations. Runtime assets come from `src/steward/assets/cobot.py`, not the descriptive YAML. See the [migration guide](../docs/upgrade-guide/v0.2.2-alpha.2/cobot-lift-coordinates/guide.md) for saved scenes and raw lift commands.
@@ -47,6 +59,74 @@ The `cobot-magic` arm/lift geometry follows manufacturer `robot.usd`; the [embod
 AgileX preserves its arm posture until docking succeeds. Placement checks the required wrist orientation and IK continuity from measured joints; these checks do not replace full collision or dynamics planning. After successful work, both empty arms return their six joints to zero before the job completes, leaving lift and fingers unchanged. A held object or handle prevents homing; failures and cancellation do not initiate it. Homing failures are reported separately from the completed action.
 
 Passing `--misnames-config ''` disables name mappings. A switch to `phase0-misnamed` without a mapping is rejected, and the running world and later episodes retain the previous phase.
+
+## Merom house
+
+`merom-house` loads the bundled, optimized full-house layout from `phyagentos_assets_new`. Its environment uses metres and Z-up, with 132 fixed entities and 1,163 separate collision pieces: 105 objects, 15 walls and 12 floor sections. Object categories describe the furniture and contents; all imported bodies remain fixed. A Cobot Magic robot starts in the living room at `(1.7, 7.2, 0)` m, facing +Y toward the sofa. The ten doorways have 0.99–1.61 m of clear width, including baseboards. Wall sections and the lintel above each doorway are perceived separately so the navigation map preserves the opening. Original USD files and a USD decoder are not required.
+
+From this directory after installation:
+
+```sh
+.venv/bin/steward --root var/merom-wide-doors up --scenario merom-house --phase phase0 --freeze-idle --wca-port 7460 --robot-port 0 --api-port 0 --no-dispatch-task --segmentation-config '' --world-harness '' --robot-harness ''
+```
+
+Open the printed console URL. The scene also appears in the console scenario selector and is installed on first load. Meshes are extracted into the selected data root; existing scene edits are retained on subsequent loads. The [asset manifest](src/steward/assets/merom_house/manifest.json) records the source hashes, coordinate convention and geometry counts. The bundle retains the optimized worktable, open space beneath it, separate collision proxies and golden toast colors.
+
+Choose Cobot Magic or Steward in the console body selector, select `merom-house`, and click **Load** to start that body at the living-room position. The CLI equivalent is `--body cobot-magic` or `--body steward-bot`. Switching bodies starts a new episode. Existing data roots retain their saved scene, including older robot-free or unlabelled copies; the command above uses a separate root to install the current bundle.
+
+`up` starts the Ego Runtime and connects its perception reports and view to the console. Each episode's first successful perception update is reported immediately, including with `--freeze-idle`; later reports follow the configured cadence, and idle waits do not trigger the 60-second motion timeout. Enable **World: object labels** and **Ego: object labels** below the previews to show category names. An unknown task role leaves the perceived category visible. Phase 0 provides ideal detections; recall counts matched objects against all 105 house objects, including rooms outside the cameras' view. These metrics do not measure a learned vision model's accuracy.
+
+Local mesh geometry uses `kind: "mesh"` and a file `ref` in either the visual or collision list. Collision meshes require `link.inertial.value` with positive `mass`, three positive `diagonal` moments and a `pose`; visual meshes remain non-colliding and massless.
+
+## Import a USD robot
+
+The bundled [AgileX assets](assets/agilex/README.md) run without conversion; the following steps regenerate and inspect source models. The optional `usd` extra uses MuJoCo 4.0's native OpenUSD decoder. Install it in a separate Python 3.12 environment to keep the regular simulation environment unchanged. From the repository root:
+
+```sh
+uv venv --python 3.12 steward/var/usd-env
+uv pip install --python steward/var/usd-env/bin/python -e './steward[usd]'
+steward/var/usd-env/bin/steward import-usd steward/assets/agilex/robot.usd --name agilex-usd \
+  --meters-per-unit 1 --orient-joints --fixed-base \
+  --bound-mass 0.001 --bound-inertia 0.000001 --inertia-from-bounds --drive-frequency 5
+steward/.venv/bin/steward world --scenario agilex-usd --phase phase0 \
+  --wca-port 7450 --robot-port 7460 --ego-api '' --world-harness '' --robot-harness ''
+```
+
+Open `http://127.0.0.1:7450/console`. Import creates a floor inspection scene and writes `template.json`, binary meshes and `report.json` under `var/steward/imports/<name>/`. Existing names are refused. Keep this directory at its original location: mesh references are absolute. Viewing the result also works with MuJoCo 3.17 and does not read the source USD. Source files are never edited.
+
+The example options address the supplied AgileX asset: its centimeter metadata describes meter-valued geometry, one base joint is reversed, and inertias are missing. Bounds, uniform-box inertia estimates and 5 Hz critically damped drives are explicit simulation approximations, recorded in the report. Omit these options for a correctly authored asset; inspect the report before relying on dynamics. Drives hold the imported rest pose at startup, rather than applying USD drive targets.
+
+The importer accepts one rigid robot tree with fixed, revolute and prismatic joints, meshes and basic solids, force position drives and scalar PhysX mimic constraints. Joint limits, pivots and explicit inertias survive conversion. Mesh collisions use MuJoCo convex hulls. Shader networks, textures and cameras are not transferred; missing MDL shaders are reported, while missing geometry dependencies abort import. Closed loops and unsupported dynamics are rejected. A generic import has no assigned task controller; named joints can be driven through the robot port's `/command` endpoint. The supplied dual-Piper model has a separate registered adapter, `agilex-usd`, described below.
+
+
+Run the bundled `agilex-usd` body in a task scene:
+
+```sh
+steward/.venv/bin/steward up --scenario cobot-table --body agilex-usd --phase phase0 \
+  --speed 1 --no-dispatch-task
+```
+
+Open `http://127.0.0.1:7400/console` and select **AgileX USD 双 Piper** in the body selector. It can also replace the robot in kitchen scenarios. `up` starts its Ego Runtime; navigation, pick and place use the same prediction receipts and skill API as the other bodies. The raw import inspection scene remains separate and unregistered.
+
+[The USD profile](config/agilex-usd.toml) owns the imported robot's servo gains and raw `lift_home`, planar `[base]` drives, `[cameras.head]`/`[cameras.wide]` intrinsics and mounts, `[arm]` deployment/IK settings, `[motion]` execution settings, `[trajectory]` approach/recovery waypoints and retry limits, and `[planning]` receipt settings. Set `STEWARD_AGILEX_USD_CONFIG` to a local TOML file to override individual fields; omitted fields retain the shipped USD defaults. A template path is relative to the file declaring it. Existing flat profiles remain supported; when `arm_effort` is supplied without `finger_effort`, it also sets finger effort. Unknown fields, invalid types, non-finite numbers, invalid ranges and base speeds above actuator limits are rejected before startup; missing or incompatible templates also fail explicitly.
+
+`lift_home` and raw `/command` joint targets use USD coordinates (approximately `[-0.6, 0]` m); the shared Ego arm's virtual `lift` is TCP height above the floor. The default raw home remains `-0.45` m. Both arms start and return home at zero joint angles; `arm.deploy_joints` is the intermediate working posture and IK seed, not the startup pose. Joint limits, TCP offsets and mount transforms come from the imported model. Workspace-dependent working and exit heights are computed from that model's IK rather than copied from the simplified robot.
+
+Piper TCP feedback comes from measured encoders, including lateral displacement and servo lag; it never substitutes the commanded position. A placement on a support surface opens the gripper only after measured lift and reach settle within `motion.release_joint_tol` (8 mm for the Piper profiles) during `motion.release_settle_s`. Missing feedback or expiry fails the job with the load still held. A successful release alone does not verify the object’s final support; task tests also check the resulting world state.
+
+After ordinary surface placement, the arm withdraws along its motion policy and the base backs away before lowering to stow height. This preserves table clearance during retreat. Both Piper bodies use `PiperMotionPolicy`: handle approach backs away when its lowering reach would put the fingers over the cabinet, leaving `trajectory.handle_lower_clearance` before descending. After releasing a handle, the arm rises to its model-derived working height before retracting, then the base retreats and the arm lowers to stow. This avoids the short-reach IK gap at the simplified Cobot’s stow height. The slide robot uses `PlanarMotionPolicy`, without the articulated-arm descent backoff or working-height detour.
+
+For AgileX drawer contents under a cabinet top, `planning.drawer_entry_pitch`, `drawer_grasp_raise`, `drawer_grasp_backoff`, and `drawer_entry_backoff` set a tilted front-side grasp and descent gap. Planning uses the body’s working height and approaches through the open front. The close height must fit both the IK workspace and the object’s top grasp band. The arm settles its tilt, descends through the exposed drawer’s middle, then approaches the grasp diagonally. Entry clearance is measured from the cabinet front. It withdraws from beneath the top before raising the load; exposed drawer contents retain the ordinary approach.
+
+Phase 0 grasps a pourable container at its rim; its hollow centre cannot compete with the pieces inside as a grasp candidate. Pour planning uses the held container’s orientation relative to the tool and checks its tilt from world upright against `planning.pour_roll_min`; wrist roll alone is insufficient. The Piper defaults request a 2.3-radian wrist roll: with an upright container grasped at tool pitch 1.05 radians, that gives about 1.83 radians of container tilt; a 1.9-radian wrist roll gives only about 1.57. Each candidate must still pass the continuous-path check. The receipt reports `containerTilt`, while physical task tests still require the contents to leave the box and land on the table.
+
+The adapter preserves USD meshes, inertias and finger coupling, adds grasp points and maps the mobile base to planar position control with fixed wheel joints. The two simulated RGB-D views mount on `top_camera_link` and move with the lift; their calibration is not imported from USD. Editing this profile does not change `cobot-magic` or its legacy controller. Both bodies use the shared Ego Runtime; Phase 0 uses ideal attachment, not contact-based gripping. The profile supports simulation tasks, not real-hardware control or validated wheel dynamics. Its gains and task tolerances are simulation settings, not a guarantee of grasp/place success.
+
+Runtime assembly lives in [`ego/agilex.py`](src/steward/ego/agilex.py); `prepare_body` resolves its model, controller and policy from one profile snapshot. Both Piper bodies share [`piper_arm.py`](src/steward/ego/piper_arm.py), [`piper_ik.py`](src/steward/ego/piper_ik.py), ESim and SkillExecutor. The injectable [`MotionPolicy`](src/steward/ego/motion_policy.py) owns arm preparation after docking, approach, handle approach, pre-carry withdrawal, post-placement and post-handle retreat, withdrawal and failure recovery; the executor owns task sequencing, timing, cancellation and job results. Handle-lowering failures are recorded on the active job before recovery. IK self-collision link groups are injectable through [`SelfCollisionPolicy`](src/steward/ego/collision_policy.py); the USD assembly selects obstacles from its own model. Existing `cobot_arm` and `ik.CobotIK` imports remain available. The robot port exposes its embodiment through `GET /identity`; the CLI checks it before starting Ego. Legacy `CobotEgoRuntime`, `CobotSkills` and scripted Cobot missions accept only `cobot-magic`; use `steward up --body agilex-usd` for the imported model.
+
+For the local asset integration test, run `STEWARD_TEST_AGILEX_USD=1 steward/.venv/bin/python -m pytest -q steward/tests/test_agilex.py`. It navigates, picks a bowl and places it elsewhere on the table through the Ego API, then checks the world position. The kinematics fixture contains source joint data with small box stand-ins; the integration test uses the bundled meshes and is opt-in because the full physical task is slow.
+
+The same asset opt-in enables [`test_agilex_physics.py`](tests/test_agilex_physics.py) for native shoulder height, raw lift travel, camera extrinsics, finger coupling, mesh-mask coverage across poses and table support after retreat from a recorded release posture, cabinet clearance and drawer travel from a recorded docking posture, and correct-object drawer grasps with small perception offsets. [`test_cobot_ego.py`](tests/test_cobot_ego.py) runs shared task assertions through each body’s formal runtime assembly; without the opt-in its real-USD parameters are skipped. [`test_body_retreat.py`](tests/test_body_retreat.py) checks surface support, drawer opening and closure, final stow and viewing position, and release guards for all three bodies. Lightweight IK comparisons use matched physical shoulder heights, while native-home checks retain the USD profile’s own initial lift.
 
 ## Run with DeepSeek Harness
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +41,17 @@ def localization_options(request, monkeypatch):
         from motion_matrix_simulation_masks import install
 
         install(monkeypatch, lambda fn: fn(), matrix=False)
+
+
+@pytest.fixture(scope='module', params=[
+    'cobot-magic',
+    pytest.param('agilex-usd', marks=pytest.mark.skipif(
+        os.environ.get('STEWARD_TEST_AGILEX_USD') != '1',
+        reason='long-running real-mesh task; set STEWARD_TEST_AGILEX_USD=1')),
+])
+def piper_body(request):
+    """Formal body entry for shared task tests; actual USD assets are explicitly enabled."""
+    return request.param
 
 
 @pytest.fixture(scope="session")

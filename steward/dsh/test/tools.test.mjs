@@ -65,6 +65,16 @@ test('ego_predict forwards only the given parameters and hides the raw path', as
   assert.equal(result.plan.reach, 0.3)
 })
 
+test('ego_predict retains the selected arm in the service request and model receipt', async () => {
+  const ego = fakeEgo()
+  const predict = tool(egoTools(ego), 'ego_predict')
+  for (const arm of ['L', 'R']) {
+    const result = await predict.execute({ skill: 'pick', target: 'e:4', arm }, exec('ego_predict'))
+    assert.deepEqual(ego.calls.at(-1), ['predict', 'pick', { target: 'e:4', arm }])
+    assert.equal(result.arm, arm)
+  }
+})
+
 test('skill_run waits for completion by default', async () => {
   const ego = fakeEgo()
   const result = await tool(egoTools(ego), 'skill_run').execute({ receipt: 'rcpt-1' }, exec('skill_run'))

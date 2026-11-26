@@ -112,6 +112,9 @@ class Track:
     last_seen: float
     existence: float = 0.5
     held: bool = False
+    held_by: str | None = None
+    held_since: float = 0.0
+    carried_by: str | None = None
     held_offset: np.ndarray | None = None  # while held: its centre from the pinch point, in the gripper's frame
     color_counts: dict[str, float] = field(default_factory=dict)
     voxels: np.ndarray | None = None  # 1 cm voxels of every surface seen of this object (RGB-D mode)
@@ -132,6 +135,10 @@ class Track:
     tip_roll_source: str = "unknown"  # "observed" once a detection snapped tip; else "unknown"
     tip_pending: float | None = None
     tip_pending_n: int = 0
+    # The place spot the belief was told without seeing it (a release's planned spot); the next
+    # real view of the object clears it, so consumers can tell a predicted pose from an observed one.
+    predicted_spot: np.ndarray | None = None
+    fastened_holes: list[str] | None = None  # screw-hole ids of this part that the robot has driven a screw into
     held_yaw: float = 0.0  # while held: its heading relative to the gripper link's heading
     grasp_world_yaw: float | None = None  # estimated frame before transport, not a measured directed heading
     grasp_association: dict | None = None  # frozen perception before the load follows the gripper
@@ -319,6 +326,33 @@ class EstimatorConfig:
     points are the robot itself; world masks leave the robot out, robot-side segmentation does not."""
     body_share: float = 0.5
     """Share of a region's points on the robot's own links that makes the whole region the robot."""
+    var_growth_rate: float = 1e-4
+    """Variance growth per second of not being seen (m²/s: a ~1 cm/s RMS drift of a static
+    object's believed position — nudged, slid, or re-seen from other geometry). The predict step
+    that loosens an unseen track's hold on where it was last seen, so it is recognized when met
+    again instead of opening a fresh id beside itself. Only tracks unseen longer than
+    ``var_growth_delay_s`` grow: a matched one keeps the tight variance its evidence earned."""
+    var_growth_delay_s: float = 1.0
+    """How much silence starts the growth; continuous at the threshold."""
+    ownership_var_cap: float = 0.15 ** 2
+    """The growth's ceiling (m²): an unseen track never loosens past a 15 cm sigma — the held
+    track's own gate scale — so a long absence widens the association gate to 0.45 m and no
+    farther. Matched tracks contract through :meth:`_fuse` and sit far below this."""
+    held_echo_radius_m: float = 0.25
+    """While the gripper holds something, detections this close to it are its own echo (the grasp
+    partly hides it, and the load hangs where it was just taken from): they fuse into the held
+    track — one per camera, ahead of the nearest-first race — and never open a second track beside
+    it. Nothing else can legitimately appear there: the gripper is busy holding."""
+    birth_lineage_s: float = 600.0
+    """How long a spot where a same-kind track was dropped keeps claiming births: a detection
+    standing there reconciles with the dropped track's survivor (``merged_into``) instead of
+    opening a fresh id. Recent only — a spot long vacant is free for a genuinely new object."""
+    birth_lineage_radius_m: float = 0.20
+    """How close to a dropped track's last position a birth must stand to count as its return."""
+    floor_suspect_existence: float = 0.25
+    """A birth resting on the floor of a kind whose shape prior says it never stands there (a car
+    wheel, a screw) starts doubted: further views raise its existence, silence lets it fade. A
+    fallen part is re-confirmed in a look or two; a ripple that borrowed the prior dies here."""
 
 
 @dataclass
@@ -339,6 +373,9 @@ class EgoEstimator:
         self._assembly_views = {}
         self._ids = itertools.count(1)
         self.dropped: collections.deque = collections.deque(maxlen=500)
+        self.merged_into: dict[str, str] = {}
+        """Id a track was merged under (the surviving track's canonical id), for ids consumers may
+        still hold (:meth:`canonical_id`)."""
         self._shed: list[np.ndarray] = []
         self._opened_drawers: set[str] = set()
         self._pulled_open: set[str] = set()
@@ -352,6 +389,9 @@ class EgoEstimator:
         far it stuck out when that hold began, and where its front panel was then."""
         self._shut_follow: dict[str, _ShutFollow] = {}
         """Drawers pushed shut whose contents still follow the panel's observed travel."""
+        # Mission-placed drawer items waiting on a furniture top (chores staging). A pistol on the
+        # sideboard top is otherwise dropped as a false dark-end hit; anchors keep the real piece.
+        self._stage_protect: list[dict] = []
         self.content_hits: list[tuple] = []
         """The most recent removals: ``{t, id, category, observations, reason, position, size, robot, into?}``."""
         self.version = 0
@@ -366,6 +406,7 @@ class EgoEstimator:
         self.grippers: dict[str, dict] = {}
         self.held_id: str | None = None
         self.held_gripper: str | None = None
+        self._rigid_carries: dict[str | None, dict] = {}
         self._rng = np.random.default_rng(0)
         self._self_template = self._make_self_template()
         self.cameras = self._camera_models()
@@ -478,10 +519,11 @@ class EgoEstimator:
         """Which of ``points`` (N×3, map frame) lie on the robot's own links (within
         ``body_margin_m``); while the gripper holds something, none near the gripper, which are the load."""
         inside = _in_boxes(points, self.body_boxes(), self.config.body_margin_m)
-        if self.gripper.get("holding"):
-            held = self.tracks.get(self.held_id) if self.held_id else None
-            reach = max(HELD_FALLBACK_M, held.footprint if held is not None else 0.0)
-            inside &= np.linalg.norm(points - self.gripper_position(self.held_gripper), axis=1) > reach
+        for link, report in (self.grippers or {None: self.gripper}).items():
+            if report.get("holding"):
+                held = self.holding_for(link)
+                reach = max(HELD_FALLBACK_M, held.footprint if held is not None else 0.0)
+                inside &= np.linalg.norm(points - self.gripper_position(link), axis=1) > reach
         return inside
 
     def on_body_at(self, points: np.ndarray, header: dict) -> np.ndarray:
@@ -508,7 +550,7 @@ class EgoEstimator:
             float(np.linalg.norm(centre - at) + np.linalg.norm(half)) for centre, half, _rot in self.body_boxes())
 
     def body_boxes(self) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
-        """``(centre, half extents, rotation matrix)`` in the map frame of every visual primitive of
+        """``(centre, half extents, rotation matrix)`` in the map frame of every visual primitive or mesh of
         the robot's own links, from odometry and joint encoders."""
         tree = self.robot_model["body"]
         children = {j["child"] for j in tree["joints"]}
@@ -519,15 +561,21 @@ class EgoEstimator:
             if joint is None:
                 raise ValueError(f"robot model joints {[j['id'] for j in pending]} hang from no reachable link")
             pending.remove(joint)
-            kind = joint["type"]["value"]
             q = float(self.joints.get(joint["id"], (joint["q"]["value"] or [0.0])[0]))
-            axis = joint.get("axis", {}).get("value", [0.0, 0.0, 1.0])
-            motion = {"p": [a * q for a in axis], "q": [1.0, 0.0, 0.0, 0.0]} if kind == "prismatic" else \
-                {"p": [0.0, 0.0, 0.0], "q": quat_from_axis_angle(axis, q) if kind == "revolute" else [1.0, 0.0, 0.0, 0.0]}
-            poses[joint["child"]] = pose_compose(pose_compose(poses[joint["parent"]], joint["origin"]["value"]), motion)
+            poses[joint["child"]] = _apply_joint(poses[joint["parent"]], joint, q)
         boxes = []
         for link in tree["links"]:
             for geom in link.get("geometry", {}).get("visual", []):
+                if geom.get("kind") == "mesh":
+                    from steward.ego.selfmask import _surface_points
+
+                    points = _surface_points(geom)
+                    lo, hi = points.min(axis=0), points.max(axis=0)
+                    link_pose = poses[link["id"]]
+                    rotation = matrix_from_quat(link_pose["q"])
+                    boxes.append((rotation @ ((lo + hi) / 2) + np.asarray(link_pose["p"]),
+                                  (hi - lo) / 2, rotation))
+                    continue
                 size = geom.get("size", [])
                 half = {"box": lambda s: [s[0] / 2, s[1] / 2, s[2] / 2], "cylinder": lambda s: [s[0], s[0], s[1] / 2],
                         "capsule": lambda s: [s[0], s[0], s[1] / 2 + s[0]], "sphere": lambda s: [s[0]] * 3}.get(geom.get("shape"))
@@ -572,12 +620,23 @@ class EgoEstimator:
         self.odometry = frame["odometry"]
         self.joints = frame["joints"]
         self._read_grippers(frame)
-        if not self.gripper.get("holding"):
-            self._clear_held()
+        self._clear_held()
         # A held object moves with this frame's body pose; update it before association so a
         # turning robot does not see its own load as a new object.
         self._follow_held()
         self._follow_handle()
+        # Predict step: there is no motion model, but an object missed for a while loosens its
+        # hold on where it was last seen, so meeting it again re-associates instead of opening a
+        # fresh id beside itself (the frozen-covariance hole: a tight variance kept the gate at
+        # its 0.30 m floor forever). Held and carried loads sit where the gripper says.
+        now = float(frame["stamp"])
+        for track in self.tracks.values():
+            if track.held or track.carried:
+                continue
+            dt = now - track.last_seen - self.config.var_growth_delay_s
+            if dt > 0:
+                track.var = np.minimum(track.var + self.config.var_growth_rate * dt,
+                                       self.config.ownership_var_cap)
         cameras = [c["id"] for c in frame.get("cameras", []) if c["id"] in self.cameras] or [self.primary_camera]
         cams = {c: self.camera_pose(camera=c) for c in cameras}
         measurements = []
@@ -599,11 +658,30 @@ class EgoEstimator:
         camera_of = [det.get("camera", self.primary_camera) for det, _p, _y, _s, _q in measurements]
         seen_by: dict[str, set[str]] = {c: set() for c in cams}
         assigned: dict[int, str] = {}
+        held = self.tracks.get(self.held_id) if self.held_id else None
+        if held is not None:
+            # The grasp partly hides its own load, and the load's detections reach the belief from
+            # just around where it hangs — often exactly where it was taken from. They belong to
+            # the held track, one per camera, ahead of the nearest-first race: letting a free
+            # track win them keeps a phantom alive beside the load (a held car body fed one at its
+            # old dock spot for minutes, and the ids changed hands every pick+align cycle).
+            for k, (det, pos, _yaw, _sigma) in enumerate(measurements):
+                cam = camera_of[k]
+                if held.id in seen_by[cam] or not compatible(det["category"], held.perceived_category):
+                    continue
+                if any(t.carried and float(np.linalg.norm(t.pos - pos)) <= self.config.held_echo_radius_m
+                       for t in self.tracks.values()):
+                    continue  # a view of what lies in the load belongs to that content, not to it
+                if _inside(held, pos, self.config.content_margin_m) \
+                        and held.bottom() - self.config.content_margin_m <= pos[2] <= held.top() + self.config.content_margin_m:
+                    assigned[k] = held.id
+                    seen_by[cam].add(held.id)
         for _d, k, tid in sorted(pairs):
             if k not in assigned and tid not in seen_by[camera_of[k]]:
                 assigned[k] = tid
                 seen_by[camera_of[k]].add(tid)
         boxes = [(pos, np.asarray(det["size"], float), yaw) for det, pos, yaw, _sigma, _q in measurements]
+        pinch = np.asarray(self.gripper_position(), float) if self.gripper.get("holding") else None
         for k, (det, pos, yaw, sigma, quat) in sorted(enumerate(measurements), key=lambda item: item[1][3]):
             if k in assigned:
                 self._fuse(self.tracks[assigned[k]], det, pos, yaw, sigma, quat=quat)
@@ -616,6 +694,20 @@ class EgoEstimator:
                 twin = min(born, key=lambda t: float(np.linalg.norm(t.pos - pos)))
                 self._fuse(twin, det, pos, yaw, sigma, quat=quat)
                 seen_by[camera_of[k]].add(twin.id)
+                continue
+            lineage = self._birth_lineage(pos, det["category"])
+            if lineage is not None and lineage.id not in seen_by[camera_of[k]]:
+                # A detection standing where a same-kind track was just dropped belongs to that
+                # track's survivor, not to a fresh id: one physical object must not become a crowd
+                # of ids over an assembly, and the association gates above may miss what the
+                # lineage knows (the survivor absorbed other views and reads as another kind).
+                self._fuse(lineage, det, pos, yaw, sigma, quat=quat)
+                seen_by[camera_of[k]].add(lineage.id)
+                continue
+            if pinch is not None and self.held_id is None \
+                    and float(np.linalg.norm(pinch - pos)) <= self.config.held_echo_radius_m:
+                # The grasp is physically closed but not yet marked held (close -> mark_held): a
+                # detection at the pinch is the load's echo inside that window, not a new object.
                 continue
             entry = self._newcomer(pos, np.asarray(det["size"], float), sigma, boxes[:k] + boxes[k + 1:])
             if entry == "skip":
@@ -630,9 +722,13 @@ class EgoEstimator:
                     self._fuse(nearest, det, pos, yaw, sigma, quat=quat)
                     seen_by[camera_of[k]].add(nearest.id)
                     continue
-            track = self._new_track(det, pos, yaw, sigma, quat=quat)
+            shape = SHAPES.get(det["category"])
+            on_floor = float(pos[2] - det["size"][2] / 2) <= self.config.rest_gap_m + 2 * sigma
+            track = self._new_track(det, pos, yaw, sigma, quat=quat,
+                                    suspect=on_floor and shape is not None and shape.get("floor") is False)
             if entry == "carried":
                 track.carried_offset = self.gripper_rotation(self.held_gripper).T @ (track.pos - self.tracks[self.held_id].pos)
+                track.carried_by = self.held_id
             seen_by[camera_of[k]].add(track.id)
         matched = set().union(*seen_by.values())
         self._decay_unseen(cams, matched)
@@ -645,23 +741,21 @@ class EgoEstimator:
         """What was in the carried container but has not been seen in it for ``lost_content_s``
         while the container itself is in view has fallen out on the way: it is forgotten, and
         perceived afresh where it lies."""
-        container = self.tracks.get(self.held_id) if self.held_id else None
-        if container is None or container.id not in matched:
-            return
         for track in [t for t in self.tracks.values() if t.carried]:
-            if self.stamp - track.last_seen > self.config.lost_content_s:
-                self._drop(track, f"no longer seen in {container.id}: fell out while it was carried")
+            if track.carried_by in matched and self.stamp - track.last_seen > self.config.lost_content_s:
+                self._drop(track, f"no longer seen in {track.carried_by}: fell out while it was carried")
 
     def update_body(self, header: dict) -> None:
-        """Follow the robot's own state (stamp, odometry, joints, gripper) from a sensor header
-        without imaging: between two segmented frames, what the gripper holds moves with it."""
+        """Follow stamp, odometry, joints and single- or dual-gripper feedback without imaging.
+
+        Between segmented frames, a held load follows its holding arm until that arm releases it.
+        """
         self.stamp = float(header["stamp"])
         self.posed = True
         self.odometry = header["odometry"]
         self.joints = header["joints"]
-        self.gripper = header["gripper"]
-        if not self.gripper.get("holding"):
-            self._clear_held()
+        self._read_grippers(header)
+        self._clear_held()
         self._follow_held()
         self._follow_handle()
         self.version += 1
@@ -709,8 +803,7 @@ class EgoEstimator:
         self.odometry = header["odometry"]
         self.joints = header["joints"]
         self._read_grippers(header)
-        if not self.gripper.get("holding"):
-            self._clear_held()
+        self._clear_held()
         self._follow_held()
         self._follow_handle()
         cam = self.camera_pose(camera=frame.get("camera"))
@@ -1106,7 +1199,9 @@ class EgoEstimator:
 
         def reading(point: np.ndarray) -> tuple[float, float] | None:
             x, y, z = pose_compose(inv, {"p": point.tolist(), "q": [1, 0, 0, 0]})["p"]
-            if x < 0.3 or x > self.config.max_range * 0.8:
+            # Behind the camera plane only: the pixel projection degenerates there. Near fields
+            # (a docked robot's target sits at x≈0.2-0.4 m) read like any other range.
+            if x <= 0.0 or x > self.config.max_range * 0.8:
                 return None
             u, v = int(round((w - 1) / 2 - y * f / x)), int(round((h - 1) / 2 - z * f / x))
             if not (0 <= u < w and 0 <= v < h):
@@ -1192,16 +1287,26 @@ class EgoEstimator:
                 distinct.append(view)
         return len(distinct)
 
-    def _rename(self, track: Track, new_id: str) -> None:
-        del self.tracks[track.id]
-        track.id = new_id
-        self.tracks[new_id] = track
+    def canonical_id(self, track_id: str) -> str:
+        """The id the object an old id named now lives under: a track merged into another left its
+        id there (:attr:`merged_into`), and consumers holding the old id resolve it here."""
+        seen: set[str] = set()
+        while track_id in self.merged_into and track_id not in seen:
+            seen.add(track_id)
+            track_id = self.merged_into[track_id]
+        return track_id
 
     def _drop(self, track: Track, reason: str, into: Track | None = None) -> None:
-        """Remove a track and record why, for the operator and for diagnosis."""
+        """Remove a track and record why, for the operator and for diagnosis. A merge keeps the
+        surviving track's own id and records the dropped one under it (``into``): ids never swap."""
         if track.pinned:
             return
         del self.tracks[track.id]
+        if into is not None:
+            self.merged_into[track.id] = into.id
+            for gone, host in list(self.merged_into.items()):
+                if host == track.id:
+                    self.merged_into[gone] = into.id
         self.dropped.append({"t": round(self.stamp, 2), "id": track.id, "category": track.category,
                              "observations": track.observations, "reason": reason,
                              "position": [round(float(v), 3) for v in track.pos],
@@ -1418,6 +1523,10 @@ class EgoEstimator:
                         continue
                 if {a.category, b.category} == {"teddy_bear", "wine_glass"} and not self._beside_drawer(a.pos):
                     # On the table the glass is the object. The bear name is the brown of the stem.
+                    # Mission-staged teddies on a furniture top are real: do not drop them for a glass.
+                    if (self._stage_anchor_at(a.pos, role="teddy_bear") is not None
+                            or self._stage_anchor_at(b.pos, role="teddy_bear") is not None):
+                        continue
                     keep = a if a.category == "wine_glass" else b
                     drop = b if keep is a else a
                     self._drop(drop, "merged: two names for one object", into=keep)
@@ -1654,14 +1763,11 @@ class EgoEstimator:
                 for cat, n in small.category_counts.items():
                     big.category_counts[cat] = big.category_counts.get(cat, 0.0) + n
                 _absorb_semantics(big, small)
-                big_views = big.observations
                 big.observations += small.observations
                 big.existence = max(big.existence, small.existence)
+                # The larger track keeps its id however well the small one was seen: a track that
+                # swaps ids mid-episode is, to every consumer, a second object appearing.
                 self._drop(small, "merged: part of a larger object", into=big)
-                if small.observations > big_views:
-                    # The better-known object keeps its id; the newer track is the one that ends.
-                    self.dropped[-1].update(id=big.id, observations=big_views, into=small.id)
-                    self._rename(big, small.id)
                 if big.voxels is not None:
                     self._rebuild_geometry(big, cam_p, 2.0)
 
@@ -2083,14 +2189,95 @@ class EgoEstimator:
                     self._drop(track, "edge of the furniture")
                     break
 
+    def protect_stage_spot(self, xy: list[float] | tuple[float, float], *,
+                           role: str | None = None, radius: float = 0.35) -> dict:
+        """Keep a mission-staged piece at ``xy`` from being dropped as a furniture false positive.
+
+        Chores parks drawer whitelist items on a furniture top; the same height band is where the
+        pistol prompt fires on sideboard rails. An anchor here exempts matching tracks until
+        :meth:`clear_stage_spot` removes it.
+
+        :param xy: world XY of the stage spot.
+        :param role: optional expected category (``pistol``, …); None matches any protected category.
+        :param radius: metres around ``xy`` that stay protected.
+        :returns: the stored anchor record.
+        """
+        if len(xy) < 2:
+            raise ValueError("stage protect needs xy")
+        anchor = {"xy": [float(xy[0]), float(xy[1])], "role": role, "radius": float(radius)}
+        # Replace a prior anchor at the same spot so re-staging does not stack duplicates.
+        self._stage_protect = [a for a in self._stage_protect
+                               if math.hypot(a["xy"][0] - anchor["xy"][0], a["xy"][1] - anchor["xy"][1]) > 0.05]
+        self._stage_protect.append(anchor)
+        return dict(anchor)
+
+    def clear_stage_spot(self, xy: list[float] | tuple[float, float] | None = None) -> int:
+        """Remove one stage anchor nearest ``xy``, or all anchors when ``xy`` is None.
+
+        :returns: how many anchors were removed.
+        """
+        if xy is None:
+            n = len(self._stage_protect)
+            self._stage_protect = []
+            return n
+        if len(xy) < 2 or not self._stage_protect:
+            return 0
+        best = min(range(len(self._stage_protect)),
+                   key=lambda i: math.hypot(self._stage_protect[i]["xy"][0] - float(xy[0]),
+                                            self._stage_protect[i]["xy"][1] - float(xy[1])))
+        if math.hypot(self._stage_protect[best]["xy"][0] - float(xy[0]),
+                      self._stage_protect[best]["xy"][1] - float(xy[1])) > 0.50:
+            return 0
+        self._stage_protect.pop(best)
+        return 1
+
+    def _stage_anchor_at(self, pos: np.ndarray | list[float] | tuple[float, float], *,
+                         role: str | None = None) -> dict | None:
+        """The stage-protect anchor covering ``pos``, optionally requiring ``role``.
+
+        Used to exempt mission-staged pieces from table heuristics that assume a teddy only
+        exists in a drawer (stem-shaped bears on the table become wine glasses).
+        """
+        x, y = float(pos[0]), float(pos[1])
+        for anchor in self._stage_protect:
+            if math.hypot(x - anchor["xy"][0], y - anchor["xy"][1]) > anchor["radius"]:
+                continue
+            want = anchor.get("role")
+            if role is None or want is None or want == role:
+                return anchor
+        return None
+
+    def _stage_protected(self, track: Track) -> bool:
+        """Whether ``track`` sits on a mission stage anchor (same role when the anchor names one).
+
+        A track whose category was flipped away from the anchor role (bear→glass) still counts when
+        it sits on that anchor, so furniture false-positive drops do not erase the staged spot.
+        """
+        if track.pinned:
+            return True
+        for anchor in self._stage_protect:
+            if math.hypot(float(track.pos[0]) - anchor["xy"][0],
+                          float(track.pos[1]) - anchor["xy"][1]) > anchor["radius"]:
+                continue
+            want = anchor.get("role")
+            if want is None or track.category == want or track.label == want:
+                return True
+            # Staged teddy misread as a wine glass: still protect the spot until rematch.
+            if want == "teddy_bear" and track.category == "wine_glass":
+                return True
+        return False
+
     def _drop_pistols_off_the_drawer(self) -> None:
         """Drop a pistol that sits on the furniture beside a closed drawer, not in it.
 
         The pistol prompt also fires on the dark ends of the sideboard. Those tracks are
-        half a metre from the drawer and match nothing that is there.
+        half a metre from the drawer and match nothing that is there. Mission-staged pieces on
+        the top (:meth:`protect_stage_spot`) and pinned tracks are kept.
         """
         for track in list(self.tracks.values()):
             if track.held or track.id not in self.tracks:
+                continue
+            if self._stage_protected(track):
                 continue
             # The pistol in a drawer is about 0.63 m up. Higher than that is the rail
             # or the top of the sideboard, including a smear that sticks out past the box.
@@ -3457,9 +3644,17 @@ class EgoEstimator:
                 self._drop(drop, "merged: same object", into=keep)
 
     def _new_cloud_track(self, m: dict, cam_p: np.ndarray) -> Track:
+        probs = m["probs"]
+        perceived = max(probs, key=probs.get) if probs else "unknown"
+        shape = SHAPES.get(perceived)
+        suspect = shape is not None and shape.get("floor") is False \
+            and float(m["centre"][2] - m["size"][2] / 2) <= self.config.rest_gap_m + 2 * 0.05
         track = Track(id=f"e:{next(self._ids)}", category_counts=dict(m["probs"]), pos=m["centre"].copy(),
                       var=np.full(3, 0.05**2), yaw=m["yaw"], yaw_var=0.1**2, size=m["size"].copy(), observations=0,
-                      first_seen=self.stamp, last_seen=self.stamp)
+                      first_seen=self.stamp, last_seen=self.stamp,
+                      # The depth-fill chain reads floor ripples with the smallest shape prior it
+                      # has; a birth of a never-on-the-floor kind lying on the floor starts doubted.
+                      existence=self.config.floor_suspect_existence if suspect else 0.5)
         self.tracks[track.id] = track
         self._fuse_cloud(track, m, cam_p)
         return track
@@ -3529,6 +3724,7 @@ class EgoEstimator:
         if track.category == "bowl" and incoming_long > 0.32 and 0.05 < held_long <= 0.28:
             return
         track.settled = True
+        track.predicted_spot = None  # seen again where it stands: the planned spot is superseded
         if not (seg.border and len(track.recent) >= WHOLE_VIEWS):
             # A view cut by the image border boxes a part of the object, and it is often the nearest
             # view, which is the one the size of a small object is taken from. Until enough views
@@ -4057,7 +4253,15 @@ class EgoEstimator:
                 named = clear_stem_name(size, track.category, track.mean_rgb, track.mean_invalid)
         # The bear is in a drawer. The same brown, on the table, is the wine glass. The measured
         # box is a hair over the stem gate, so this check is the one that applies.
-        if ((named == "teddy_bear") or track.category == "teddy_bear") and not self._beside_drawer(centre):
+        # Chores stages a real teddy on the sideboard top: a stage-protect anchor keeps / restores
+        # that name so a stem-shaped view cannot erase the staged piece. Do not treat ``named is
+        # None`` as a teddy candidate — furniture centres often sit inside the stage radius, and
+        # renaming the sideboard to teddy_bear makes the next top place infeasible.
+        if self._stage_anchor_at(centre, role="teddy_bear") is not None and (
+                named in ("teddy_bear", "wine_glass")
+                or track.category in ("teddy_bear", "wine_glass")):
+            named = "teddy_bear"
+        elif ((named == "teddy_bear") or track.category == "teddy_bear") and not self._beside_drawer(centre):
             box_long = float(max(size[0], size[1]))
             box_short = float(min(size[0], size[1]))
             if box_long <= 0.16 and box_short <= 0.13 and 0.15 < float(size[2]) < 0.22:
@@ -4215,8 +4419,8 @@ class EgoEstimator:
         container: it slides about in there while the container is carried."""
         gate = max(self.config.gate_m, 3.0 * math.sqrt(float(np.mean(track.var)) + sigma**2),
                    self.config.size_gate_ratio * float(max(track.size[0], track.size[1])))
-        if track.carried and self.held_id in self.tracks:
-            container = self.tracks[self.held_id]
+        if track.carried and track.carried_by in self.tracks:
+            container = self.tracks[track.carried_by]
             gate = max(gate, 0.5 * float(max(container.size[0], container.size[1])))
         return max(gate, 0.45) if track.held else gate
 
@@ -4270,7 +4474,7 @@ class EgoEstimator:
     def _forget(self, track_id: str) -> None:
         """Delete a track, and never silently amputate what the gripper is holding: when the load
         is the track that would go, the pair is not merged after all."""
-        if track_id == self.held_id:
+        if track_id in self.tracks and self.tracks[track_id].held:
             return
         track = self.tracks.get(track_id)
         if track is not None:
@@ -4334,7 +4538,7 @@ class EgoEstimator:
                 self._drop(drop, "merged: duplicate", into=keep)
 
     def _new_track(self, det: dict, pos: np.ndarray, yaw: float, sigma: float,
-                   quat: list[float] | None = None) -> Track:
+                   quat: list[float] | None = None, suspect: bool = False) -> Track:
         track = Track(
             id=f"e:{next(self._ids)}",
             category_counts={det["category"]: 1.0},
@@ -4347,12 +4551,38 @@ class EgoEstimator:
             first_seen=self.stamp,
             last_seen=self.stamp,
             color_counts={det["color"]: 1.0} if det.get("color") else {},
+            # A part lying where its kind never stands (a wheel on the floor) is most likely a
+            # ripple that borrowed the prior: born doubted, it takes further views to pick, and
+            # silence fades it. A genuinely fallen part is re-confirmed in a look or two.
+            existence=self.config.floor_suspect_existence if suspect else 0.5,
         )
         self._remember_screw_holes(track, det, pos, yaw)
         if quat is not None:
             self._adopt_tip_roll(track, quat)
         self.tracks[track.id] = track
         return track
+
+    def _birth_lineage(self, pos: np.ndarray, category: str) -> Track | None:
+        """The living track a birth at ``pos`` must reconcile with, or None.
+
+        A detection standing where a same-kind track was recently dropped belongs to that track's
+        survivor — ``merged_into`` names it — instead of to a fresh id. Recent only: a spot whose
+        track went long since is free for a genuinely new object, and a birth the gates cannot
+        reconcile still goes to :meth:`_newcomer` as before."""
+        cutoff = self.stamp - self.config.birth_lineage_s
+        best, best_d = None, self.config.birth_lineage_radius_m
+        for record in reversed(self.dropped):
+            if float(record["t"]) < cutoff:
+                break
+            if not compatible(category, record["category"]):
+                continue
+            canonical = self.tracks.get(self.canonical_id(record["id"]))
+            if canonical is None:
+                continue
+            d = float(np.linalg.norm(np.asarray(record["position"], float) - pos))
+            if d < best_d:
+                best, best_d = canonical, d
+        return best
 
     @staticmethod
     def _snap_tip_roll(raw: float) -> float | None:
@@ -4465,7 +4695,7 @@ class EgoEstimator:
         lay in it has slid out. ``rot``: the gripper rotation to judge by (default: the belief's)."""
         if track.held_up is None:
             return False
-        up = (self.gripper_rotation(self.held_gripper) if rot is None else rot) @ track.held_up
+        up = (self.gripper_rotation(track.held_by) if rot is None else rot) @ track.held_up
         return math.acos(min(1.0, max(-1.0, float(up[2])))) > self.config.poured_roll
 
     def _fuse(self, track: Track, det: dict, pos: np.ndarray, yaw: float, sigma: float,
@@ -4488,16 +4718,17 @@ class EgoEstimator:
         if track.carried:
             # Inside the carried container it may have slid: it follows the view, and keeps its
             # new place in the container (in the gripper's frame, as the container moves).
-            container = self.tracks.get(self.held_id) if self.held_id else None
+            container = self.tracks.get(track.carried_by)
             if container is not None:
                 track.pos = track.pos + 0.5 * (pos - track.pos)
-                track.carried_offset = self.gripper_rotation(self.held_gripper).T @ (track.pos - container.pos)
+                track.carried_offset = self.gripper_rotation(container.held_by).T @ (track.pos - container.pos)
             return
         r = sigma**2
         prior_var = track.var + self.config.process_noise
         gain = prior_var / (prior_var + r)
         track.pos = track.pos + gain * (pos - track.pos)
         track.var = (1.0 - gain) * prior_var
+        track.predicted_spot = None  # a view of it again: the planned release spot is superseded
         turned = abs(wrap_angle(yaw - track.yaw)) > YAW_MOVED
         if turned and track.yaw_var < YAW_MOVED**2:
             # Its heading is settled: one view at another heading is more likely a neighbour's
@@ -4524,7 +4755,7 @@ class EgoEstimator:
         ``held_view_gate_m`` of the load, or one as near another track (a neighbour the load is
         lowered beside) corrects nothing."""
         gate = self.config.held_view_gate_m
-        if self.stamp < self.held_since - 1e-6 or track.held_offset is None or np.linalg.norm(pos - track.pos) > gate:
+        if self.stamp < track.held_since - 1e-6 or track.held_offset is None or np.linalg.norm(pos - track.pos) > gate:
             return
         if any(other is not track and not other.carried and np.linalg.norm(other.pos - pos) <= gate
                for other in self.tracks.values()):
@@ -4532,7 +4763,7 @@ class EgoEstimator:
         gain = track.var / (track.var + sigma**2)
         track.pos = track.pos + gain * (pos - track.pos)
         track.var = (1.0 - gain) * track.var
-        track.held_offset = self.gripper_rotation(self.held_gripper).T @ (track.pos - self.gripper_position(self.held_gripper))
+        track.held_offset = self.gripper_rotation(track.held_by).T @ (track.pos - self.gripper_position(track.held_by))
 
     def _decay_unseen(self, cams: dict[str, dict], matched: set[str]) -> None:
         """Fade every unmatched track that lies well inside the view of at least one of ``cams``
@@ -4548,7 +4779,9 @@ class EgoEstimator:
         def in_view(pos: np.ndarray) -> bool:
             for inv, half_h, half_v in views:
                 local = pose_compose(inv, {"p": pos.tolist(), "q": [1, 0, 0, 0]})["p"]
-                if (0.3 < local[0] < self.config.max_range * 0.8 and abs(math.atan2(local[1], local[0])) <= half_h
+                # No near-field exemption: a docked robot stands metres-deep inside its own view's
+                # blind ring otherwise, and phantom tracks there never fade.
+                if (0.0 < local[0] < self.config.max_range * 0.8 and abs(math.atan2(local[1], local[0])) <= half_h
                         and abs(math.atan2(local[2], local[0])) <= half_v):
                     return True
             return False
@@ -4565,10 +4798,9 @@ class EgoEstimator:
                 self._drop(track, "faded: not detected where it should be visible")
 
     def forget_objects(self) -> None:
-        """Drop every perceived object except the one in the gripper (used when the kind of sensor
+        """Drop every perceived object except loads in the grippers and their contents (used when the kind of sensor
         data changes and objects must be perceived afresh)."""
-        held = self.tracks.get(self.held_id) if self.held_id else None
-        self.tracks = {held.id: held} if held is not None else {}
+        self.tracks = {t.id: t for t in self.tracks.values() if t.held or t.carried}
         self.assembly_memory = AssemblyMemory()
         self.stationary_assemblies = StationaryAssemblies()
         self.manipulation_envelopes = {}
@@ -4586,6 +4818,7 @@ class EgoEstimator:
         load or encoder reading from before is about this episode. The body model stays; the id
         counter goes on so a console label never means two different objects."""
         self.tracks = {}
+        self.merged_into = {}
         self.assembly_memory = AssemblyMemory()
         self.stationary_assemblies = StationaryAssemblies()
         self.manipulation_envelopes = {}
@@ -4604,9 +4837,63 @@ class EgoEstimator:
         self.grippers = {}
         self.held_id = None
         self.held_gripper = None
+        self._rigid_carries = {}
         self.version += 1
 
     # ---------------------------------------------------------------- holding
+    def holding_for(self, gripper: str | None) -> Track | None:
+        """Return the load attached to this physical gripper, or None for an empty hand."""
+        return next((t for t in self.tracks.values() if t.held and t.held_by == gripper), None)
+
+    def select_gripper(self, gripper: str | None) -> None:
+        """Select the working hand without releasing or reassigning another hand's load."""
+        self._rigid_carries[self.held_gripper] = self.rigid_carry
+        self.held_gripper = gripper
+        track = self.holding_for(gripper)
+        self.held_id = track.id if track else None
+        self.held_since = track.held_since if track else 0.0
+        self.rigid_carry = self._rigid_carries.setdefault(gripper, {})
+        if gripper in self.grippers:
+            self.gripper = self.grippers[gripper]
+
+    def _held_fallback_track(self, requested_id: str, grip: np.ndarray) -> Track | None:
+        """The track to treat as held when ``requested_id`` vanished during the approach.
+
+        Prefer anything already within :data:`HELD_FALLBACK_M` of the live gripper. If the planned
+        id was dropped mid-reach (common for drawer contents under a real segmenter), look farther
+        for a small object matching that drop's category/footprint within
+        :data:`HELD_FALLBACK_CONTENT_M`.
+        """
+        free = [t for t in self.tracks.values() if not t.held]
+        near = min(free, key=lambda t: float(np.linalg.norm(t.pos - grip)), default=None)
+        if near is not None and float(np.linalg.norm(near.pos - grip)) <= HELD_FALLBACK_M:
+            return near
+        hint = next((d for d in reversed(self.dropped) if d.get("id") == requested_id), None)
+        want_cat = hint.get("category") if hint else None
+        want_size = hint.get("size") if hint else None
+        want_fp = max(float(want_size[0]), float(want_size[1])) if want_size and len(want_size) >= 2 else 0.0
+        furniture = ("wall", "drawer", "cabinet", "sideboard", "counter", "table")
+        ranked: list[tuple[tuple, Track]] = []
+        for track in free:
+            if track.category in furniture or track.footprint >= 0.5:
+                continue
+            dist = float(np.linalg.norm(track.pos - grip))
+            if dist > HELD_FALLBACK_CONTENT_M:
+                continue
+            cat_ok = want_cat is None or track.category == want_cat or track.label == want_cat
+            if want_fp > 0:
+                fp_ok = abs(track.footprint - want_fp) <= max(0.04, 0.4 * want_fp)
+            else:
+                fp_ok = True
+            # Same category+size first, then same category, then any small object at the hand.
+            rank = (0 if cat_ok and fp_ok else 1 if cat_ok else 2, dist)
+            ranked.append((rank, track))
+        if not ranked:
+            return None
+        if want_cat is not None and any(r[0][0] <= 1 for r in ranked):
+            ranked = [r for r in ranked if r[0][0] <= 1]
+        return min(ranked, key=lambda item: item[0])[1]
+
     def mark_held(self, track_id: str, since: float | None = None, gripper: str | None = None,
                   at: list[float] | None = None, body: dict | None = None) -> str:
         """Record the grasp, and carry its load with the arm, together with what lies in it.
@@ -4625,7 +4912,7 @@ class EgoEstimator:
         rather than at the last perception update, which a slow segmenter leaves seconds behind,
         from before the base docked and the arm reached down.
 
-        A previous mark still standing when a new grasp is recorded cannot still be true (the
+        A previous mark on the same hand when a new grasp is recorded cannot still be true (the
         gripper opened to take this load), and no frame may ever arrive to clear it when skills run
         without looks, so it is dropped here. If the tracked object was merged away during the
         approach, the track nearest the gripper takes the load instead.
@@ -4633,6 +4920,7 @@ class EgoEstimator:
         :returns: the id of the held track.
         :raises KeyError: no track is near the gripper."""
         requested_id = track_id
+        self.select_gripper(gripper)
         self.rigid_carry.clear()
         if track_id != self.held_id:
             self._unmark_held(self.tracks.get(self.held_id))
@@ -4643,12 +4931,13 @@ class EgoEstimator:
             joints = odometry = None
         closed_at = self.gripper_position(gripper, joints, odometry) if at is None else np.asarray(at, dtype=float)
         if track_id not in self.tracks:
-            grip = closed_at
-            near = min(self.tracks.values(), key=lambda t: float(np.linalg.norm(t.pos - grip)), default=None)
-            if near is None or float(np.linalg.norm(near.pos - grip)) > HELD_FALLBACK_M:
+            near = self._held_fallback_track(track_id, closed_at)
+            if near is None:
                 raise KeyError(f"{track_id} is no longer in the ego state and nothing else is in the gripper")
             track_id = near.id
         track = self.tracks[track_id]
+        if track.held and track.held_by != gripper:
+            raise ValueError(f"{track_id} is already held by {track.held_by}")
         from steward.ego.fasten_release import grasp_frame
         track.held_interface = grasp_frame(self._track_entity(track), closed_at,
             self.gripper_rotation(gripper, joints, odometry))
@@ -4681,11 +4970,14 @@ class EgoEstimator:
         for other in self.tracks.values():
             if other is not track and not other.held and (self.support_of(other) is track or self._within(track, other)):
                 other.carried_offset = rot.T @ (other.pos - track.pos)
+                other.carried_by = track.id
                 other.voxels = None
                 other.span = None
         self.held_since = max(self.stamp, float(since) if since is not None else self.stamp)
         self.held_gripper = gripper
         track.held = True
+        track.held_by = gripper
+        track.held_since = self.held_since
         track.held_offset = rot.T @ (track.pos - closed_at)
         track.var = np.maximum(track.var, self.config.grasp_shift_m**2)
         track.held_yaw = wrap_angle(track.yaw - math.atan2(rot[1, 0], rot[0, 0]))
@@ -4720,10 +5012,11 @@ class EgoEstimator:
         self._unmark_held(track)
 
     def _unmark_held(self, track) -> None:
-        self.held_id = None
-        self.held_gripper = None
+        if track is None or track.id == self.held_id:
+            self.held_id = None
         for other in self.tracks.values():
-            if other.carried:
+            if other.carried and (other.carried_by == (track.id if track else None)):
+                other.carried_by = None
                 other.carried_offset = None  # it lies in the container where that was put down
                 other.settled = False
                 other.var = np.maximum(other.var, 0.02**2)
@@ -4732,6 +5025,7 @@ class EgoEstimator:
         if track.appearance is not None:
             track.appearance.stale = True  # it may have been put down turned over
         track.held = False
+        track.held_by = None
         track.held_offset = None
         track.grasp_world_yaw = None
         track.grasp_association = None
@@ -4789,15 +5083,18 @@ class EgoEstimator:
             self.gripper = {"state": "open", "holding": False, "holdingHandle": False}
 
     def _clear_held(self) -> None:
-        if self.stamp < self.held_since - 1e-6:
-            return  # this frame was rendered while the gripper was still open
-        track = self.tracks.get(self.held_id) if self.held_id else None
-        # It is where the hand let go of it, not where it was picked up: the arm carried it
-        # across the table, and a look taken after the release must recognise it there rather
-        # than find a second bowl at the old place.
-        if track is not None and track.held_offset is not None:
-            track.pos = self.gripper_position(self.held_gripper) + self.gripper_rotation(self.held_gripper) @ track.held_offset
-        self._unmark_held(track)
+        for track in list(self.tracks.values()):
+            if not track.held or self.stamp < track.held_since - 1e-6:
+                continue
+            report = self.grippers.get(track.held_by, self.gripper if not self.grippers else {})
+            if report.get("holding", True):
+                continue
+            if track.held_offset is not None:
+                track.pos = (self.gripper_position(track.held_by)
+                             + self.gripper_rotation(track.held_by) @ track.held_offset)
+            self._unmark_held(track)
+        if not self.held_id and not self.grippers:
+            self.held_gripper = None
 
     @staticmethod
     def _track_quat(track: Track) -> list[float]:
@@ -4823,18 +5120,18 @@ class EgoEstimator:
         track.tip_roll_source = "observed"
 
     def _follow_held(self) -> None:
-        if not (self.held_id and self.held_id in self.tracks):
-            return
-        track = self.tracks[self.held_id]
-        rot = self.gripper_rotation(self.held_gripper)
-        track.pos = self.gripper_position(self.held_gripper) + rot @ track.held_offset
-        self._apply_held_orient(track, rot)
-        poured = self._tipped(track)
-        for content in [t for t in self.tracks.values() if t.carried]:
-            if poured:
-                self._drop(content, f"poured out of {track.id}: perceived afresh where it lands")
-            else:
-                content.pos = track.pos + rot @ content.carried_offset
+        for track in list(self.tracks.values()):
+            if not track.held or track.held_offset is None:
+                continue
+            rot = self.gripper_rotation(track.held_by)
+            track.pos = self.gripper_position(track.held_by) + rot @ track.held_offset
+            self._apply_held_orient(track, rot)
+            poured = self._tipped(track, rot)
+            for content in [t for t in self.tracks.values() if t.carried and t.carried_by == track.id]:
+                if poured:
+                    self._drop(content, f"poured out of {track.id}: perceived afresh where it lands")
+                else:
+                    content.pos = track.pos + rot @ content.carried_offset
 
     def _follow_handle(self) -> None:
         """A drawer whose handle the gripper holds moves with the gripper, and what lies in it
@@ -5095,20 +5392,17 @@ class EgoEstimator:
         when nothing is held or the load has no grasp offset. Carried contents use
         ``(position, None)``.
         """
-        if not self.held_id or self.held_id not in self.tracks:
-            return {}
-        track = self.tracks[self.held_id]
-        if track.held_offset is None:
-            return {}
-        rot = self.gripper_rotation(self.held_gripper, joints, odometry)
-        pos = self.gripper_position(self.held_gripper, joints, odometry) + rot @ track.held_offset
-        out = {track.id: (pos, self._held_world_quat(track, rot))}
-        # Tipped or not by the same body: an upright belief with a live wrist rolled over has
-        # poured, and its contents are no longer carried along (to_scene drops their relation).
-        if not self._tipped(track, rot):
-            for content in self.tracks.values():
-                if content.carried and content.id != track.id:
-                    out[content.id] = (pos + rot @ content.carried_offset, None)
+        out = {}
+        for track in self.tracks.values():
+            if not track.held or track.held_offset is None:
+                continue
+            rot = self.gripper_rotation(track.held_by, joints, odometry)
+            pos = self.gripper_position(track.held_by, joints, odometry) + rot @ track.held_offset
+            out[track.id] = (pos, self._held_world_quat(track, rot))
+            if not self._tipped(track, rot):
+                for content in self.tracks.values():
+                    if content.carried and content.carried_by == track.id:
+                        out[content.id] = (pos + rot @ content.carried_offset, None)
         return out
 
     def held_position(self, joints: dict | None = None, odometry: dict | None = None):
@@ -5126,8 +5420,8 @@ class EgoEstimator:
         """What holds a track: the held container for its contents, else the innermost receptacle
         (drawer, larger bowl, a box its contents can be poured from) whose floor it rests on, else
         the highest support surface whose top it rests on."""
-        if track.carried and self.held_id in self.tracks:
-            return self.tracks[self.held_id]
+        if track.carried and track.carried_by in self.tracks:
+            return self.tracks[track.carried_by]
         inside, best = None, None
         for other in self.tracks.values():
             if other.id == track.id or other.held:
@@ -5203,10 +5497,18 @@ class EgoEstimator:
         return False
 
     def drawer_opening(self, drawer: Track) -> float:
-        """How far a drawer sticks out of the furniture holding it, along the drawer's front axis."""
+        """How far a drawer sticks out of the furniture holding it, along the drawer's front axis.
+
+        After the robot pulls a drawer out (:attr:`_pulled_open`), a missing or mis-seated host can
+        make :func:`protrusion` read 0 cm while the drawer is still open. Floor the opening to the
+        remembered pull until :meth:`shift` records a push shut.
+        """
         furniture = [_box2d(t) for t in self.tracks.values()
                      if t.id != drawer.id and "support-surface" in t.affordances]
-        return protrusion(self.front(drawer), furniture)
+        geometric = protrusion(self.front(drawer), furniture)
+        if drawer.id in self._pulled_open:
+            return max(geometric, DRAWER_REMEMBERED_OPEN_M)
+        return geometric
 
     def front(self, track: Track) -> Box2D:
         """The track's footprint with +x pointing out of its front (towards the room centre)."""
@@ -5297,6 +5599,9 @@ class EgoEstimator:
         self.assembly_memory.released(track_id, track.pos, target, track.placement["releasedAt"])
         self.stationary_assemblies.released(track_id, track.pos, target, track.placement["releasedAt"])
         track.var = np.maximum(track.var, 0.02**2)
+        # The xy is the plan's prediction, not a look: it is marked as such and the next view of
+        # the object replaces it, rather than an unobserved spot standing as an observation.
+        track.predicted_spot = track.pos.copy()
         track.voxels = None
         track.interface_motion_at = float(self.stamp)
         track.interface_last_geometry = None
@@ -5305,6 +5610,7 @@ class EgoEstimator:
         track.interface_estimate_at = None
         track.settled = False  # it drops the last few millimetres when the grip opens
         track.held = False
+        track.held_by = None
         track.held_offset = None
         # Do not copy place wristRoll into tip_roll: arm roll is not body tip about +x. Tip stays
         # unknown until detections snap it; pick/mate gates wait for tip_roll_source == "observed".
@@ -5430,6 +5736,26 @@ class EgoEstimator:
                       {"skill": "place", "on": support.id, "offset": offset,
                        "yaw": desired_yaw, "alignHoles": False, "clearance": 0.0}],
         }
+
+    def mark_fastened(self, screw_id: str, part_id: str, hole_id: str | None = None) -> bool:
+        """Record a screw the robot just drove into its hole: the part keeps its id, the hole is
+        marked done, and the screw — no longer a separate object — folds into the part (recorded
+        like any merge), so no later view of the fastener opens a fresh track beside the part.
+
+        :returns: whether both tracks were still believed (a view may have dropped either)."""
+        part = self.tracks.get(part_id)
+        screw = self.tracks.get(screw_id)
+        if part is None or screw is None or part.id == screw.id:
+            return False
+        if hole_id and hole_id not in (part.fastened_holes or []):
+            part.fastened_holes = [*(part.fastened_holes or []), hole_id]
+        if screw.voxels is not None and part.voxels is not None:
+            part.voxels = self._union(part.voxels, screw.voxels)
+        part.observations += screw.observations
+        part.existence = max(part.existence, screw.existence)
+        self._drop(screw, f"fastened into {part.id}", into=part)
+        self.version += 1
+        return True
 
     def _on_drawer_floor(self, drawer: Track) -> list[str]:
         """Small tracks on a drawer's floor, including ones just in front of its box."""
@@ -5818,7 +6144,7 @@ class EgoEstimator:
             if poured_live:
                 continue
             if track.held:
-                relations.append(Relation(type="attached", a={"entity": track.id}, b={"entity": SELF_ID, "link": "gripper"},
+                relations.append(Relation(type="attached", a={"entity": track.id}, b={"entity": SELF_ID, "link": track.held_by or "gripper"},
                                           mode="rigid", derived=False, confidence=1.0))
             elif prior(track.category)["root"].get("fixed", 0.0) < 0.9:
                 support = self.support_of(track)
@@ -5833,19 +6159,23 @@ class EgoEstimator:
                     relations.append(Relation(type="supported-by", a={"entity": track.id}, b={"entity": support.id},
                                               derived=True, confidence=round(min(track.existence, support.existence), 3)))
         self.stationary_assemblies.overlay(entities, relations, self.tracks, self.stamp)
+        carries = {**self._rigid_carries, self.held_gripper: self.rigid_carry}
         for ent in entities:
-            if self.held_id and ent.id in self.rigid_carry:
+            for gripper, members in carries.items():
+                anchor = self.holding_for(gripper)
+                if anchor is None or ent.id not in members:
+                    continue
                 from steward.math3d import quat_from_matrix
-                member = self.rigid_carry[ent.id]
-                rotation = self.gripper_rotation(self.held_gripper,
+                member = members[ent.id]
+                rotation = self.gripper_rotation(gripper,
                     (self_frame or {}).get('joints'), (self_frame or {}).get('odometry'))
-                pinch = self.gripper_position(self.held_gripper,
+                pinch = self.gripper_position(gripper,
                     (self_frame or {}).get('joints'), (self_frame or {}).get('odometry'))
                 ent.pose.value = {'p':(pinch+rotation @ member['offset']).tolist(),
                                   'q':quat_from_matrix(rotation @ member['rotation'])}
                 ent.pose.src = 'inferred'
                 ent.state_vars['rigidFollowEvidence'] = Est(value={
-                    'source':'observed_follow_then_encoder_prediction', 'anchor':self.held_id,
+                    'source':'observed_follow_then_encoder_prediction', 'anchor':anchor.id,
                     'observedAt':member['observedAt']}, src='inferred')
             track = self.tracks.get(ent.id)
             if track is not None:
@@ -5853,10 +6183,10 @@ class EgoEstimator:
                 if track.held and track.held_tool_feature:
                     from steward.ego.fasten_geometry import transform_feature
                     feature = transform_feature(track.held_tool_feature,
-                        self.gripper_rotation(self.held_gripper, (self_frame or {}).get('joints'), (self_frame or {}).get('odometry')),
-                        self.gripper_position(self.held_gripper, (self_frame or {}).get('joints'), (self_frame or {}).get('odometry')))
+                        self.gripper_rotation(track.held_by, (self_frame or {}).get('joints'), (self_frame or {}).get('odometry')),
+                        self.gripper_position(track.held_by, (self_frame or {}).get('joints'), (self_frame or {}).get('odometry')))
                     feature['source'] = 'grasp_relative_plus_encoders'
-                    feature['grip'] = self.gripper_position(self.held_gripper,
+                    feature['grip'] = self.gripper_position(track.held_by,
                         (self_frame or {}).get('joints'), (self_frame or {}).get('odometry')).tolist()
                 if feature and track.held:
                     centre = np.asarray(ent.pose.value['p'])
@@ -6006,6 +6336,8 @@ class EgoEstimator:
             if hole.get("through") or prior_holes.get(hole["id"], {}).get("through"):
                 marker["through"] = True
             affordances.append(Est(value={"screw-hole": marker}, src=hole_src))
+        affordances.extend(Est(value={"fastened-hole": hole_id}, src="inferred")
+                           for hole_id in (track.fastened_holes or []))
         link = Link(
             id="body", name=track.category,
             geometry={"collision": [primitive("box", size)]},
@@ -6035,6 +6367,8 @@ class EgoEstimator:
                            links=[link]),
             existence=round(track.existence, 4),
             state_vars={**({"color": Est(value=track.color, src=src)} if track.color else {}),
+                        **({"pulledOpen": Est(value=True, src="inferred")}
+                           if track.category == "drawer" and track.id in self._pulled_open else {}),
                         **({"orientation": Est(value={
                             "marker": "[RSI_HOLE_REGISTER]" if registration else "[RSI_YAW_AMBIGUOUS]",
                             "frame": "estimated_box", "directedYawObserved": False,
@@ -6076,7 +6410,9 @@ def _apply_joint(pose: dict, joint: dict, q: float) -> dict:
         return {"p": [at["p"][i] + offset[i] for i in range(3)], "q": list(at["q"])}
     if kind == "revolute":
         spin = quat_from_axis_angle(axis, q)
-        return {"p": list(at["p"]), "q": quat_mul(at["q"], spin)}
+        anchor = np.asarray((joint.get("anchor") or {}).get("value", [0, 0, 0]))
+        offset = quat_rotate(at["q"], (anchor - matrix_from_quat(spin) @ anchor).tolist())
+        return {"p": [at["p"][i] + offset[i] for i in range(3)], "q": quat_mul(at["q"], spin)}
     raise ValueError(f"unsupported joint type {kind!r} for forward kinematics")
 
 
@@ -6115,6 +6451,9 @@ FULL_AXIS = 0.65
 SEEN_FACE_M = 0.50  # a facing side this long, and already most of the prior, is the piece itself
 ESTABLISHED_VIEWS = 5
 HELD_FALLBACK_M = 0.1
+# When the planned pick id was dropped mid-approach, search this far for a same-role successor
+# near the live gripper (drawer contents often renumber; 0.10 m then finds nothing).
+HELD_FALLBACK_CONTENT_M = 0.35
 YAW_MOVED = 0.3  # a detected heading this far off a track's means the object was turned
 STACK_TOL = 0.005  # a region this little below another's top face still rests on it
 IDENTIFIED_SHARE = 0.6
@@ -6134,6 +6473,9 @@ CONTENT_VIEWS = 3  # frames that must have shown an unnamed box beside an open d
 DRAWER_MAX_M = 1.05  # an open drawer is about 0.9 m long; the sideboard around it is 1.4 m
 DRAWER_BOARD_M = 0.04  # a strip thinner than this, this close to the edge of a drawer's box, is one of its boards
 DRAWER_FLOOR_TOL = 0.06  # a content's base this far under a drawer box's bottom still stands on the drawer floor
+# While the robot's own pull is still open, protrusion can read 0 cm (missing host, swollen seat).
+# Floor the reported opening so place/open summaries keep matching the pull; ESim uses the same flag.
+DRAWER_REMEMBERED_OPEN_M = 0.25
 SHUT_FOLLOW_MAX_M = 0.12  # a pushed drawer slides on at most this far past the base's travel
 DRAWER_MAX_HEIGHT = 0.40  # a drawer front is about 0.22 m tall; the sideboard face behind it is 0.85 m
 _FURNITURE_CAP = ("cabinet", "sideboard", "counter", "table")

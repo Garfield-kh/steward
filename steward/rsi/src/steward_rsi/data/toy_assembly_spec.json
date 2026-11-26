@@ -1,0 +1,253 @@
+{
+  "name": "toy-assembly",
+  "entities": [
+    {
+      "id": "w:room",
+      "asset": "kitchen-room",
+      "at": {
+        "x": 0.0,
+        "y": 0.0
+      }
+    },
+    {
+      "id": "w:table-plane",
+      "asset": "dining-table",
+      "at": {
+        "x": -1.35,
+        "y": -0.7
+      }
+    },
+    {
+      "id": "w:table-car",
+      "asset": "dining-table",
+      "at": {
+        "x": 1.35,
+        "y": -0.7
+      }
+    },
+    {
+      "id": "w:plane-manual",
+      "asset": "airplane-manual",
+      "on": "w:table-plane",
+      "offset": [
+        -0.18,
+        -0.28
+      ]
+    },
+    {
+      "id": "w:plane-picture",
+      "asset": "airplane-finished",
+      "on": "w:table-plane",
+      "offset": [
+        0.18,
+        -0.28
+      ]
+    },
+    {
+      "id": "w:plane-fuselage",
+      "asset": "airplane-fuselage",
+      "on": "w:table-plane",
+      "offset": [
+        -0.4,
+        0.12
+      ]
+    },
+    {
+      "id": "w:plane-wing",
+      "asset": "airplane-wing",
+      "on": "w:table-plane",
+      "offset": [
+        -0.12,
+        0.22
+      ],
+      "yaw": 0.4
+    },
+    {
+      "id": "w:plane-gear",
+      "asset": "airplane-landing-gear",
+      "on": "w:table-plane",
+      "offset": [
+        -0.38,
+        0.28
+      ]
+    },
+    {
+      "id": "w:screwdriver",
+      "asset": "electric-screwdriver",
+      "on": "w:table-plane",
+      "offset": [
+        0.1,
+        0.2
+      ],
+      "yaw": -0.6
+    },
+    {
+      "id": "w:plane-screw-0",
+      "asset": "toy-screw",
+      "on": "w:table-plane",
+      "offset": [
+        0.4,
+        -0.05
+      ]
+    },
+    {
+      "id": "w:plane-screw-1",
+      "asset": "toy-screw",
+      "on": "w:table-plane",
+      "offset": [
+        0.4,
+        0.03
+      ]
+    },
+    {
+      "id": "w:plane-screw-2",
+      "asset": "toy-screw",
+      "on": "w:table-plane",
+      "offset": [
+        0.4,
+        0.11
+      ]
+    },
+    {
+      "id": "w:plane-screw-3",
+      "asset": "toy-screw",
+      "on": "w:table-plane",
+      "offset": [
+        0.4,
+        0.19
+      ]
+    },
+    {
+      "id": "w:car-manual",
+      "asset": "car-manual",
+      "on": "w:table-car",
+      "offset": [
+        -0.18,
+        -0.28
+      ]
+    },
+    {
+      "id": "w:car-picture",
+      "asset": "car-finished",
+      "on": "w:table-car",
+      "offset": [
+        0.18,
+        -0.28
+      ]
+    },
+    {
+      "id": "w:car-body",
+      "asset": "car-body",
+      "on": "w:table-car",
+      "offset": [
+        -0.32,
+        0.15
+      ]
+    },
+    {
+      "id": "w:car-wheel-fl",
+      "asset": "car-wheel",
+      "on": "w:table-car",
+      "offset": [
+        0.05,
+        0.28
+      ]
+    },
+    {
+      "id": "w:car-wheel-fr",
+      "asset": "car-wheel",
+      "on": "w:table-car",
+      "offset": [
+        0.2,
+        0.24
+      ]
+    },
+    {
+      "id": "w:car-wheel-rl",
+      "asset": "car-wheel",
+      "on": "w:table-car",
+      "offset": [
+        0.05,
+        0.08
+      ]
+    },
+    {
+      "id": "w:car-wheel-rr",
+      "asset": "car-wheel",
+      "on": "w:table-car",
+      "offset": [
+        0.22,
+        0.05
+      ]
+    },
+    {
+      "id": "w:car-screw-0",
+      "asset": "toy-screw",
+      "on": "w:table-car",
+      "offset": [
+        0.38,
+        -0.05
+      ]
+    },
+    {
+      "id": "w:car-screw-1",
+      "asset": "toy-screw",
+      "on": "w:table-car",
+      "offset": [
+        0.38,
+        0.03
+      ]
+    },
+    {
+      "id": "w:car-screw-2",
+      "asset": "toy-screw",
+      "on": "w:table-car",
+      "offset": [
+        0.38,
+        0.11
+      ]
+    },
+    {
+      "id": "w:car-screw-3",
+      "asset": "toy-screw",
+      "on": "w:table-car",
+      "offset": [
+        0.38,
+        0.19
+      ]
+    },
+    {
+      "id": "w:robot-1",
+      "asset": "steward-bot",
+      "at": {
+        "x": 0.0,
+        "y": -1.85,
+        "yaw": 1.5707963267948966
+      }
+    }
+  ],
+  "regions": [
+    {
+      "id": "workshop",
+      "label": "workshop",
+      "polygon": [
+        [
+          -3,
+          -2.5
+        ],
+        [
+          3,
+          -2.5
+        ],
+        [
+          3,
+          2.5
+        ],
+        [
+          -3,
+          2.5
+        ]
+      ]
+    }
+  ]
+}

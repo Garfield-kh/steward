@@ -1,0 +1,68 @@
+{
+  "kind": "relative-poses",
+  "upright": true,
+  "tolerance": {
+    "positionM": 0.04,
+    "yawDeg": 20.0
+  },
+  "entities": [
+    "w:plane-fuselage",
+    "w:plane-wing",
+    "w:plane-gear",
+    "w:car-body",
+    "w:car-wheel-fl",
+    "w:car-wheel-fr",
+    "w:car-wheel-rl",
+    "w:car-wheel-rr"
+  ],
+  "constraints": [
+    {
+      "a": "w:plane-fuselage",
+      "b": "w:plane-wing",
+      "offset": [
+        0.02,
+        0.0
+      ]
+    },
+    {
+      "a": "w:plane-fuselage",
+      "b": "w:plane-gear",
+      "offset": [
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "a": "w:car-body",
+      "b": "w:car-wheel-fl",
+      "offset": [
+        0.05,
+        0.06
+      ]
+    },
+    {
+      "a": "w:car-body",
+      "b": "w:car-wheel-fr",
+      "offset": [
+        0.05,
+        -0.06
+      ]
+    },
+    {
+      "a": "w:car-body",
+      "b": "w:car-wheel-rl",
+      "offset": [
+        -0.05,
+        0.06
+      ]
+    },
+    {
+      "a": "w:car-body",
+      "b": "w:car-wheel-rr",
+      "offset": [
+        -0.05,
+        -0.06
+      ]
+    }
+  ]
+}

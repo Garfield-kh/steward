@@ -1786,6 +1786,48 @@ class EgoRuntime:
             self._publish_view_scene()
         return next(o for o in self.summary()["objects"] if o["id"] == entity)
 
+    def stage_protect(self, request: dict) -> dict:
+        """Protect a mission-staged spot from furniture false-positive drops.
+
+        Chores parks drawer items on a sideboard top; without an anchor the pistol heuristic
+        drops anything there taller than the drawer band. The anchor is XY-based so a renumbered
+        track at the same spot stays protected without freezing fusion (unlike ``pinned``).
+        ``clear: true`` removes an anchor.
+
+        :param request: ``{xy, role?, radius?, clear?}``. ``xy`` is world XY; with ``clear`` it
+            selects which anchor to remove (omit ``xy`` to clear all). Optional ``pin``+``entity``
+            pins a live track for a short window (fusion freezes while pinned).
+        :returns: ``{anchors, cleared?, pinned?}``.
+        """
+        clear = bool(request.get("clear"))
+        xy = request.get("xy")
+        with self._lock:
+            if clear:
+                cleared = self.estimator.clear_stage_spot(xy if isinstance(xy, (list, tuple)) else None)
+                return {"anchors": list(self.estimator._stage_protect), "cleared": cleared}
+            if not isinstance(xy, (list, tuple)) or len(xy) < 2:
+                raise ValueError("stage-protect needs xy=[x, y]")
+            role = request.get("role")
+            if role is not None and (not isinstance(role, str) or not role.strip()):
+                raise ValueError("role must be a non-empty string")
+            radius = request.get("radius")
+            if radius is None:
+                anchor = self.estimator.protect_stage_spot(xy, role=role)
+            else:
+                anchor = self.estimator.protect_stage_spot(xy, role=role, radius=float(radius))
+            pinned = False
+            entity = request.get("entity")
+            if request.get("pin") and isinstance(entity, str):
+                track = self.estimator.tracks.get(entity)
+                if track is not None:
+                    if not track.pinned:
+                        track.pin_observed_age = max(0., self.estimator.stamp - track.last_seen)
+                    track.pinned = True
+                    if role:
+                        track.label = role
+                    pinned = True
+            return {"anchors": list(self.estimator._stage_protect), "anchor": anchor, "pinned": pinned}
+
     def forget(self, request: dict) -> dict:
         """Remove an Ego-State object the robot's agent judged a false perception: implausible where
         it is believed to be and not perceived again on a fresh look at its place.

@@ -352,6 +352,9 @@ class EgoEstimator:
         far it stuck out when that hold began, and where its front panel was then."""
         self._shut_follow: dict[str, _ShutFollow] = {}
         """Drawers pushed shut whose contents still follow the panel's observed travel."""
+        # Mission-placed drawer items waiting on a furniture top (chores staging). A pistol on the
+        # sideboard top is otherwise dropped as a false dark-end hit; anchors keep the real piece.
+        self._stage_protect: list[dict] = []
         self.content_hits: list[tuple] = []
         """The most recent removals: ``{t, id, category, observations, reason, position, size, robot, into?}``."""
         self.version = 0
@@ -1420,6 +1423,10 @@ class EgoEstimator:
                         continue
                 if {a.category, b.category} == {"teddy_bear", "wine_glass"} and not self._beside_drawer(a.pos):
                     # On the table the glass is the object. The bear name is the brown of the stem.
+                    # Mission-staged teddies on a furniture top are real: do not drop them for a glass.
+                    if (self._stage_anchor_at(a.pos, role="teddy_bear") is not None
+                            or self._stage_anchor_at(b.pos, role="teddy_bear") is not None):
+                        continue
                     keep = a if a.category == "wine_glass" else b
                     drop = b if keep is a else a
                     self._drop(drop, "merged: two names for one object", into=keep)
@@ -2085,14 +2092,95 @@ class EgoEstimator:
                     self._drop(track, "edge of the furniture")
                     break
 
+    def protect_stage_spot(self, xy: list[float] | tuple[float, float], *,
+                           role: str | None = None, radius: float = 0.35) -> dict:
+        """Keep a mission-staged piece at ``xy`` from being dropped as a furniture false positive.
+
+        Chores parks drawer whitelist items on a furniture top; the same height band is where the
+        pistol prompt fires on sideboard rails. An anchor here exempts matching tracks until
+        :meth:`clear_stage_spot` removes it.
+
+        :param xy: world XY of the stage spot.
+        :param role: optional expected category (``pistol``, …); None matches any protected category.
+        :param radius: metres around ``xy`` that stay protected.
+        :returns: the stored anchor record.
+        """
+        if len(xy) < 2:
+            raise ValueError("stage protect needs xy")
+        anchor = {"xy": [float(xy[0]), float(xy[1])], "role": role, "radius": float(radius)}
+        # Replace a prior anchor at the same spot so re-staging does not stack duplicates.
+        self._stage_protect = [a for a in self._stage_protect
+                               if math.hypot(a["xy"][0] - anchor["xy"][0], a["xy"][1] - anchor["xy"][1]) > 0.05]
+        self._stage_protect.append(anchor)
+        return dict(anchor)
+
+    def clear_stage_spot(self, xy: list[float] | tuple[float, float] | None = None) -> int:
+        """Remove one stage anchor nearest ``xy``, or all anchors when ``xy`` is None.
+
+        :returns: how many anchors were removed.
+        """
+        if xy is None:
+            n = len(self._stage_protect)
+            self._stage_protect = []
+            return n
+        if len(xy) < 2 or not self._stage_protect:
+            return 0
+        best = min(range(len(self._stage_protect)),
+                   key=lambda i: math.hypot(self._stage_protect[i]["xy"][0] - float(xy[0]),
+                                            self._stage_protect[i]["xy"][1] - float(xy[1])))
+        if math.hypot(self._stage_protect[best]["xy"][0] - float(xy[0]),
+                      self._stage_protect[best]["xy"][1] - float(xy[1])) > 0.50:
+            return 0
+        self._stage_protect.pop(best)
+        return 1
+
+    def _stage_anchor_at(self, pos: np.ndarray | list[float] | tuple[float, float], *,
+                         role: str | None = None) -> dict | None:
+        """The stage-protect anchor covering ``pos``, optionally requiring ``role``.
+
+        Used to exempt mission-staged pieces from table heuristics that assume a teddy only
+        exists in a drawer (stem-shaped bears on the table become wine glasses).
+        """
+        x, y = float(pos[0]), float(pos[1])
+        for anchor in self._stage_protect:
+            if math.hypot(x - anchor["xy"][0], y - anchor["xy"][1]) > anchor["radius"]:
+                continue
+            want = anchor.get("role")
+            if role is None or want is None or want == role:
+                return anchor
+        return None
+
+    def _stage_protected(self, track: Track) -> bool:
+        """Whether ``track`` sits on a mission stage anchor (same role when the anchor names one).
+
+        A track whose category was flipped away from the anchor role (bear→glass) still counts when
+        it sits on that anchor, so furniture false-positive drops do not erase the staged spot.
+        """
+        if track.pinned:
+            return True
+        for anchor in self._stage_protect:
+            if math.hypot(float(track.pos[0]) - anchor["xy"][0],
+                          float(track.pos[1]) - anchor["xy"][1]) > anchor["radius"]:
+                continue
+            want = anchor.get("role")
+            if want is None or track.category == want or track.label == want:
+                return True
+            # Staged teddy misread as a wine glass: still protect the spot until rematch.
+            if want == "teddy_bear" and track.category == "wine_glass":
+                return True
+        return False
+
     def _drop_pistols_off_the_drawer(self) -> None:
         """Drop a pistol that sits on the furniture beside a closed drawer, not in it.
 
         The pistol prompt also fires on the dark ends of the sideboard. Those tracks are
-        half a metre from the drawer and match nothing that is there.
+        half a metre from the drawer and match nothing that is there. Mission-staged pieces on
+        the top (:meth:`protect_stage_spot`) and pinned tracks are kept.
         """
         for track in list(self.tracks.values()):
             if track.held or track.id not in self.tracks:
+                continue
+            if self._stage_protected(track):
                 continue
             # The pistol in a drawer is about 0.63 m up. Higher than that is the rail
             # or the top of the sideboard, including a smear that sticks out past the box.
@@ -4059,7 +4147,15 @@ class EgoEstimator:
                 named = clear_stem_name(size, track.category, track.mean_rgb, track.mean_invalid)
         # The bear is in a drawer. The same brown, on the table, is the wine glass. The measured
         # box is a hair over the stem gate, so this check is the one that applies.
-        if ((named == "teddy_bear") or track.category == "teddy_bear") and not self._beside_drawer(centre):
+        # Chores stages a real teddy on the sideboard top: a stage-protect anchor keeps / restores
+        # that name so a stem-shaped view cannot erase the staged piece. Do not treat ``named is
+        # None`` as a teddy candidate — furniture centres often sit inside the stage radius, and
+        # renaming the sideboard to teddy_bear makes the next top place infeasible.
+        if self._stage_anchor_at(centre, role="teddy_bear") is not None and (
+                named in ("teddy_bear", "wine_glass")
+                or track.category in ("teddy_bear", "wine_glass")):
+            named = "teddy_bear"
+        elif ((named == "teddy_bear") or track.category == "teddy_bear") and not self._beside_drawer(centre):
             box_long = float(max(size[0], size[1]))
             box_short = float(min(size[0], size[1]))
             if box_long <= 0.16 and box_short <= 0.13 and 0.15 < float(size[2]) < 0.22:
@@ -4609,6 +4705,43 @@ class EgoEstimator:
         self.version += 1
 
     # ---------------------------------------------------------------- holding
+    def _held_fallback_track(self, requested_id: str, grip: np.ndarray) -> Track | None:
+        """The track to treat as held when ``requested_id`` vanished during the approach.
+
+        Prefer anything already within :data:`HELD_FALLBACK_M` of the live gripper. If the planned
+        id was dropped mid-reach (common for drawer contents under a real segmenter), look farther
+        for a small object matching that drop's category/footprint within
+        :data:`HELD_FALLBACK_CONTENT_M`.
+        """
+        near = min(self.tracks.values(), key=lambda t: float(np.linalg.norm(t.pos - grip)), default=None)
+        if near is not None and float(np.linalg.norm(near.pos - grip)) <= HELD_FALLBACK_M:
+            return near
+        hint = next((d for d in reversed(self.dropped) if d.get("id") == requested_id), None)
+        want_cat = hint.get("category") if hint else None
+        want_size = hint.get("size") if hint else None
+        want_fp = max(float(want_size[0]), float(want_size[1])) if want_size and len(want_size) >= 2 else 0.0
+        furniture = ("wall", "drawer", "cabinet", "sideboard", "counter", "table")
+        ranked: list[tuple[tuple, Track]] = []
+        for track in self.tracks.values():
+            if track.category in furniture or track.footprint >= 0.5:
+                continue
+            dist = float(np.linalg.norm(track.pos - grip))
+            if dist > HELD_FALLBACK_CONTENT_M:
+                continue
+            cat_ok = want_cat is None or track.category == want_cat or track.label == want_cat
+            if want_fp > 0:
+                fp_ok = abs(track.footprint - want_fp) <= max(0.04, 0.4 * want_fp)
+            else:
+                fp_ok = True
+            # Same category+size first, then same category, then any small object at the hand.
+            rank = (0 if cat_ok and fp_ok else 1 if cat_ok else 2, dist)
+            ranked.append((rank, track))
+        if not ranked:
+            return None
+        if want_cat is not None and any(r[0][0] <= 1 for r in ranked):
+            ranked = [r for r in ranked if r[0][0] <= 1]
+        return min(ranked, key=lambda item: item[0])[1]
+
     def mark_held(self, track_id: str, since: float | None = None, gripper: str | None = None,
                   at: list[float] | None = None, body: dict | None = None) -> str:
         """Record the grasp, and carry its load with the arm, together with what lies in it.
@@ -4645,9 +4778,8 @@ class EgoEstimator:
             joints = odometry = None
         closed_at = self.gripper_position(gripper, joints, odometry) if at is None else np.asarray(at, dtype=float)
         if track_id not in self.tracks:
-            grip = closed_at
-            near = min(self.tracks.values(), key=lambda t: float(np.linalg.norm(t.pos - grip)), default=None)
-            if near is None or float(np.linalg.norm(near.pos - grip)) > HELD_FALLBACK_M:
+            near = self._held_fallback_track(track_id, closed_at)
+            if near is None:
                 raise KeyError(f"{track_id} is no longer in the ego state and nothing else is in the gripper")
             track_id = near.id
         track = self.tracks[track_id]
@@ -5205,10 +5337,18 @@ class EgoEstimator:
         return False
 
     def drawer_opening(self, drawer: Track) -> float:
-        """How far a drawer sticks out of the furniture holding it, along the drawer's front axis."""
+        """How far a drawer sticks out of the furniture holding it, along the drawer's front axis.
+
+        After the robot pulls a drawer out (:attr:`_pulled_open`), a missing or mis-seated host can
+        make :func:`protrusion` read 0 cm while the drawer is still open. Floor the opening to the
+        remembered pull until :meth:`shift` records a push shut.
+        """
         furniture = [_box2d(t) for t in self.tracks.values()
                      if t.id != drawer.id and "support-surface" in t.affordances]
-        return protrusion(self.front(drawer), furniture)
+        geometric = protrusion(self.front(drawer), furniture)
+        if drawer.id in self._pulled_open:
+            return max(geometric, DRAWER_REMEMBERED_OPEN_M)
+        return geometric
 
     def front(self, track: Track) -> Box2D:
         """The track's footprint with +x pointing out of its front (towards the room centre)."""
@@ -6037,6 +6177,8 @@ class EgoEstimator:
                            links=[link]),
             existence=round(track.existence, 4),
             state_vars={**({"color": Est(value=track.color, src=src)} if track.color else {}),
+                        **({"pulledOpen": Est(value=True, src="inferred")}
+                           if track.category == "drawer" and track.id in self._pulled_open else {}),
                         **({"orientation": Est(value={
                             "marker": "[RSI_HOLE_REGISTER]" if registration else "[RSI_YAW_AMBIGUOUS]",
                             "frame": "estimated_box", "directedYawObserved": False,
@@ -6117,6 +6259,9 @@ FULL_AXIS = 0.65
 SEEN_FACE_M = 0.50  # a facing side this long, and already most of the prior, is the piece itself
 ESTABLISHED_VIEWS = 5
 HELD_FALLBACK_M = 0.1
+# When the planned pick id was dropped mid-approach, search this far for a same-role successor
+# near the live gripper (drawer contents often renumber; 0.10 m then finds nothing).
+HELD_FALLBACK_CONTENT_M = 0.35
 YAW_MOVED = 0.3  # a detected heading this far off a track's means the object was turned
 STACK_TOL = 0.005  # a region this little below another's top face still rests on it
 IDENTIFIED_SHARE = 0.6
@@ -6136,6 +6281,9 @@ CONTENT_VIEWS = 3  # frames that must have shown an unnamed box beside an open d
 DRAWER_MAX_M = 1.05  # an open drawer is about 0.9 m long; the sideboard around it is 1.4 m
 DRAWER_BOARD_M = 0.04  # a strip thinner than this, this close to the edge of a drawer's box, is one of its boards
 DRAWER_FLOOR_TOL = 0.06  # a content's base this far under a drawer box's bottom still stands on the drawer floor
+# While the robot's own pull is still open, protrusion can read 0 cm (missing host, swollen seat).
+# Floor the reported opening so place/open summaries keep matching the pull; ESim uses the same flag.
+DRAWER_REMEMBERED_OPEN_M = 0.25
 SHUT_FOLLOW_MAX_M = 0.12  # a pushed drawer slides on at most this far past the base's travel
 DRAWER_MAX_HEIGHT = 0.40  # a drawer front is about 0.22 m tall; the sideboard face behind it is 0.85 m
 _FURNITURE_CAP = ("cabinet", "sideboard", "counter", "table")

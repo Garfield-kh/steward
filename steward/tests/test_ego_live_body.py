@@ -35,6 +35,31 @@ def test_a_load_renamed_during_the_approach_is_found_at_the_gripper_of_the_grasp
     assert est.mark_held("e:99", since=est.stamp, body=body) == "e:1"
 
 
+def test_a_dropped_pick_target_is_rebound_by_category_near_the_gripper():
+    """Drawer contents often vanish mid-reach; the successor of the same role at the hand is held."""
+    from steward.assets.generators import steward_bot
+    from steward.ego.estimator import EgoEstimator, Track
+
+    est = EgoEstimator(robot_model=steward_bot().to_dict())
+    grip = est.gripper_position()
+    gone = Track(id="e:680", category_counts={"teddy_bear": 5.0}, pos=grip + np.array([0.05, 0.0, 0.0]),
+                 var=np.full(3, 1e-6), yaw=0.0, yaw_var=1e-4, size=np.array([0.12, 0.10, 0.18]),
+                 observations=5, first_seen=0.0, last_seen=0.0, existence=1.0)
+    est.tracks["e:680"] = gone
+    est._drop(gone, "a thin smear of the bear")
+    successor = Track(id="e:901", category_counts={"teddy_bear": 5.0},
+                      pos=grip + np.array([0.22, 0.02, 0.0]), var=np.full(3, 1e-6), yaw=0.0, yaw_var=1e-4,
+                      size=np.array([0.11, 0.10, 0.17]), observations=3, first_seen=0.0, last_seen=0.0,
+                      existence=1.0)
+    glass = Track(id="e:8", category_counts={"wine_glass": 5.0}, pos=grip + np.array([0.18, 0.0, 0.0]),
+                  var=np.full(3, 1e-6), yaw=0.0, yaw_var=1e-4, size=np.array([0.06, 0.06, 0.18]),
+                  observations=3, first_seen=0.0, last_seen=0.0, existence=1.0)
+    est.tracks["e:901"] = successor
+    est.tracks["e:8"] = glass
+    body = {"odometry": dict(est.odometry), "joints": dict(est.joints)}
+    assert est.mark_held("e:680", since=est.stamp, body=body) == "e:901"
+
+
 def test_a_held_load_and_its_contents_turn_with_the_live_body():
     """B2: to_scene placed the load at the live body but kept its heading (and what lies in it) from
     the last look: the base turned 90 deg, the load read as unturned, and the place wrist angle was

@@ -72,6 +72,17 @@ def test_esim_refuses_uncertain_pick_and_accepts_after_observation(kitchen_scene
     assert near["plan"]["support"] != cup_id
 
 
+def test_motion_config_top_grasp_probes_cover_wider_xy_and_lower_z():
+    """Furniture-top short pieces use denser downward probes than the default 7-point set."""
+    from steward.ego.skills import MotionConfig
+
+    cfg = MotionConfig()
+    assert max(abs(v) for v in cfg.grasp_probe_xy_top) >= max(abs(v) for v in cfg.grasp_probe_xy)
+    assert min(cfg.grasp_probe_z_top) < min(cfg.grasp_probe_z)
+    assert len(cfg.grasp_probe_xy_top) >= len(cfg.grasp_probe_xy)
+    assert len(cfg.grasp_probe_z_top) >= len(cfg.grasp_probe_z)
+
+
 def test_translate_keeps_heading_in_the_odometry_yaw_frame():
     from steward.ego.skills import SkillExecutor
 

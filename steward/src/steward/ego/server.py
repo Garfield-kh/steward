@@ -141,6 +141,7 @@ def _routes(runtime: EgoRuntime) -> dict:
         ("POST", "/ego/control"): lambda q, b: control(b),
         ("POST", "/ego/predict"): lambda q, b: runtime.predict(b["skill"], b.get("params", {})),
         ("POST", "/ego/annotate"): lambda q, b: runtime.annotate(b),
+        ("POST", "/ego/stage-protect"): lambda q, b: runtime.stage_protect(b),
         ("POST", "/ego/forget"): lambda q, b: runtime.forget(b),
         ("POST", "/ego/candidates"): lambda q, b: runtime.candidates(b),
         ("POST", "/ego/reflect"): lambda q, b: runtime.reflect(b),

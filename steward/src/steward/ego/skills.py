@@ -103,6 +103,9 @@ class MotionConfig:
     # probe is at the estimate itself, then forward/back, then left/right, then other heights.
     grasp_probe_xy: tuple[float, ...] = (0.035, -0.035)
     grasp_probe_z: tuple[float, ...] = (-0.025, 0.025)
+    # Furniture-top / short pieces: wider XY and denser downward Z (flat toys on a sideboard).
+    grasp_probe_xy_top: tuple[float, ...] = (0.06, -0.06, 0.05, -0.05, 0.035, -0.035)
+    grasp_probe_z_top: tuple[float, ...] = (-0.015, -0.03, -0.045, -0.06, 0.02)
     settle_s: float = 0.4
     """Robot time after a joint command at which a joint still short of its target (sagging under
     a load) gets one corrected setpoint."""
@@ -1294,6 +1297,9 @@ class SkillExecutor:
         # An elevated drawer grasp stores its working height in plan["lift"] (via graspDz); prefer it
         # so the live centre cannot pull the tilt back into the USD hole.
         pick_lift = plan["lift"] if plan.get("support") == "floor" else max(float(target["p"][2]), float(plan["lift"]))
+        # Furniture-top: do not let a high live centre pull the close well above the planned height.
+        if plan.get("liftMax") is not None:
+            pick_lift = min(pick_lift, float(plan["liftMax"]))
         # A tilted close at the dock reach may need a raised floor; tool-down closes (closePitch≈0)
         # keep the object's true height so the gripper does not close in air above a short bottle.
         close_pitch = abs(float(plan.get("closePitch") or 0.0))
@@ -1320,10 +1326,12 @@ class SkillExecutor:
         # is re-read before each probe -- it is best while the camera is right over the object.
         # Taken by its edge (docked facing that side), forward lies over what is inside it and back
         # over nothing: the probes keep along the edge.
+        top_probes = bool(plan.get("topGraspProbes"))
+        xy_probes = self.config.grasp_probe_xy_top if top_probes else self.config.grasp_probe_xy
         probes = [(0.0, 0.0, 0.0)]
         if not (ox or oy):
-            probes += [(dx, 0.0, 0.0) for dx in self.config.grasp_probe_xy]
-        probes += [(0.0, dy, 0.0) for dy in self.config.grasp_probe_xy]
+            probes += [(dx, 0.0, 0.0) for dx in xy_probes]
+        probes += [(0.0, dy, 0.0) for dy in xy_probes]
         # Drawer / over-rim grasps often sit a centimetre high after the approach; try down first —
         # but not while still tilted: a centimetre lower at long reach sits in the USD hole.
         # Use the live wrist (approach may have untilted for close) rather than the plan's pitch.
@@ -1331,9 +1339,12 @@ class SkillExecutor:
         # Mild close tilt (~0.35) still allows centimetre height probes; only skip when steep.
         # Drawer / rim closes: only probe upward. Negative dz untilts to tool-down at ~0.60 m, and
         # that height has no IK past ~0.35 m (grasp missed with pitch=0.00).
+        # Furniture-top short pieces: denser downward Z so a slightly high centre still finds contact.
         if live_pitch <= 0.5:
             if plan.get("approachLift") is not None:
                 z_probes = (0.02, 0.04)
+            elif top_probes:
+                z_probes = self.config.grasp_probe_z_top
             else:
                 z_probes = self.config.grasp_probe_z
             probes += [(0.0, 0.0, dz) for dz in z_probes]
@@ -1380,7 +1391,10 @@ class SkillExecutor:
                         floor = float(plan["lift"]) + dz
                         need = max(0.05, min(td_cap, self._reach_to(goal.tolist())))
                     self._set_joint("reach", need, ramp=False)
-                    self._set_joint("lift", max(float(latest["p"][2] + dz), floor))
+                    lift_goal = max(float(latest["p"][2] + dz), floor)
+                    if plan.get("liftMax") is not None:
+                        lift_goal = min(lift_goal, float(plan["liftMax"]) + dz)
+                    self._set_joint("lift", lift_goal)
                 except (OutOfReach, SkillFailed) as e:
                     job.log.append(f"skipped probe {n}: {e}")
                     continue

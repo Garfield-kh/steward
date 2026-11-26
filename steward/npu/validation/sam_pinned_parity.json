@@ -1,0 +1,8 @@
+{
+  "arrays": 90,
+  "all_bitwise_equal": true,
+  "mismatches": [],
+  "requests": 3,
+  "prompts_per_request": 10,
+  "dependency_commit": "7f473cfd983d5eb43040ff608f66bff0d7bdcb53"
+}

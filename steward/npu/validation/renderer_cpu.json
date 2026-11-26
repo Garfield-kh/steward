@@ -1,0 +1,32 @@
+[
+  {
+    "fixture": "1649_head_camera.npz",
+    "device": "cpu",
+    "rgb_depth_ids_resolved_depth_bitwise_equal": [
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  {
+    "fixture": "1649_wide_camera.npz",
+    "device": "cpu",
+    "rgb_depth_ids_resolved_depth_bitwise_equal": [
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  {
+    "fixture": "824_hand_camera.npz",
+    "device": "cpu",
+    "rgb_depth_ids_resolved_depth_bitwise_equal": [
+      true,
+      true,
+      true,
+      true
+    ]
+  }
+]

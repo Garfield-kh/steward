@@ -1,0 +1,50 @@
+[
+  {
+    "unit": "AnalyticRenderer",
+    "algorithm_ast_equal": true
+  },
+  {
+    "unit": "TiledRenderer",
+    "algorithm_ast_equal": true
+  },
+  {
+    "unit": "graph_accel.py:cache_encoder_metadata",
+    "algorithm_ast_equal": true
+  },
+  {
+    "unit": "graph_accel.py:signature",
+    "algorithm_ast_equal": true
+  },
+  {
+    "unit": "graph_accel.py:clone",
+    "algorithm_ast_equal": true
+  },
+  {
+    "unit": "graph_accel.py:update",
+    "algorithm_ast_equal": true
+  },
+  {
+    "unit": "graph_accel.py:GroundingGraphs",
+    "algorithm_ast_equal": true
+  },
+  {
+    "unit": "decoder_meta.py:install",
+    "algorithm_ast_equal": true
+  },
+  {
+    "unit": "Replica.text_features",
+    "algorithm_ast_equal": true
+  },
+  {
+    "unit": "Replica.backbone",
+    "algorithm_ast_equal": true
+  },
+  {
+    "unit": "Replica.postprocess_batch",
+    "algorithm_ast_equal": true
+  },
+  {
+    "unit": "Replica.segment",
+    "algorithm_ast_equal": true
+  }
+]

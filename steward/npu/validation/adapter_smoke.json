@@ -1,0 +1,32 @@
+{
+  "records": [
+    {
+      "fixture": "1649_head_camera.npz",
+      "equal_to_archived_npu": {
+        "rgb": true,
+        "depth": true,
+        "seg": true
+      },
+      "depth_sample_mode": "a800_msaa4_sample0"
+    },
+    {
+      "fixture": "1649_wide_camera.npz",
+      "equal_to_archived_npu": {
+        "rgb": true,
+        "depth": true,
+        "seg": true
+      },
+      "depth_sample_mode": "a800_msaa4_sample0"
+    },
+    {
+      "fixture": "824_hand_camera.npz",
+      "equal_to_archived_npu": {
+        "rgb": true,
+        "depth": true,
+        "seg": true
+      },
+      "depth_sample_mode": "a800_msaa4_sample0"
+    }
+  ],
+  "worker_exitcode": 0
+}

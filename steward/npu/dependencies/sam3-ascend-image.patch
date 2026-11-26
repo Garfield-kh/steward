@@ -1,0 +1,134 @@
+--- a/sam3/model/position_encoding.py
++++ b/sam3/model/position_encoding.py
+@@ -6,6 +6,13 @@
+ from typing import Optional
+ 
+ import torch
++
++# Select Ascend only after the caller has registered torch_npu.
++_DEV = (
++    "npu"
++    if getattr(torch, "npu", None) is not None and torch.npu.is_available()
++    else "cuda"
++)
+ from torch import nn
+ 
+ 
+@@ -52,7 +59,7 @@
+                 (precompute_resolution // 32, precompute_resolution // 32),
+             ]
+             for size in precompute_sizes:
+-                tensors = torch.zeros((1, 1) + size, device="cuda")
++                tensors = torch.zeros((1, 1) + size, device=_DEV)
+                 self.forward(tensors)
+                 # further clone and detach it in the cache (just to be safe)
+                 self.cache[size] = self.cache[size].clone().detach()
+--- a/sam3/model/decoder.py
++++ b/sam3/model/decoder.py
+@@ -12,6 +12,13 @@
+ 
+ import numpy as np
+ import torch
++
++# Select Ascend only after the caller has registered torch_npu.
++_DEV = (
++    "npu"
++    if getattr(torch, "npu", None) is not None and torch.npu.is_available()
++    else "cuda"
++)
+ import torch.nn.functional as torchF
+ from sam3.sam.rope import apply_rotary_enc, apply_rotary_enc_real, compute_axial_cis
+ from sam3.sam.transformer import RoPEAttention
+@@ -73,7 +80,7 @@
+         return tensor if pos is None else tensor + pos
+ 
+     def forward_ffn(self, tgt):
+-        with torch.amp.autocast(device_type="cuda", enabled=False):
++        with torch.amp.autocast(device_type=_DEV, enabled=False):
+             tgt2 = self.linear2(self.dropout3(self.activation(self.linear1(tgt))))
+         tgt = tgt + self.dropout4(tgt2)
+         tgt = self.norm3(tgt)
+@@ -300,7 +307,7 @@
+             if resolution is not None and stride is not None:
+                 feat_size = resolution // stride
+                 coords_h, coords_w = self._get_coords(
+-                    feat_size, feat_size, device="cuda"
++                    feat_size, feat_size, device=_DEV
+                 )
+                 self.compilable_cord_cache = (coords_h, coords_w)
+                 self.compilable_stored_size = (feat_size, feat_size)
+@@ -1062,8 +1069,12 @@
+         assert dropout == 0.0
+         out = flash_attn_func(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2))
+     else:
+-        with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
++        if _DEV == "npu":
++            # CUDA FLASH_ATTENTION selection is unavailable on Ascend.
+             out = torchF.scaled_dot_product_attention(q, k, v, dropout_p=dropout)
++        else:
++            with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
++                out = torchF.scaled_dot_product_attention(q, k, v, dropout_p=dropout)
+         out = out.transpose(1, 2)  #  B * n * n_heads * (cv // num_heads)
+ 
+     out = out.reshape(b, n, cv)
+--- a/sam3/model/sam3_tracker_utils.py
++++ b/sam3/model/sam3_tracker_utils.py
+@@ -6,7 +6,13 @@
+ import torch
+ import torch.nn.functional as F
+ from numpy.typing import NDArray
+-from sam3.model.edt import edt_triton
++try:
++    from sam3.model.edt import edt_triton
++except ImportError:
++    # Image-only inference does not use the CUDA Triton video-tracker EDT.
++    # Keep unsupported tracker use explicit instead of providing a fake result.
++    def edt_triton(*args, **kwargs):
++        raise RuntimeError("edt_triton requires CUDA Triton; video tracking is unsupported")
+ 
+ 
+ def sample_box_points(
+--- a/sam3/model_builder.py
++++ b/sam3/model_builder.py
+@@ -5,7 +5,7 @@
+ import os
+ from typing import Optional
+ 
+-import pkg_resources
++import importlib.resources
+ import torch
+ import torch.nn as nn
+ from huggingface_hub import hf_hub_download
+@@ -596,8 +596,8 @@
+         A SAM3 image model
+     """
+     if bpe_path is None:
+-        bpe_path = pkg_resources.resource_filename(
+-            "sam3", "assets/bpe_simple_vocab_16e6.txt.gz"
++        bpe_path = str(
++            importlib.resources.files("sam3") / "assets/bpe_simple_vocab_16e6.txt.gz"
+         )
+ 
+     # Create visual components
+@@ -695,8 +695,8 @@
+         Sam3VideoInferenceWithInstanceInteractivity: The instantiated dense tracking model
+     """
+     if bpe_path is None:
+-        bpe_path = pkg_resources.resource_filename(
+-            "sam3", "assets/bpe_simple_vocab_16e6.txt.gz"
++        bpe_path = str(
++            importlib.resources.files("sam3") / "assets/bpe_simple_vocab_16e6.txt.gz"
+         )
+ 
+     # Build Tracker module
+@@ -1106,8 +1106,8 @@
+         Sam3MultiplexVideoPredictor: The fully-initialized predictor
+     """
+     if bpe_path is None:
+-        bpe_path = pkg_resources.resource_filename(
+-            "sam3", "assets/bpe_simple_vocab_16e6.txt.gz"
++        bpe_path = str(
++            importlib.resources.files("sam3") / "assets/bpe_simple_vocab_16e6.txt.gz"
+         )
+ 
+     from sam3.model.sam3_multiplex_base import Sam3MultiplexPredictorWrapper

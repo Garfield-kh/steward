@@ -1,0 +1,26 @@
+{
+  "repository": "https://github.com/facebookresearch/sam3",
+  "commit": "7f473cfd983d5eb43040ff608f66bff0d7bdcb53",
+  "files": [
+    {
+      "file": "sam3/model/position_encoding.py",
+      "before_sha256": "6ec4e053bad5d17035f9ea8f60a032f60c51ba5ce5a5a174b4b2fe0de62749f6",
+      "after_sha256": "cdc66b612cac17be00276dfb5a5bf250e2bf63f16ee73d959cb0e83645852ef7"
+    },
+    {
+      "file": "sam3/model/decoder.py",
+      "before_sha256": "a282d5c7303b8b22541e14bf198f26019a2da4b6ee23c165838ddd9a9312044b",
+      "after_sha256": "a8ab2a466f5d5d27b15bc614be39356f937c4a9ad0e400e5eb4d4490c4a59602"
+    },
+    {
+      "file": "sam3/model/sam3_tracker_utils.py",
+      "before_sha256": "dc5fdeba2d4416f273394a9bd4450dff050608db6009a4546ca68adbaa24a640",
+      "after_sha256": "fcf9c00d90591337711a3409a2e1bbb329d5108c1a2d3b4564bad9038527176b"
+    },
+    {
+      "file": "sam3/model_builder.py",
+      "before_sha256": "60cef72b1f7e4a2162d1c3f1ad2c0451bbbdc10e3484433a9aa2d016fed6b448",
+      "after_sha256": "52b3bbc36732f218292c16b574bf3bbfa47e6f285bf390600c857d6a0b9d5df7"
+    }
+  ]
+}

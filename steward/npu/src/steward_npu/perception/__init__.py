@@ -1,0 +1,1 @@
+"""Optional NPU perception components."""

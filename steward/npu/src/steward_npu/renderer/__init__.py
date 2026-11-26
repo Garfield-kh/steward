@@ -1,0 +1,1 @@
+"""Optional NPU renderer components."""

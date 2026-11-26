@@ -79,7 +79,7 @@ def driver_stroke(planner, es, params):
             endpoint = goal-world_r @ tip_local
             def wrist(yaw):
                 return (heading-yaw+math.pi) % (2*math.pi)-math.pi, float(roll)
-            def path(yaw, reach, near):
+            def path(yaw, reach, near, _pitch):
                 wy, wr = wrist(yaw)
                 at = dict(current); targets = [at]
                 changes = [dict(lift=safe), dict(reach=near), dict(wrist_yaw=wy),

@@ -3,14 +3,17 @@
 # After editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write steward/README.md
 /steward:
-  en: f67fb97a23830628
-  zh: 58fe6d85e60d1b57
+  en: eecd3c14c5f6b288
+  zh: 8ca856e5c88d27c3
 /steward/quick-start:
-  en: 6d5acd4db8322d08
-  zh: aa3171095823bb3f
+  en: 3322516c287f6af8
+  zh: 950de78ce781b5e4
 /steward/merom-house:
   en: a67305987a17ba06
   zh: c7d85552f0dd3878
+/steward/import-a-usd-robot:
+  en: 7ab023d67030643a
+  zh: 3053ede7a815340a
 /steward/run-with-deepseek-harness:
   en: c238e824d9bfb527
   zh: 90c8fa0b9bdcec0c

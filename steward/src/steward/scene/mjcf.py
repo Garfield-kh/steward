@@ -154,22 +154,26 @@ def build_mjcf(
     textures = _Textures(ET.Element("asset"))
     names: dict[str, EntityNames] = {}
     initial: dict[str, list[float]] = {}
+    equalities = ET.SubElement(root, "equality")
     for ent in scene.entities:
         if not isinstance(ent.body, RigidTree):
             raise NotImplementedError(f"entity {ent.id}: deformable bodies are not simulated in Phase 0")
         names[ent.id] = _emit_entity(world, actuators, ent, initial, textures, appearance)
+        for coupling in ent.body.couplings:
+            ET.SubElement(equalities, "joint", joint1=names[ent.id].joints[coupling["joint1"]],
+                          joint2=names[ent.id].joints[coupling["joint2"]],
+                          polycoef=_fmt([coupling["offset"], coupling["multiplier"], 0, 0, 0]))
     fastener_welds = {}
     if fasteners and scene.mode == "world":
         active = active_welds(scene)
         pairs = weld_pairs(features(scene))
         if pairs:
-            equality = ET.SubElement(root, "equality")
             for i, pair in enumerate(pairs):
                 a, b = pair
                 name = f"fastener-{i}"
                 fastener_welds[pair] = name
                 rel = active.get(pair, {"p": [0, 0, 0], "q": [1, 0, 0, 0]})
-                ET.SubElement(equality, "weld", name=name,
+                ET.SubElement(equalities, "weld", name=name,
                               body1=next(iter(names[a].bodies.values())),
                               body2=next(iter(names[b].bodies.values())),
                               active="true" if pair in active else "false",
@@ -183,6 +187,8 @@ def build_mjcf(
                     for geom in body.findall("geom"):
                         geom.set("contype", "0")
                         geom.set("conaffinity", "0")
+    if not len(equalities):
+        root.remove(equalities)
     if len(actuators) == 0:
         root.remove(actuators)
     if len(textures.element):
@@ -318,6 +324,8 @@ def _emit_children(parent_el: ET.Element, actuators: ET.Element, ent: Entity, pa
         if jtype != "fixed":
             jname = f"{ent.id}::{joint.id}"
             attrs = {"name": jname, "type": _JOINT_KIND[jtype]}
+            if joint.anchor is not None:
+                attrs["pos"] = _fmt(joint.anchor.value)
             if jtype != "ball":
                 attrs["axis"] = _fmt(joint.axis.value if joint.axis else _DEFAULT_AXIS[jtype])
             if joint.limits is not None:
@@ -349,6 +357,8 @@ def _emit_actuator(actuators: ET.Element, name: str, joint: str, act: dict, limi
     attrs = {"name": name, "joint": joint}
     if kind == "position":
         attrs["kp"] = f"{gains.get('kp', 100.0)}"
+        if "kv" in gains:
+            attrs["kv"] = str(gains["kv"])
         if limits is not None:
             attrs["ctrlrange"] = _fmt([limits["lo"], limits["hi"]])
         if effort is not None:

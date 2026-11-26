@@ -191,7 +191,7 @@ def test_a_dual_arm_load_follows_the_arm_that_holds_it(rig) -> None:
     frame = frame_with_right_holding()
     frame["grippers"]["R_link6"] = {"state": "open", "holding": False, "holdingHandle": False}
     est.update(frame)
-    assert est.held_id is None and est.held_gripper is None
+    assert est.held_id is None and est.held_gripper == "R_link6"
     assert track.held is False
     # It is believed where the hand let go of it, not where it was picked up -- otherwise the
     # next look measures a bowl 30 cm from the stale position and starts a second track for it.

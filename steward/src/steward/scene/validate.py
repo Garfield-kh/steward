@@ -168,11 +168,24 @@ def _validate_body(body: Any, where: str) -> list[str]:
                 continue
             for k, g in enumerate(geoms):
                 errors += _check_geometry(g, f"{lw}.geometry.{role}[{k}]")
+    joint_types = {j.get("id"): (j.get("type") or {}).get("value") for j in body.get("joints", [])}
+    couplings = body.get("couplings", [])
+    if not isinstance(couplings, list):
+        errors.append(f"{where}.couplings: expected a list")
+        couplings = []
+    for coupling in couplings:
+        if (not isinstance(coupling, dict)
+                or any(joint_types.get(coupling.get(key)) not in ("revolute", "prismatic") for key in ("joint1", "joint2"))
+                or coupling.get("joint1") == coupling.get("joint2")
+                or not _finite_vector([coupling.get("offset"), coupling.get("multiplier")], 2)):
+            errors.append(f"{where}.couplings: need two distinct scalar joints and finite offset/multiplier")
     parent_of: dict[str, str] = {}
     for j, joint in enumerate(body.get("joints", [])):
         jw = f"{where}.joints[{j}]"
         errors += _check_est(joint.get("type"), f"{jw}.type", lambda v: v in JOINT_TYPES)
         errors += _check_est(joint.get("origin"), f"{jw}.origin", _is_pose)
+        if "anchor" in joint:
+            errors += _check_est(joint["anchor"], f"{jw}.anchor", lambda v: _finite_vector(v, 3))
         errors += _check_est(joint.get("q"), f"{jw}.q", lambda v: isinstance(v, list))
         errors += _check_est(joint.get("qd"), f"{jw}.qd", lambda v: isinstance(v, list))
         if joint.get("parent") not in link_ids:

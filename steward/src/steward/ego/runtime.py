@@ -295,7 +295,8 @@ class RobotLink:
 
     def wait_until(self, t: float | None = None, hold: str | None = None, rank: int = 0, pulls: bool = True) -> float:
         """Wait until the world clock reaches ``t`` (``None``: now) and, with ``hold``, the world lets
-        this control loop or input run (:meth:`WorldSim.wait_until`); return the world time then."""
+        this control loop or input run (:meth:`WorldSim.wait_until`); return the world time then.
+        Passive waits can remain idle indefinitely; pulling waits time out after 60 seconds."""
         body = {"hold": hold, "rank": rank, "pulls": pulls, **({} if t is None else {"until": t})}
         deadline = time.monotonic() + 60.0
         last = ""
@@ -306,7 +307,7 @@ class RobotLink:
                 if exc.status != 504 or self.closed:
                     raise
                 last = str(exc)
-                if time.monotonic() >= deadline:
+                if pulls and time.monotonic() >= deadline:
                     raise SkillFailed("robot clock wait timed out after 60 s" +
                                       (f" ({last})" if "paused" in last else "")) from exc
 
@@ -876,10 +877,12 @@ class EgoRuntime:
 
     def _loop(self) -> None:
         """Perceive every ``1 / perception_hz`` seconds of world time, from the time the runtime started;
-        the world waits for each update but does not step for it alone (``freeze_idle``)."""
+        the world waits for each update but does not step for it alone (``freeze_idle``).
+        Each episode's first successful update is reported immediately, even while idle."""
         period = 1.0 / self.config.perception_hz
         telemetry_every = max(1, int(self.config.perception_hz / self.config.telemetry_hz))
         k = 0
+        telemetry_episode = object()
         t: float | None = None
         while self._running:
             try:
@@ -904,8 +907,9 @@ class EgoRuntime:
                 with self._holding("perception"):
                     self._poll_once()
                 k += 1
-                if k % telemetry_every == 0:
+                if self._episode != telemetry_episode or k % telemetry_every == 0:
                     self.link.telemetry(self._telemetry_scene())
+                    telemetry_episode = self._episode
                 self.last_error = None
                 self._last_clock_alert = None
             except (HttpError, OSError) as exc:

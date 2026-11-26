@@ -11,8 +11,11 @@ English | [中文](guide.zh.md)
 
 Newly generated `cobot-magic` models use manufacturer USD arm/lift kinematics. Raw `joints.lift` and the Cobot `lift` skill's `height` parameter change from carriage height above the chassis top, `[0.35, 1.05]` m, to displacement above the lowest position, `[0, 0.60]` m. The initial value changes from `0.70` to `0`. The Ego planar arm's virtual `lift` remains TCP height.
 
+The base-fixed head mount moves from x=0.16 to x=0.28 m; head camera origins move from x=0.21 to x=0.33 m to clear the moving carriage collision box. Saved Cobot models and their camera transforms must be regenerated together.
+
 ## Migration
 
 1. Recreate saved Cobot entities; embedded models are not updated automatically. World and Ego Runtime must use the same model.
 2. Update raw lift commands to `[0, 0.60]`. For arm-root height `H`, use `H - 0.9732298` metres if within range. This floor offset is inferred from wheel geometry, not hardware calibration. Leave virtual TCP-height commands unchanged.
 3. Check the new joint ranges and mounts before reusing trajectories. The [embodiment profile](../../../../steward/embodiments/cobot-magic.yaml) records mappings and assumptions.
+4. Recreate Cobot models before collecting new camera evidence; keep previously captured images with their original recorded camera transforms.

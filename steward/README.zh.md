@@ -12,7 +12,17 @@
 
 Steward 是基于 DeepSeek Harness 的具身智能机器人系统。设计见仓库根目录的 [steward.md](../steward.md)，当前实现进度与运行命令见其中的「13. Implementation Progress」；Phase 1 感知如何从 RGB-D 得到几何与类别、以及泛化路线见 [13.7](../steward.md#137-phase-1-感知方法与泛化)。
 
+Cobot 按物理夹爪分别跟踪持物。显式 `arm` 选择工作手，不会释放另一只手；`self.holdingByGripper` 列出两手的附着物，`self.holding` 表示工作手的持物。打开一个夹爪只释放该手的负载及其携带的内容物。抽屉把手跟踪仍限于一只工作手，换臂前需要释放已持有的把手。
+
+持刀执行 `drive_screw` 时，规划使用抓取坐标系中的刀尖端点，并与 Piper IK 共用工具旋转。搜索范围由 `EsimConfig.drive_yaw_offsets`、`drive_roll_candidates` 和 `drive_max_tilt` 指定；从物理编码器检查接近、下压和逆向回撤，再沿已检查的路点执行并保留螺丝刀。可行收据表示运动学连续性通过，任务是否成功仍需独立观察螺丝。
+
 ## 快速开始
+
+共享的机器人 Harness 会话归属于场景中的第一个机器人；思考预览与全文读取使用该机器人的实际 ID，其他机器人不会继承此会话。
+
+可选的[分割辅助 CPU 定位实验](docs/localization/README.zh.md)使用 RGB-D、语义掩膜和 EKF。给 `steward up` 或支持的 pytest 动作用例添加 `--localization-experiment`，可同时启用累计里程计漂移和融合定位反馈。用 `--odom-drift` 或 `--apply-localization` 可分别启用，两项默认关闭。
+
+在本目录运行 `python -m pytest tests/test_localization_loop.py -q -s` 可执行独立的定位对照测试。三个固定种子驱动底盘沿带家具厨房的通道绕行并返回，对比零漂移与 `PerceptionConfig(odom_scale_error=0.01, odom_yaw_drift_per_m=0.005)`（平移尺度偏大 1%，每米累计 0.005 rad 航向偏差）。两组均保留默认瞬时噪声。漂移在每个仿真步按真实运动累积，本体传感器与 RGB-D 帧头共用结果，随 Episode 重置；两个漂移参数默认均为零。传感器报告的 sigma 仅涵盖瞬时噪声，不包含累计标定偏差。各 pytest 临时目录保存 `report.json` 和 `trajectory.csv`，记录误差、实际行驶距离和闭合距离。脚本化执行器路线读取里程计，同一组航点的实际行驶距离可能不同；本测试不代表自主导航、视觉配准或 SLAM，真实状态不会修正 Ego 位姿。
 
 图案匹配在一个已记录的世界时刻复制机器人观测，再释放输入调度锁和世界时钟暂停，随后计算相关性。计算期间状态查询可以继续；关闭 HTTP 连接会在拼片或四分之一转之间取消计算，观测快照的获取仍会完成。结果保留快照时刻及当时的参考物姿态，物体移动后应重新观察。`/ego/inputs` 记录快照获取，包括之后被取消的请求，不是计算完成日志。
 
@@ -34,6 +44,14 @@ open http://127.0.0.1:7400/console   # 浏览器控制台：斜视主视图、�
 
 机器人头部有两台 RGB-D 相机：`head_camera` 看前方，`wide_camera` 是短焦广角相机，看身前台面与夹爪；两台都进入感知，见 [steward.md 13.8](../steward.md#138-机器人本体的双相机)。
 
+在 `phase1-sam` 下，控制台的「SAM 分割结果」面板显示每台相机最近完成的感知关键帧，叠加彩色实例掩码、类别分数和采集时的仿真时间。结果取自合并和裁剪后的 SAM 输出，不含深度补充和剥离；实例编号仅属于本帧，不是持久轨迹编号。读取预览不会调用 SAM。分割失败时保留最近完成的图像并显示错误；切换感知模式或重置 Episode 时清空。`GET /ego/segmentation?camera=head_camera` 提供预览，由 `/console/segmentation?robot=w:robot-1&camera=head_camera` 转发；`after=<frame-id>` 省略未变化的图像像素。
+
+`cobot-magic` 的 `ego_predict` 接受 `arm: "L"` 或 `arm: "R"`：预测使用对应臂的几何，执行收据时选择同一物理臂及夹爪。省略 `arm` 会沿用工作臂，初始为 L。预测不会切换正在执行的技能。每个夹爪独立保留持物；换臂前需要释放抽屉把手。单臂本体拒绝显式选臂。
+
+Cobot 头部相机光心位于底盘中心前方 0.33 m，超出升降机构碰撞盒前沿；相机标定固定于底盘，升降机构经过相机高度时仍可检测桌面物体。已有 Cobot 场景需重新生成以采用此安装位置；历史相机证据沿用其已记录标定。
+
+在 `phase1-sam` 中，Cobot 任一夹爪的开合、持物或持把手状态变化都可以触发近景相机关键帧。两次分割帧之间，机器人自身状态更新保留双夹爪反馈，持物随夹持它的机械臂移动。
+
 `cobot-magic` 左右臂 joint1～joint6 初始角度均为 0 弧度，夹爪初始张开。`cobot-magic` 夹爪使用简化的掌体、导轨、滑块与手指几何。手指沿工具轴延伸，对称张开时内侧开口最大为 100 mm；抓取点位于两侧指垫之间、指尖后方 5 mm。这些显示几何不代表厂家 CAD，也不提供接触式抓取。
 
 `cobot-magic` 双臂和升降机构的几何采用厂家 `robot.usd` 数据；[本体配置说明](embodiments/cobot-magic.yaml)记录坐标映射、单位假设和保留的仿真近似。运行时资产由 `src/steward/assets/cobot.py` 生成，说明性 YAML 不直接驱动资产。已有场景及原始升降指令的调整见[迁移说明](../docs/upgrade-guide/v0.2.2-alpha.2/cobot-lift-coordinates/guide.zh.md)。
@@ -41,6 +59,74 @@ open http://127.0.0.1:7400/console   # 浏览器控制台：斜视主视图、�
 AgileX 在停靠成功前保持机械臂姿态。放置规划检查目标腕姿及从实测关节状态出发的 IK 连续性，但不代替完整碰撞或动力学规划。操作成功且双手空闲时，双臂各六个关节归零后任务才完成，升降轴和夹爪开度保持不变。任一手持物或抓着把手时不归位；失败和停止也不启动归位。归位失败与已完成的动作分别报告。
 
 传入 `--misnames-config ''` 会禁用名称映射。缺少映射时切换到 `phase0-misnamed` 会被拒绝，当前世界和后续 Episode 保留原感知级别。
+
+## Merom 全屋场景
+
+`merom-house` 加载随包提供的 `phyagentos_assets_new` 优化版全屋布局。环境使用米和 Z 轴向上坐标，包含 132 个固定实体和 1,163 个独立碰撞部件：105 个物体、15 段墙和 12 块地板。物体类别标明家具和物品种类；所有导入刚体保持固定。Cobot Magic 机器人从客厅 `(1.7, 7.2, 0)` m 处开始，朝向沙发一侧的 +Y 方向。计入踢脚线后，10 处门洞的净宽为 0.99–1.61 m。感知系统分别识别门洞两侧的墙段和上方的门楣，导航地图保留通行开口。不需要原始 USD 文件或 USD 解码器。
+
+安装后，在本目录运行：
+
+```sh
+.venv/bin/steward --root var/merom-wide-doors up --scenario merom-house --phase phase0 --freeze-idle --wca-port 7460 --robot-port 0 --api-port 0 --no-dispatch-task --segmentation-config '' --world-harness '' --robot-harness ''
+```
+
+打开输出的控制台地址。场景也会出现在控制台场景选择器中，首次加载时安装。网格解压到指定数据目录；后续加载会保留已有场景编辑。[资产清单](src/steward/assets/merom_house/manifest.json)记录源文件哈希、坐标约定和几何数量。资产包保留优化后的工作台、桌下开放空间、分块碰撞代理和金黄色吐司。
+
+在控制台本体选择框中选择 Cobot Magic 或 Steward，选择 `merom-house` 并点击**加载**，即可让对应本体从客厅位置开始。命令行对应参数为 `--body cobot-magic` 或 `--body steward-bot`。切换本体会开启新 Episode。已有数据目录保留保存的场景，包括旧的不含机器人或未标注语义的副本；上述命令使用独立目录安装当前资产包。
+
+`up` 启动 Ego Runtime，将其感知报告和视图接入控制台。每个 Episode 的首个成功感知结果立即上报，启用 `--freeze-idle` 时也如此；后续报告保持配置的周期，空闲等待不会触发动作的 60 秒超时。勾选预览下方的 **World：物体标签** 和 **Ego：物体标签** 即可显示类别名称。任务角色未知时仍显示感知类别。Phase 0 提供理想检测；召回率以全屋 105 个物体为分母，包括相机视野外的其他房间。这些指标不代表学习式视觉模型的识别准确率。
+
+本地网格几何在视觉或碰撞列表中使用 `kind: "mesh"` 和文件 `ref`。碰撞网格要求 `link.inertial.value` 提供正数 `mass`、三个正数 `diagonal` 惯性矩和 `pose`；视觉网格不参与碰撞，也不增加质量。
+
+## 导入 USD 机器人
+
+随仓库提供的 [AgileX 资产](assets/agilex/README.zh.md) 无需转换即可运行；下面的步骤用于重新转换并检查源模型。可选的 `usd` extra 使用 MuJoCo 4.0 的原生 OpenUSD 解码器。在独立的 Python 3.12 环境中安装它，以保留常规仿真环境。从仓库根目录运行：
+
+```sh
+uv venv --python 3.12 steward/var/usd-env
+uv pip install --python steward/var/usd-env/bin/python -e './steward[usd]'
+steward/var/usd-env/bin/steward import-usd steward/assets/agilex/robot.usd --name agilex-usd \
+  --meters-per-unit 1 --orient-joints --fixed-base \
+  --bound-mass 0.001 --bound-inertia 0.000001 --inertia-from-bounds --drive-frequency 5
+steward/.venv/bin/steward world --scenario agilex-usd --phase phase0 \
+  --wca-port 7450 --robot-port 7460 --ego-api '' --world-harness '' --robot-harness ''
+```
+
+打开 `http://127.0.0.1:7450/console`。导入会创建带地面的检查场景，并将 `template.json`、二进制网格和 `report.json` 写入 `var/steward/imports/<name>/`。已有名称会被拒绝。网格引用使用绝对路径，因此应保留该目录的位置。查看结果也支持 MuJoCo 3.17，不再读取源 USD。源文件始终不会被修改。
+
+示例选项用于提供的 AgileX 资产：文件将米制几何数值标记为厘米，一个底盘关节方向相反，且缺少惯量。质量和惯量下限、均匀盒体惯量估算以及 5 Hz 临界阻尼驱动均为显式仿真近似，会记入报告。正确编写的资产可省略这些选项；依赖动力学结果前应检查报告。驱动在启动时保持导入的静止姿态，不执行 USD 中的驱动目标。
+
+导入器支持一棵刚体机器人树，包括固定、旋转和平移关节、网格与基本几何体、力式位置驱动以及标量 PhysX mimic 联动约束。转换保留关节限位、枢轴和显式惯量。网格碰撞使用 MuJoCo 凸包。着色网络、贴图和相机不会转移；缺失的 MDL 着色器会记入报告，缺失的几何依赖则会中止导入。闭环和不支持的动力学会被拒绝。通用导入不会自动分配任务控制器；可通过机器人端口的 `/command` 接口按名称驱动关节。提供的双 Piper 模型另有已注册的适配器 `agilex-usd`，使用方式如下。
+
+
+在任务场景中启动随仓库提供的 `agilex-usd` 本体：
+
+```sh
+steward/.venv/bin/steward up --scenario cobot-table --body agilex-usd --phase phase0 \
+  --speed 1 --no-dispatch-task
+```
+
+打开 `http://127.0.0.1:7400/console`，在本体选择器中选择 **AgileX USD 双 Piper**。也可用它替换厨房场景中的机器人。`up` 会启动其 Ego Runtime；导航、抓取和放置使用与其他本体相同的预测回执和技能 API。原始导入检查场景仍独立保留，不注册为可执行任务的本体。
+
+[USD 独立配置](config/agilex-usd.toml) 管理导入机器人的伺服增益和原始 `lift_home`、平面 `[base]` 驱动、`[cameras.head]`/`[cameras.wide]` 内参与安装位置、`[arm]` 展开与 IK 参数、`[motion]` 执行参数、`[trajectory]` 接近与恢复路点及重试上限，以及 `[planning]` 回执参数。可用 `STEWARD_AGILEX_USD_CONFIG` 指定本地 TOML，逐项覆盖；省略的字段使用仓库附带的 USD 默认值。模板路径相对声明它的文件解析。已有扁平配置仍受支持；提供 `arm_effort` 而省略 `finger_effort` 时，夹爪沿用手臂的力限。未知字段、类型错误、非有限数值、无效范围以及超过驱动限速的底盘速度会在启动前被拒绝；模板缺失或不兼容也会明确报错。
+
+`lift_home` 和原始 `/command` 关节目标使用 USD 坐标（约 `[-0.6, 0]` 米）；共享 Ego 机械臂的虚拟 `lift` 表示 TCP 离地高度。默认原始初始位置仍为 `-0.45` 米。两臂启动和归位时的关节角度均为零；`arm.deploy_joints` 是中间工作姿态和 IK 初始解，不是启动姿态。关节限位、TCP 偏移和安装变换来自导入模型。依赖工作空间的工作高度与退出高度由该模型的 IK 计算，不从简化机器人复制。
+
+Piper 的 TCP 反馈来自实测编码器，包含横向偏移和伺服滞后，不以目标位置替代测量。向支撑面放置时，仅在 `motion.release_settle_s` 内确认实测高度和伸距进入 `motion.release_joint_tol`（Piper 配置为 8 毫米）后才打开夹爪。反馈缺失或等待到期会使任务失败并保持夹持。释放成功本身不证明物体最终由目标表面支撑，任务测试还会核对最终世界状态。
+
+普通表面放置后，机械臂按运动策略撤回，底盘退离后才降低到收拢高度，以保持撤离过程中的桌面间隙。两种 Piper 本体使用 `PiperMotionPolicy`：接近把手时，若下降伸距会将手指置于柜体上方，底盘先退开并留出 `trajectory.handle_lower_clearance` 再下降。释放把手后，机械臂先升到由自身模型计算出的工作高度再缩臂，随后底盘退离，机械臂降低到收拢高度，以避开简化 Cobot 在收拢高度的短伸距 IK 不可达区。滑台机器人使用 `PlanarMotionPolicy`，不执行关节臂的下降前退让或绕行工作高度。
+
+对于柜体顶板下方的抽屉内容物，AgileX 通过 `planning.drawer_entry_pitch`、`drawer_grasp_raise`、`drawer_grasp_backoff` 和 `drawer_entry_backoff` 配置倾斜的前侧抓取点及下降间隙。规划使用本体的工作高度，并从抽屉开口正面接近。闭合高度必须同时满足 IK 工作空间和物体顶部的抓取范围。机械臂先稳定倾斜姿态，从抽屉露出部分的中部下降，再斜向接近抓取点；下降间隙以柜体前缘为基准。抓住后先退出顶板覆盖区再抬升。已露出顶板的抽屉内容物沿用普通接近路径。
+
+Phase 0 从盒沿抓取可倾倒容器；空心中心不能与盒内拼图竞争抓取候选。倒料规划根据容器相对工具的姿态，检查其偏离世界竖直方向的倾角是否达到 `planning.pour_roll_min`，不能仅检查腕部滚转角。Piper 默认请求腕部滚转 2.3 弧度：以 1.05 弧度工具俯仰抓住竖直容器时，容器倾角约为 1.83 弧度；腕部滚转 1.9 弧度时则只有约 1.57 弧度。每条候选轨迹仍须通过连续可达性检查。回执提供 `containerTilt`，物理任务测试仍要求内容物实际离开盒子并落到桌面。
+
+适配器保留 USD 网格、惯量和手指联动，添加抓取点，并将移动底盘映射为轮子关节固定的平面位置控制。两个仿真 RGB-D 视角安装在 `top_camera_link` 上并随升降运动，其标定不来自 USD。编辑此配置不会改变 `cobot-magic` 或其旧控制器。两种本体都使用共享 Ego Runtime；Phase 0 使用理想附着，不依赖夹爪接触抓取。该配置支持仿真任务，不提供真机控制或经过验证的轮式动力学。其增益和任务容差是仿真参数，不保证抓放成功。
+
+运行装配位于 [`ego/agilex.py`](src/steward/ego/agilex.py)；`prepare_body` 从同一份配置快照生成模型、控制器和策略。两种 Piper 本体共享 [`piper_arm.py`](src/steward/ego/piper_arm.py)、[`piper_ik.py`](src/steward/ego/piper_ik.py)、ESim 和 SkillExecutor。可注入的 [`MotionPolicy`](src/steward/ego/motion_policy.py) 负责停靠后的机械臂准备、接近、把手接近、搬运抬升前的撤离、放置和释放把手后的退离、撤臂及失败恢复；执行器负责技能顺序、计时、取消和任务结果。接近把手时的下降失败会先记入当前任务日志，再尝试恢复。IK 自碰撞连杆分组可通过 [`SelfCollisionPolicy`](src/steward/ego/collision_policy.py) 注入；USD 装配从自身模型选择障碍连杆。原有 `cobot_arm` 与 `ik.CobotIK` 导入路径仍可用。机器人端口通过 `GET /identity` 提供本体身份，CLI 在启动 Ego 前核对。旧 `CobotEgoRuntime`、`CobotSkills` 和 Cobot 脚本任务只接受 `cobot-magic`；导入模型应使用 `steward up --body agilex-usd`。
+
+本地资产集成测试命令为 `STEWARD_TEST_AGILEX_USD=1 steward/.venv/bin/python -m pytest -q steward/tests/test_agilex.py`。它通过 Ego API 导航、抓起碗并放到桌面另一处，最后核对世界坐标。运动学测试夹具包含源关节数据，以小盒体替代网格；集成测试使用随仓库提供的网格，因完整物理任务耗时较长，需显式启用。
+
+同一资产开关还会启用 [`test_agilex_physics.py`](tests/test_agilex_physics.py)，验证原生肩高、原始升降行程、相机外参、手指联动、多个姿态下的网格遮罩覆盖，以及从记录的释放姿态撤离后物体仍由桌面支撑、从记录的停靠姿态下降时避开柜体并实际拉开抽屉，以及存在小幅感知误差时仍抓住正确的抽屉物体。[`test_cobot_ego.py`](tests/test_cobot_ego.py) 经各本体的正式运行装配执行共享任务断言；未启用开关时会跳过真实 USD 参数。[`test_body_retreat.py`](tests/test_body_retreat.py) 为三种本体验证表面支撑、抽屉打开与关闭、最终收拢姿态和观察位置，以及释放保护。轻量 IK 对照使用相同物理肩高，原生初态检查则保留 USD 配置自身的初始升降位置。
 
 ## 与 DeepSeek Harness 一起运行
 

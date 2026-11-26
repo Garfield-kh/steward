@@ -30,13 +30,14 @@ function text(value: unknown): [{ type: 'text'; text: string }] {
 function receiptView(r: PredictionReceipt): JsonObject {
   const plan = r.plan as Record<string, unknown>
   const brief: JsonObject = {}
-  for (const key of ['drive', 'correctOnce', 'method', 'selectedHoleIds', 'stageScrews', 'closeRelease', 'recoverDropped', 'wingRetry', 'part', 'screw', 'body', 'stages', 'stagedPrediction', 'target', 'object', 'support', 'spot', 'dock', 'reach', 'lift', 'pathLength', 'wristYaw', 'roll']) {
+  for (const key of ['arm', 'drive', 'correctOnce', 'method', 'selectedHoleIds', 'stageScrews', 'closeRelease', 'recoverDropped', 'wingRetry', 'part', 'screw', 'body', 'stages', 'stagedPrediction', 'target', 'object', 'support', 'spot', 'dock', 'reach', 'lift', 'pathLength', 'wristYaw', 'roll']) {
     if (key in plan) brief[key] = plan[key]
   }
   const view: JsonObject = {
     receipt: r.id, skill: r.skill, feasible: r.feasible, risk: r.risk, maxRisk: r.maxRisk,
     withinRiskLimit: r.withinRiskLimit, issues: r.issues, expiresAt: r.expiresAt, plan: brief,
   }
+  if (r.params.arm !== undefined) view.arm = r.params.arm
   if (r.blockers && r.blockers.length) view.blockers = r.blockers.map(b => ({ ...b }))
   return view
 }
@@ -268,6 +269,7 @@ export function egoTools(ego: EgoService, profile = process.env.STEWARD_ASSEMBLY
         screw: { type: 'string', description: 'drive_screw: robot-perceived screw id returned by seat_screw.' },
         part: { type: 'string', description: 'assemble_onto/fasten_onto: perceived loose component id; seat_screw: the already aligned, released component id.' },
         body: { type: 'string', description: 'assembly/fastening/flip_assembly: supported body id; for a newly released body use releasedReference.entity and inspect its low-confidence frame.' },
+        arm: { type: 'string', enum: ['L', 'R'], description: 'Dual-arm body: select the physical arm for prediction and execution. Omit to retain the working arm (initially L). Each gripper retains its own object load; release a drawer handle before switching arms.' },
         target: { type: 'string', description: 'pick: id of the object to grasp; open/close: id of the drawer; drive_screw: id of the seated toy_screw to tighten.' },
         on: { type: 'string', description: 'place / insert_screw_into_hole: id of the surface, screw-hole part, open drawer or larger bowl to put the held object on or in; pour: id of the surface.' },
         offset: { type: 'array', items: { type: 'number' }, description: 'place, pour: [dx, dy] of the spot from the surface centre in the surface frame, metres; without it the free spot nearest you. If something already lies at the requested spot, the free spot nearest it is used instead and the issues say where (the receipt plan.spot holds the spot used). During hole alignment, selects a fitted candidate offset within sensor tolerance; incompatible offsets are rejected, never substituted for the hole fit.' },
@@ -288,7 +290,7 @@ export function egoTools(ego: EgoService, profile = process.env.STEWARD_ASSEMBLY
         const params: JsonObject = {}
         // Tool default is seating; powered driving is an explicit action choice.
         if (args.skill === 'fasten_onto' && args.drive === undefined) params.drive = false
-        for (const key of ['drive', 'correctOnce', 'method', 'stageScrews', 'closeRelease', 'recoverDropped', 'wingRetry', 'part', 'screw', 'body', 'turnOver', 'target', 'on', 'offset', 'alignTo', 'hole', 'heldHole', 'alignHoles', 'maxAttempts', 'at', 'x', 'y', 'yaw', 'flip', 'roll', 'clearance'] as const) {          if (args[key] !== undefined) params[key] = args[key]
+        for (const key of ['arm', 'drive', 'correctOnce', 'method', 'stageScrews', 'closeRelease', 'recoverDropped', 'wingRetry', 'part', 'screw', 'body', 'turnOver', 'target', 'on', 'offset', 'alignTo', 'hole', 'heldHole', 'alignHoles', 'maxAttempts', 'at', 'x', 'y', 'yaw', 'flip', 'roll', 'clearance'] as const) {          if (args[key] !== undefined) params[key] = args[key]
         }
         return json(receiptView(await ego.predict(args.skill, params, exec.signal)))
       },

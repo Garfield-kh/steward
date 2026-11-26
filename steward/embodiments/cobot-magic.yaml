@@ -70,7 +70,7 @@ sensors:
   cameras:
     - id: head_camera
       kind: rgbd
-      mount_link: head    # head fixed on the chassis at [0.16, 0, 1.50]; does not ride the lift
+      mount_link: head    # head fixed on the chassis at [0.28, 0, 1.50]; does not ride the lift
       mount: {p: [0.05, 0, 0], pitch_deg: 30}
       intrinsics: {width: 320, height: 240, fovy: 60}
       role: survey        # top/main-view stand-in

@@ -103,7 +103,8 @@ def _thinking_homes(host) -> dict[str, str]:
     home = getattr(config, "robot_home", None)
     if home is None:
         return {}
-    return {"w:robot-1": str(home)}
+    robot = next(iter((host.scenario or {}).get("robots", [])), None)
+    return {robot: str(home)} if robot is not None else {}
 
 
 def _thinking(host) -> dict[str, dict]:

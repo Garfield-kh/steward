@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import math
+import os
 import pathlib
+import sys
 import threading
 import time
 import traceback
@@ -117,7 +120,12 @@ def test_a_pourable_box_is_grasped_with_its_contents_only_without_its_lid_and_ca
     sim.command("w:robot-1", {"gripper": "open"})
     sim.edit_move("w:lid", {"at": {"x": 2.0, "y": 1.5}})
     sim.step_seconds(0.5)
-    sim.command("w:robot-1", {"lift": box[2] + 0.025})
+    from steward.ego.esim import EsimConfig
+
+    rim = sim.entity_obb("w:box")
+    rim_x = rim.center[0] - rim.size[0] / 2 + EsimConfig().edge_grasp_inset
+    sim.command("w:robot-1", {"base": [rim_x - (0.26 + reach), box[1], 0.0],
+                              "lift": box[2] + 0.025})
     sim.step_seconds(1.0)
     sim.command("w:robot-1", {"gripper": "close"})
     sim.step_seconds(0.2)
@@ -141,7 +149,9 @@ def test_fingers_take_a_piece_beside_the_box_wall_the_box_by_its_rim_and_nothing
 
     def close_at(point) -> str | None:
         sim.grasp_point = lambda robot, gripper=None: {"p": list(point), "q": [1.0, 0.0, 0.0, 0.0]}
-        g.attached = g.handle = None
+        if g.attached is not None:
+            sim._release(rs, g)
+        g.handle = None
         sim._try_attach(rs, g, link)
         return g.attached
 
@@ -153,6 +163,11 @@ def test_fingers_take_a_piece_beside_the_box_wall_the_box_by_its_rim_and_nothing
     sim.edit_move("w:lid", {"at": {"x": 2.0, "y": 1.5}})
     sim.step_seconds(0.5)
     assert close_at(sim._entity_pose(corner)["p"]) == corner, "on a piece's middle by the wall: the piece, not the box"
+    for row in range(3):
+        for column in range(3):
+            piece_id = f'w:piece-{row}{column}'
+            assert close_at(sim._entity_pose(piece_id)['p']) == piece_id, \
+                "inside the hollow centre: the piece, not the container's bounding box"
     from steward.ego.esim import EsimConfig
 
     rim = [box.center[0] - box.size[0] / 2 + EsimConfig().edge_grasp_inset, box.center[1], box.center[2]]
@@ -298,7 +313,10 @@ def test_top_face_reads_a_face_in_the_object_frame_and_hides_what_is_occluded():
 ])
 def test_the_robot_takes_off_the_lid_and_pours_the_pieces_out_onto_the_table(kitchen_root, tmp_path, scenario, side,
                                                                               lid_at, pour_at, min_out):
-    host = StewardHost(kitchen_root, scenario=scenario, speed=math.inf, seed=3, run_dir=pathlib.Path(tmp_path)).start()
+    demo_dir = os.environ.get("STEWARD_LOCALIZATION_LIVE_DEMO")
+    demo = pathlib.Path(demo_dir) if demo_dir else None
+    host = StewardHost(kitchen_root, scenario=scenario, speed=1.0 if demo else math.inf,
+                       seed=3, run_dir=pathlib.Path(tmp_path)).start()
     assert host.phase == "phase0", "the scenario declares its level"
     runtime = EgoRuntime(RobotLink(host.robot_servers["w:robot-1"].url), steward_bot().to_dict())
     api = ego_api(runtime).start()
@@ -336,10 +354,24 @@ def test_the_robot_takes_off_the_lid_and_pours_the_pieces_out_onto_the_table(kit
         finally:
             done.set()
 
-    threading.Thread(target=flow, daemon=True).start()
     try:
+        if demo is not None:
+            sim = host.sim
+            episode = sim.episode
+            sim.paused = True
+            host.attach_ego_api("w:robot-1", api.url)
+            url = f"{host.wca.url}/console?view=localization"
+            (demo / "console.json").write_text(json.dumps({"url": url}) + "\n", encoding="utf-8")
+            print(url, flush=True)
+            while sim.paused and not (demo / "stop").exists() and host.sim is sim and sim.episode == episode:
+                host.pump(0.05)
+            if (demo / "stop").exists() or host.sim is not sim or sim.episode != episode:
+                return
+        threading.Thread(target=flow, daemon=True).start()
         deadline = time.time() + 300
         while not done.is_set() and time.time() < deadline:
+            if demo is not None and ((demo / "stop").exists() or host.sim is not sim or sim.episode != episode):
+                return
             host.pump(0.05)
         if "error" in out:
             print(out["error"])
@@ -358,6 +390,12 @@ def test_the_robot_takes_off_the_lid_and_pours_the_pieces_out_onto_the_table(kit
         assert upright + sum(quat_rotate(host.sim._entity_pose(w)["q"], [0, 0, 1])[2] < -0.9 for w in out_of_box) \
             == len(out_of_box), "every poured piece lies flat, face up or down"
     finally:
+        if demo is not None and host.sim is sim and sim.episode == episode and not (demo / "stop").exists():
+            sim.paused = True
+            status = "failed" if sys.exc_info()[0] is not None else "finished"
+            (demo / "result.json").write_text(json.dumps({"status": status}) + "\n", encoding="utf-8")
+            while not (demo / "stop").exists() and host.sim is sim and sim.episode == episode:
+                host.pump(0.05)
         api.stop()
         runtime.stop()
         host.stop()

@@ -206,7 +206,10 @@ class CommonSense:
 
 COMMON_SENSE = CommonSense()
 
-COMPATIBLE: dict[str, set[str]] = {"cup": {"cup", "bowl"}, "bowl": {"bowl", "cup"}}
+# Perception aliases for one nestable piece of tableware (rim views rename bowl↔plate, cup↔mug).
+# Distinct toys and tools are not aliases: airplane≠screw, pistol≠teddy, wine_glass≠bowl.
+_NESTABLE_TABLEWARE = frozenset({"bowl", "cup", "mug", "plate"})
+COMPATIBLE: dict[str, set[str]] = {name: set(_NESTABLE_TABLEWARE) for name in _NESTABLE_TABLEWARE}
 
 
 def prior(category: str) -> dict:
@@ -249,4 +252,12 @@ def default_affordances(category: str, footprint: float, bottom: float, top: flo
 
 
 def compatible(a: str, b: str) -> bool:
-    return a == b or b in COMPATIBLE.get(a, set())
+    """Whether two category/role labels may name the same physical object under rematch.
+
+    Exact equality always matches. Otherwise ``COMPATIBLE`` lists perception aliases (nestable
+    tableware). Distinct deployed toys and fasteners are not listed, so a lost airplane does not
+    bind a nearby screw of similar footprint.
+    """
+    if a == b:
+        return True
+    return b in COMPATIBLE.get(a, set()) or a in COMPATIBLE.get(b, set())

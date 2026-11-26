@@ -1,11 +1,57 @@
 from __future__ import annotations
 
 import math
+import os
+from pathlib import Path
 
 import numpy as np
 import pytest
 
 from steward.authoring.service import AuthoringService, build_default_kitchen
+
+
+def pytest_addoption(parser):
+    group = parser.getgroup("Steward localization")
+    group.addoption("--localization-experiment", action="store_true", help="enable odometry drift and localization feedback")
+    group.addoption("--odom-drift", action="store_true", help="inject cumulative odometry drift into test worlds")
+    group.addoption("--apply-localization", action="store_true", help="apply localization feedback in test Ego runtimes")
+    group.addoption("--localization-config", help="TOML used by opted-in localization feedback")
+    group.addoption("--localization-mask-source", choices=("simulation", "sam"), default="simulation",
+                    help="semantic input for opted-in localization feedback (default: simulation)")
+
+
+@pytest.fixture(autouse=True)
+def localization_options(request, monkeypatch):
+    options = request.config.option
+    drift = options.localization_experiment or options.odom_drift
+    fused = options.localization_experiment or options.apply_localization
+    if not drift and not fused:
+        return
+
+    from steward.cli import LOCALIZATION_CONFIG
+
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "scripts"))
+    from motion_matrix_plugin import install_localization_options
+
+    install_localization_options(
+        monkeypatch, drift=True if drift else None,
+        localization_config=(options.localization_config or str(LOCALIZATION_CONFIG)) if fused else None,
+    )
+    if fused and options.localization_mask_source == "simulation":
+        from motion_matrix_simulation_masks import install
+
+        install(monkeypatch, lambda fn: fn(), matrix=False)
+
+
+@pytest.fixture(scope='module', params=[
+    'cobot-magic',
+    pytest.param('agilex-usd', marks=pytest.mark.skipif(
+        os.environ.get('STEWARD_TEST_AGILEX_USD') != '1',
+        reason='long-running real-mesh task; set STEWARD_TEST_AGILEX_USD=1')),
+])
+def piper_body(request):
+    """Formal body entry for shared task tests; actual USD assets are explicitly enabled."""
+    return request.param
 
 
 @pytest.fixture(scope="session")

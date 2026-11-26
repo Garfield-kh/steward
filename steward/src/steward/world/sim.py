@@ -30,7 +30,7 @@ import time
 import zlib
 import uuid
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import mujoco
 import numpy as np
@@ -46,6 +46,7 @@ if _assembly_enabled():
 else:
     from steward.scene.mjcf import MjcfBuild, build_mjcf
 from steward.scene.schema import Relation, RigidTree, SceneState, exact
+from steward.world.odometry import OdometryTrack
 
 _COLLISION_GROUPS = np.array([1, 0, 0, 1, 0, 0], dtype=np.uint8)
 HIDDEN_GROUP = 4  # not drawn by MuJoCo's default visualisation options
@@ -120,12 +121,27 @@ class PerceptionConfig:
     yaw_sigma: float = 0.05
     odom_pos_sigma: float = 0.003
     odom_yaw_sigma: float = 0.003
+    odom_scale_error: float = 0.0
+    """Fractional translation calibration error; zero preserves ideal odometry."""
+    odom_yaw_drift_per_m: float = 0.0
+    """Signed heading drift in radians per metre, integrated at physics steps, not sensor reads."""
     confusion: dict[str, list[str]] = field(default_factory=lambda: {"cup": ["bowl"], "bowl": ["cup"]})
     confusion_prob: float = 0.03
     transparent_detect_prob: float = 0.6
     # With "ideal": categories always reported under another name (category → reported name),
     # in place of the random confusion.
     misnames: dict[str, str] = field(default_factory=dict)
+
+    def with_odometry_drift(self, enabled: bool) -> PerceptionConfig:
+        """Apply or clear the experiment's cumulative bias and preserve instantaneous noise."""
+        return replace(self, odom_scale_error=0.01 if enabled else 0.0,
+                       odom_yaw_drift_per_m=0.005 if enabled else 0.0)
+
+    def __post_init__(self):
+        if not math.isfinite(self.odom_scale_error) or self.odom_scale_error <= -1:
+            raise ValueError("odom_scale_error must be finite and greater than -1")
+        if not math.isfinite(self.odom_yaw_drift_per_m):
+            raise ValueError("odom_yaw_drift_per_m must be finite")
 
 
 @dataclass
@@ -359,6 +375,8 @@ class WorldSim:
         if _assembly_enabled():
             from .start_state import apply_start_state
             apply_start_state(self)
+        self._odometry_tracks: dict[str, OdometryTrack] = {}
+        self._advance_odometry()
 
     def _index_bodies(self) -> None:
         self._body_entity: dict[int, str] = {}
@@ -681,6 +699,8 @@ class WorldSim:
                     self._suspend_contacts(rs, g)
         self._epoch += 1
         mujoco.mj_forward(self.model, self.data)
+        self._odometry_tracks = {r: track for r, track in self._odometry_tracks.items() if r in self.robots}
+        self._advance_odometry()
 
     # --------------------------------------------------------------- stepping
     @property
@@ -716,6 +736,8 @@ class WorldSim:
                         # mj_step leaves position caches at the previous integration point.
                         mujoco.mj_forward(self.model, self.data)
                         self._fastening.update()
+                    if self.perception.odom_scale_error or self.perception.odom_yaw_drift_per_m:
+                        self._advance_odometry()
                     self.step_count += 1
                     for listener in tuple(self._step_listeners):
                         listener()
@@ -730,11 +752,25 @@ class WorldSim:
                     self._step_listeners.remove(listener)
         return dispose
 
+    def _advance_odometry(self) -> None:
+        """Accumulate calibration error once per physical step; episode loads reset the tracks."""
+        for robot in self.robots:
+            roots = self.build.names[robot].root_joints
+            pose = tuple(self._joint_q(j) for j in roots) if roots else (0.0, 0.0, 0.0)
+            track = self._odometry_tracks.get(robot)
+            if track is None:
+                self._odometry_tracks[robot] = OdometryTrack(pose, pose)
+            else:
+                track.advance(pose, self.perception.odom_scale_error, self.perception.odom_yaw_drift_per_m)
+
     def odometry(self, robot_id: str) -> dict:
         """Read the same deterministic body sensor channel used by normal perception."""
         with self.lock:
             names = self.build.names[robot_id]
-            x, y, yaw = (self._joint_q(j) for j in names.root_joints)
+            roots = names.root_joints
+            x, y, yaw = tuple(self._joint_q(j) for j in roots) if roots else (0.0, 0.0, 0.0)
+            if self.perception.odom_scale_error or self.perception.odom_yaw_drift_per_m:
+                x, y, yaw = self._odometry_tracks[robot_id].pose
             p, rng = self.perception, self._sensor_rng(robot_id, "body")
             return {"x": x + rng.normal(0, p.odom_pos_sigma), "y": y + rng.normal(0, p.odom_pos_sigma),
                     "yaw": yaw + rng.normal(0, p.odom_yaw_sigma),
@@ -1010,7 +1046,7 @@ class WorldSim:
     def _try_attach(self, rs: _RobotState, g: _GripState, gripper_link: str) -> None:
         """Ideal grasp: attach the nearest free object within capture range of the pinch point (inside
         it, or that close to its box: a large object is taken by its edge) that has nothing resting on or
-        in it (the top of a stack) or is a pourable container (carried with what lies in it), or else
+        in it (the top of a stack) or is the rim of a pourable container (carried with what lies in it), or else
         grasp the nearest drawer handle."""
         grip = np.asarray(self.grasp_point(rs.entity_id, gripper_link)["p"])
         relations = [r for r in self._relations() if r.type == "supported-by"
@@ -1032,10 +1068,13 @@ class WorldSim:
                 if obb.center[2] - obb.size[2] / 2 < box.center[2] + box.size[2] / 2 - 0.01:
                     continue  # inside a closed box: the fingers meet its lid
             d = float(np.linalg.norm(np.asarray(obb.center) - grip))
-            centred = d <= self.grasp.capture_radius
+            pourable = _is_pourable(ent)
+            # A hollow container's bounding-box centre is empty space. Its rim is graspable;
+            # proximity to that centre must not outrank an object inside the container.
+            centred = not pourable and d <= self.grasp.capture_radius
             if not centred and not _at_edge(obb, grip):
                 continue
-            candidates.append((ent.id, obb, d, centred, not centred and _is_pourable(ent)))
+            candidates.append((ent.id, obb, d, centred, pourable))
         # Fingers closing on an object's middle take it before the rim of another they are near
         # (a piece in its box, not the box), but straddling the wall of a pourable container they
         # take the wall, not what lies inside it against the wall nor an object beside it they are
@@ -1338,16 +1377,8 @@ class WorldSim:
             with self.lock:
                 rs = self._robot(robot_id)
                 names = self.build.names[robot_id]
-                roots = names.root_joints
-                x, y, yaw = ((self._joint_q(j) for j in roots) if roots else (0.0, 0.0, 0.0))
                 p = self.perception
-                rng = self._sensor_rng(robot_id, "body")
-                odom = {
-                    "x": x + rng.normal(0, p.odom_pos_sigma),
-                    "y": y + rng.normal(0, p.odom_pos_sigma),
-                    "yaw": yaw + rng.normal(0, p.odom_yaw_sigma),
-                    "sigma": {"pos": p.odom_pos_sigma, "yaw": p.odom_yaw_sigma},
-                }
+                odom = self.odometry(robot_id)
                 joints = {jid: self._joint_q(jname) for jid, jname in names.joints.items()}
                 cameras = self.robot_cameras(robot_id)
                 grips = {lid: {"state": "closed" if g.closed else "open",

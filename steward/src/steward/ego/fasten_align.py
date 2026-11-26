@@ -250,7 +250,7 @@ def push_plan(planner, scene, params):
                     if abs(xy[0]) < box.hx+clearance+.002 and abs(xy[1]) < box.hy+clearance+.002 and low < safe and high > point[2]-clearance:
                         raise PredictionError('pivot corridor intersects '+ent.id)
             start = points[0]
-            def path(heading, reach, near):
+            def path(heading, reach, near, _pitch):
                 forward = np.array([math.cos(heading), math.sin(heading)])
                 changes = [dict(lift=safe), dict(reach=near), dict(wrist_yaw=0.),
                            dict(wrist_roll=0.), dict(wrist_pitch=0.), dict(reach=reach), dict(lift=start[2])]

@@ -34,6 +34,7 @@ from steward.world.chat import TURN_BUDGET_S
 STEWARD_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_ROOT = STEWARD_DIR / "var" / "steward"
 SEGMENTATION_CONFIG = STEWARD_DIR / "config" / "segmentation.toml"
+LOCALIZATION_CONFIG = STEWARD_DIR / "config" / "localization.toml"
 MISNAMES_CONFIG = STEWARD_DIR / "config" / "misnames.toml"
 
 # The Cobot Magic twin keeps its own ports: the kitchen scenario owns 7400/7410, and two worlds
@@ -67,6 +68,41 @@ def _wait_forever(stoppers: list, pump=None) -> None:
             done.wait(0.5)
     for stop in stoppers:
         stop()
+
+
+def cmd_import_usd(args) -> int:
+    """Import a robot and publish a standalone inspection scenario under the data root."""
+    from steward.assets.usd import UsdImportError, import_usd
+    from steward.assets.validator import _floor
+    from steward.scene.schema import Entity, SceneState
+
+    if not args.name or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_" for c in args.name):
+        raise SystemExit("import-usd: name must contain only letters, digits, hyphens and underscores")
+    root = Path(args.root).resolve()
+    paths = {kind: root / kind / f"{args.name}.json" for kind in ("scenes", "scenarios")}
+    if any(p.exists() for p in paths.values()):
+        raise SystemExit(f"import-usd: scenario {args.name!r} already exists; choose a new --name")
+    try:
+        report = import_usd(Path(args.source), root / "imports" / args.name,
+                            meters_per_unit=args.meters_per_unit, orient_joints=args.orient_joints,
+                            fixed_base=args.fixed_base, bound_mass=args.bound_mass, bound_inertia=args.bound_inertia,
+                            inertia_from_bounds=args.inertia_from_bounds, drive_frequency=args.drive_frequency)
+    except UsdImportError as exc:
+        raise SystemExit(f"import-usd: {exc}") from exc
+    robot = Entity.from_dict(json.loads(Path(report["template"]).read_text()))
+    robot.id = "w:robot-1"
+    robot.category.value = f"usd-import:{args.name}"
+    robot.asset = {"id": f"usd-import:{args.name}"}
+    scene = SceneState(mode="world", entities=[_floor(), robot]).to_dict()
+    height = report["sizeMeters"][2]
+    scenario = {"name": args.name, "scene": args.name, "robots": [robot.id], "task": "",
+                "phase": "phase0", "view": {"lookat": [0, 0, height / 2],
+                "distance": max(report["sizeMeters"]) * 2, "azimuth": 135, "elevation": -20}}
+    for kind, record in (("scenes", scene), ("scenarios", scenario)):
+        paths[kind].parent.mkdir(parents=True, exist_ok=True)
+        paths[kind].write_text(json.dumps(record, indent=2) + "\n")
+    print(json.dumps(report | {"scenario": args.name}, indent=2, ensure_ascii=False))
+    return 0
 
 
 def cmd_build_kitchen(args) -> int:
@@ -108,6 +144,7 @@ def _host(args, run_dir: Path, start: bool = True):
                        pause_on_perception_fault=getattr(args, "pause_on_perception_fault", False),
                        freeze_idle=args.freeze_idle, body=getattr(args, "body", None),
                        dispatch_task=getattr(args, "dispatch_task", False),
+                       odom_drift=getattr(args, "odom_drift", False),
                        misnames=load_misnames(args.misnames_config) if getattr(args, "misnames_config", "") else None)
     return host.start() if start else host
 
@@ -184,14 +221,18 @@ def _segmenter(config: str, root: str):
 
 
 def _start_ego(robot_url: str, api_port: int, out_dir: Path, bind_wait_s: float = 0.0, segmenter=None,
-               body: str = "steward-bot"):
-    from steward.ego.bodies import body_arm, robot_model, runtime_config
+               body: str = "steward-bot", localization_config: str | None = None, localization_apply: bool = False):
+    from steward.ego.bodies import prepare_body
     from steward.ego.runtime import EgoRuntime, RobotLink
     from steward.ego.server import ego_api
 
-    model = robot_model(body)
-    runtime = EgoRuntime(RobotLink(robot_url), model, runtime_config(body), out_dir=out_dir, segmenter=segmenter,
-                         arm=body_arm(body, model))
+    link = RobotLink(robot_url)
+    link.require_body(body)
+    setup = prepare_body(body)
+    setup.config.localization_config = localization_config
+    setup.config.localization_apply = localization_apply
+    runtime = EgoRuntime(link, setup.model, setup.config, out_dir=out_dir, segmenter=segmenter,
+                         arm=setup.arm)
     runtime.start()
     api = ego_api(runtime, port=api_port, bind_wait_s=bind_wait_s).start()
     return runtime, api
@@ -200,7 +241,8 @@ def _start_ego(robot_url: str, api_port: int, out_dir: Path, bind_wait_s: float 
 def cmd_ego(args) -> int:
     out_dir = Path(args.out_dir) if args.out_dir else Path(args.root) / "ego" / "observations"
     runtime, api = _start_ego(args.robot_url, args.api_port, out_dir, args.bind_wait,
-                              _segmenter(args.segmentation_config, args.root), body=args.body)
+                              _segmenter(args.segmentation_config, args.root), body=args.body,
+                              localization_config=args.localization_config, localization_apply=args.apply_localization)
     print(json.dumps({"egoApi": api.url, "robot": args.robot_url}), flush=True)
     if args.parent_pid:
         _exit_with_parent(args.parent_pid)
@@ -272,6 +314,8 @@ class _EgoProcess:
         self.task = task
         self.mission_config = dict(mission_config or {})
         body = EMBODIMENTS[embodiment]
+        if getattr(args, "localization_config", None) and body["ego"] != "ego":
+            raise ValueError("segmented-depth localization requires the shared Ego Runtime")
         cmd = [sys.executable, "-m", "steward.cli", "--root", str(args.root), body["ego"],
                "--robot-url", robot_url, "--api-port", str(api_port), "--out-dir", str(out_dir),
                "--parent-pid", str(os.getpid()), "--bind-wait", str(args.bind_wait)]
@@ -281,6 +325,10 @@ class _EgoProcess:
             cmd += ["--mission-config", json.dumps(self.mission_config, ensure_ascii=False)]
         if body["ego"] == "ego":  # the shared runtime segments by itself and drives the named body
             cmd += ["--segmentation-config", args.segmentation_config, "--body", embodiment]
+            if getattr(args, "localization_config", None):
+                cmd += ["--localization-config", args.localization_config]
+            if getattr(args, "apply_localization", False):
+                cmd += ["--apply-localization"]
         # The child writes its piped stdout in the locale encoding (GBK on Chinese Windows) unless told
         # otherwise; the reader decodes UTF-8, so a locale decode error cannot kill it and backpressure the child.
         self.proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True, encoding="utf-8",
@@ -628,6 +676,9 @@ def _cobot_scripted(args) -> int:
     host = _host(args, run_dir)  # builds the builtin scenario on first use
     sim = host.sim
     robot_id = host.scenario["robots"][0]
+    if host.embodiments[robot_id]["id"] != "cobot-magic":
+        host.stop()
+        raise ValueError("The scripted Cobot mission supports only cobot-magic; use steward up --body agilex-usd")
     skills = CobotSkills(command=lambda cmd: sim.command(robot_id, cmd), state=lambda: sim.sensors(robot_id))
     est = EgoEstimator(robot_model=cobot_magic().to_dict())
     rgbd = phase_modules(host.phase)["perception"] == "rgbd"
@@ -960,6 +1011,17 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="steward")
     parser.add_argument("--root", default=str(DEFAULT_ROOT), help="Steward data root (assets, scenes, runs)")
     sub = parser.add_subparsers(dest="cmd", required=True)
+    usd = sub.add_parser("import-usd", help="import a USD robot and create an inspection scenario")
+    usd.add_argument("source", help="USD file (.usd/.usda/.usdc/.usdz)")
+    usd.add_argument("--name", default="usd-robot", help="new asset/scenario name")
+    usd.add_argument("--meters-per-unit", type=float, help="override USD length-unit metadata")
+    usd.add_argument("--orient-joints", action="store_true", help="orient an anchored acyclic joint graph")
+    usd.add_argument("--fixed-base", action="store_true", help="remove top-level free joints")
+    usd.add_argument("--bound-mass", type=float, default=0.0, help="minimum body mass in kg; default: no repair")
+    usd.add_argument("--bound-inertia", type=float, default=0.0, help="minimum diagonal inertia in kg m^2; default: no repair")
+    usd.add_argument("--inertia-from-bounds", action="store_true", help="estimate missing inertias from uniform link bounding boxes")
+    usd.add_argument("--drive-frequency", type=float, help="replace source gains with critically damped position drives at this frequency (Hz)")
+    usd.set_defaults(fn=cmd_import_usd)
     sub.add_parser("build-kitchen").set_defaults(fn=cmd_build_kitchen)
     sub.add_parser("build-toy-assembly").set_defaults(fn=cmd_build_toy_assembly)
     sub.add_parser("build-screw-board").set_defaults(fn=cmd_build_screw_board)
@@ -987,6 +1049,8 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--misnames-config", default=str(MISNAMES_CONFIG),
                        help="names the ideal detections report instead of true categories at the phase0-misnamed level; '' disables it")
         if not in_process:
+            p.add_argument("--odom-drift", action="store_true",
+                           help="inject 1%% translation scale error and 0.005 rad/m heading drift")
             p.add_argument("--bind-wait", type=float, default=10.0,
                            help="seconds to wait for a fixed port still held by a service that just stopped")
             p.add_argument("--body", choices=list(EMBODIMENTS), default=None,
@@ -1016,6 +1080,13 @@ def main(argv: list[str] | None = None) -> int:
         if name != "world":
             p.add_argument("--segmentation-config", default=str(SEGMENTATION_CONFIG),
                            help="robot-side segmenter settings, used at phase levels without world masks; '' disables it")
+        if name == "up":
+            p.add_argument("--localization-experiment", action="store_true",
+                           help="enable cumulative odometry drift and fused localization feedback")
+            p.add_argument("--localization-config", default=None,
+                           help="opt-in segmented-depth CPU localization TOML; diagnostic unless --apply-localization")
+            p.add_argument("--apply-localization", action="store_true",
+                           help="apply the localization pose to Ego-State and control; uses the default TOML if omitted")
         if name == "chores":
             p.add_argument("--rounds", type=int, default=1, help="number of rounds; 0 repeats until Ctrl-C")
             p.add_argument("--api", help="Ego API of a running `steward up`; omit to run in-process")
@@ -1050,6 +1121,10 @@ def main(argv: list[str] | None = None) -> int:
         p.add_argument("--bind-wait", type=float, default=10.0,
                        help="seconds to wait for a fixed port still held by a service that just stopped")
         if name == "ego":
+            p.add_argument("--localization-config", default=None,
+                           help="opt-in segmented-depth CPU localization TOML; diagnostic unless --apply-localization")
+            p.add_argument("--apply-localization", action="store_true",
+                           help="apply the localization pose to Ego-State and control; uses the default TOML if omitted")
             p.add_argument("--segmentation-config", default=str(SEGMENTATION_CONFIG),
                            help="robot-side segmenter settings, used at phase levels without world masks; '' disables it")
             p.add_argument("--body", choices=list(EMBODIMENTS), default="steward-bot",
@@ -1068,6 +1143,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-check", action="store_true", help="only list the services, without contacting them")
     p.set_defaults(fn=cmd_services)
     args = parser.parse_args(argv)
+    if getattr(args, "localization_experiment", False):
+        args.odom_drift = args.apply_localization = True
+    if getattr(args, "apply_localization", False) and args.localization_config is None:
+        args.localization_config = str(LOCALIZATION_CONFIG)
     try:
         return args.fn(args)
     except OSError as exc:

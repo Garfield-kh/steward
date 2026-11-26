@@ -113,6 +113,14 @@ class EsimConfig:
     # incomplete, and the mission layer's risk limit (0.35) decides whether to look closer first.
     blind_support_risk: float = 0.15  # no known surface under the target; the gripper checks the grasp
     phantom_pick_cost: float = 0.5  # share of a target's non-existence that counts as pick risk
+    # A target (or a place's support) the estimator doubts this much is refused outright and must
+    # be re-observed: acting on a phantom costs a dock, a retreat and a wrong belief.
+    min_target_existence: float = 0.4
+    # Tighten: a screw within this distance of a part's screw hole counts as seated in it; the
+    # driver stands this far above the screw head; this many full turns drive it in.
+    tighten_seat_radius: float = 0.03
+    tighten_clearance: float = 0.02
+    tighten_turns: int = 2
     nesting_risk_each: float = 0.15  # pick risk per thing the estimator reads as inside the target
     nesting_risk_cap: float = 0.35
     graspable_max_m: float = 0.35  # a raised thing this small is tableware whatever the classifier says
@@ -456,10 +464,33 @@ class Esim:
                 found, best = ent, gap
         return found
 
+    def _drawer_mouth_clear(self, es: SceneState, drawer: Entity) -> set[str]:
+        """Ids whose floor footprint may cover an open drawer mouth.
+
+        Place docks at the pulled-out front as the working edge. The host sideboard or cabinet box
+        often still covers that mouth in the estimate, so the dock footprint ignores it while
+        navigation keeps routing around it.
+        """
+        clear = {drawer.id}
+        host = self._drawer_furniture(es, drawer)
+        if host is not None:
+            clear.add(host.id)
+        return clear
+
     def _opening(self, es: SceneState, drawer: Entity) -> float:
+        """How far ``drawer`` sticks out of its host, for place/open planning.
+
+        Geometric protrusion alone reads 0 cm when the host box is missing or mis-seated. A drawer
+        the robot pulled open carries ``state_vars.pulledOpen`` from the estimator; floor the
+        opening to :attr:`EsimConfig.drawer_pull` until a push clears that flag.
+        """
         furniture = [entity_box(e)[0] for e in es.entities
                      if e.id not in (drawer.id, es.self_id) and self._affords(e, "support-surface")]
-        return protrusion(self._front(es, drawer), furniture)
+        geometric = protrusion(self._front(es, drawer), furniture)
+        flag = drawer.state_vars.get("pulledOpen")
+        if flag is not None and flag.value:
+            return max(geometric, self.config.drawer_pull)
+        return geometric
 
     def _support_of(self, es: SceneState, ent: Entity) -> Entity | None:
         for rel in es.relations:
@@ -507,7 +538,9 @@ class Esim:
                   pitches: Sequence[float | None] = (0.0,), lifts: Sequence[float] | None = None,
                   wrist: Callable[[float], tuple[float, float]] | None = None,
                   approach_path: Callable[[float, float, float, float], bool] | None = None,
-                  require_tilt: bool = False) -> dict:
+                  require_tilt: bool = False,
+                  dock_clear: set[str] | None = None,
+                  mouth_only: bool = False) -> dict:
         """Choose the support side to dock at; return path, dock pose and reach, or raise.
 
         ``target_xy`` is where the gripper goes, or a function of the docked base heading giving it
@@ -522,12 +555,21 @@ class Esim:
         (default: ``height`` alone) without turning over; a pitch other than 0 is returned as
         ``wristPitch``. ``wrist`` supplies tool yaw and roll for each dock heading.
         ``approach_path`` checks the motion to that heading and reach via a candidate retracted
-        reach, from the held posture."""
-        sbox, _, _ = entity_box(support)
+        reach, from the held posture. ``dock_clear`` are extra ids ignored only for dock and
+        pre-dock footprint and turning (navigation still routes around them). ``mouth_only`` docks
+        only at the room-facing face of ``support`` (an open drawer mouth), using that face as the
+        working edge.
+        """
+        if mouth_only:
+            sbox = self._front(es, support)
+            side_normals = ((1.0, 0.0),)
+        else:
+            sbox, _, _ = entity_box(support)
+            side_normals = ((1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0))
         rx, ry, _ = self._robot_xy_yaw(es)
         c, s = math.cos(sbox.yaw), math.sin(sbox.yaw)
         candidates = []
-        for normal in ((1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)):
+        for normal in side_normals:
             heading = math.atan2(-(s * normal[0] + c * normal[1]), -(c * normal[0] - s * normal[1]))
             txy = target_xy(heading) if callable(target_xy) else target_xy
             dx, dy = txy[0] - sbox.cx, txy[1] - sbox.cy
@@ -538,13 +580,16 @@ class Esim:
                 candidates.append(((tx, normal[1] * sbox.hy), normal, sbox.hy - normal[1] * ty, txy))
         target_xy = candidates[0][3]
         cfg = self.config
-        obstacles_all = self._floor_obstacles(es, exclude)
+        clear = exclude | (dock_clear or set())
+        obstacles_nav = self._floor_obstacles(es, exclude)
+        obstacles_dock = self._floor_obstacles(es, clear)
         # A floor-standing load stays an obstacle for the path to it (only its own back-out ignores it).
         loaded = self._floor_obstacles(es, exclude - {load.id}) if load is not None else None
         if loaded is not None:
-            obstacles_all, load_free = loaded, obstacles_all
+            obstacles_nav, load_free = loaded, obstacles_nav
+            obstacles_dock = self._floor_obstacles(es, (exclude - {load.id}) | (dock_clear or set()))
         carry = self._carry(es)
-        grid = build_grid(obstacles_all, self._sweep(carry) + cfg.nav_margin, [(rx, ry), target_xy])
+        grid = build_grid(obstacles_nav, self._sweep(carry) + cfg.nav_margin, [(rx, ry), target_xy])
         best, reasons = None, []
         if not (self.lift_min <= height <= self.lift_max):
             raise PredictionError(f"height {height:.2f} m is outside the lift range [{self.lift_min}, {self.lift_max}]")
@@ -568,7 +613,7 @@ class Esim:
             # Where the nearest dock pose collides, stand farther back and reach further.
             while True:
                 dock = (ex + nx * standoff, ey + ny * standoff)
-                blocked = self._footprint_blocked(obstacles_all, dock, yaw, carry)
+                blocked = self._footprint_blocked(obstacles_dock, dock, yaw, carry)
                 farther = standoff + cfg.dock_backoff_step
                 if not blocked or farther + depth - self.tool_offset > self.reach_max:
                     break
@@ -600,7 +645,7 @@ class Esim:
                         break
                     standoff, reach = farther, new_reach
                     dock = (ex + nx * standoff, ey + ny * standoff)
-                    if self._footprint_blocked(obstacles_all, dock, yaw, carry):
+                    if self._footprint_blocked(obstacles_dock, dock, yaw, carry):
                         break
                     predock = (dock[0] + nx * cfg.predock_backoff, dock[1] + ny * cfg.predock_backoff)
             pitch = self._grasp_pitch(reach, height, lifts or [height], pitches, wrist_yaw, wrist_roll)
@@ -627,10 +672,10 @@ class Esim:
             ryaw = self._robot_xy_yaw(es)[2]
             reuse_dock = (abs(wrap_angle(ryaw-yaw)) < .02
                 and math.hypot(dock[0]-rx, dock[1]-ry) <= cfg.predock_backoff
-                and all(self._footprint_blocked(obstacles_all,
+                and all(self._footprint_blocked(obstacles_dock,
                     (rx+(dock[0]-rx)*t, ry+(dock[1]-ry)*t), yaw, carry) is None
                     for t in np.linspace(0., 1., max(2, math.ceil(math.hypot(dock[0]-rx,dock[1]-ry)/.01)+1))))
-            blocked = None if reuse_dock else self._turn_blocked(obstacles_all, predock, self._sweep(carry))
+            blocked = None if reuse_dock else self._turn_blocked(obstacles_dock, predock, self._sweep(carry))
             if blocked:
                 reasons.append(f"side {normal}: no room to turn at the pre-dock pose ({blocked})")
                 continue
@@ -651,7 +696,7 @@ class Esim:
                     reasons.append(f"side {normal}: carrying {load.id} from here the robot could not back out to "
                                    "a spot with room to turn")
                     continue
-            path = [[rx,ry]] if reuse_dock else self._navigation_path(es, obstacles_all, predock, carry, grid)
+            path = [[rx,ry]] if reuse_dock else self._navigation_path(es, obstacles_nav, predock, carry, grid)
             if path is None:
                 reasons.append(f"side {normal}: no collision-free path to the pre-dock pose")
                 continue
@@ -668,11 +713,11 @@ class Esim:
                     best["retractReach"] = retract
                 if len(path) > 1:
                     # Standing at the pre-dock pose already, there is no path to keep clear.
-                    best["clearance"] = path_clearance(path, obstacles_all)
+                    best["clearance"] = path_clearance(path, obstacles_nav)
                 if retreat is not None:
                     best["retreat"] = list(retreat)
         if best is None:
-            hint = self._boxed_in(es, obstacles_all, carry)
+            hint = self._boxed_in(es, obstacles_nav, carry)
             raise PredictionError("no feasible approach: " + "; ".join(reasons) + (f"; {hint}" if hint else ""))
         return best
 
@@ -1025,11 +1070,14 @@ class Esim:
                 return self._predict_drawer(es, skill, params)
             if skill == "pour":
                 return self._predict_pour(es, params)
+            if skill == "tighten":
+                return self._predict_tighten(es, params)
             if skill == "insert_screw_into_hole":
                 return self._predict_insert_screw_into_hole(es, params)
             raise PredictionError(
                 f"unknown skill {skill!r}; known: assemble_onto, navigate, pick, place, pour, open, close, "
-                "drive_screw, insert_screw_into_hole, seat_screw, fasten_onto, flip_assembly, regrasp_upright")
+                "tighten, drive_screw, insert_screw_into_hole, seat_screw, fasten_onto, flip_assembly, "
+                "regrasp_upright")
         except PredictionError as exc:
             blockers = self._describe_blockers(es)
             issues = [str(exc)] + [
@@ -1145,6 +1193,12 @@ class Esim:
         miscategorised = not self._affords(target, "graspable")
         if miscategorised and not tableware_sized:
             raise PredictionError(f"{target.id} ({target.category.value}) is not graspable")
+        if target.existence < self.config.min_target_existence:
+            # A grasp verifies its position, not its existence: closing on a phantom costs a dock,
+            # a retreat and a belief that is now wrong about holding something. Re-observe first.
+            raise PredictionError(f"{target.existence:.2f} existence probability is too low to pick {target.id} "
+                                  f"(under {self.config.min_target_existence:.2f}); observe it again first, "
+                                  "then predict the pick anew")
         support = self._support_of(es, target)
         # Upstream's floor rules: a small object off the floor is lifted clear of the base and
         # carried like one off a table; a large one (a chair) stays low in front of the robot.
@@ -1159,10 +1213,10 @@ class Esim:
             # Resting on the floor, its base is at floor level whatever the noisy height estimate says.
             tp[2] = max((target_top - target_bottom) / 2, self.lift_min)
         elif support is not None and self._affords(support, "support-surface") and not (assembly_grip and 'graspHeightM' in assembly_grip):
-            # Resting on a surface, its centre is no lower than the top plus half its height: a grasp
-            # closed below that presses what it holds into the surface and tips it (an edge grasp
-            # tips a box enough to spill what lies in it).
-            tp[2] = max(tp[2], entity_box(support)[2] + (target_top - target_bottom) / 2)
+            # Resting on a surface, its centre is near the top plus half its height: a grasp closed
+            # below that presses into the surface; a noisy ES centre well above it closes in air.
+            surface_lift = entity_box(support)[2] + (target_top - target_bottom) / 2
+            tp[2] = min(max(tp[2], surface_lift), surface_lift + 0.03)
         contents = self._contents(es, target)
         if self._affords(target, "pourable"):
             covering = self._covering(es, target)
@@ -1363,8 +1417,9 @@ class Esim:
         if p_miss > 0.05:
             issues.append(f"target position uncertainty {sigma * 100:.1f} cm gives {p_miss:.0%} miss probability; "
                           "observe the target more closely first")
-        # A grasp verifies itself: closing on nothing costs one retreat, nothing is damaged, and
-        # the miss is reported. So a doubtful target is only half the risk its doubt suggests.
+        # A grasp verifies its position: closing on nothing costs one retreat, nothing is damaged,
+        # and the miss is reported. Existence under ``min_target_existence`` was refused above;
+        # what remains of a doubtful target is only half the risk its doubt suggests.
         existence_risk = self.config.phantom_pick_cost * (1.0 - target.existence)
         if 1.0 - target.existence > 0.2:
             issues.append(f"target existence probability is only {target.existence:.2f}")
@@ -1403,6 +1458,16 @@ class Esim:
             plan["protectGraspFrame"] = True
         if approach_over is not None:
             plan["approachLift"] = approach_over
+        # Furniture-top picks: skill clamps live lift to this so a high ES centre does not close
+        # in air. Always use denser XY/Z probes on a support surface — staged pistols / bottles are
+        # often estimated taller than 0.12 m and otherwise keep the sparse probe set (seed2d: first
+        # stage pick missed with 7 probes, only later heads used 13).
+        if (support is not None and not on_floor and self._affords(support, "support-surface")
+                and approach_over is None):
+            # +5 cm lets denser downward probes reach below a soft/tall centre (teddy) without
+            # letting a wild live estimate climb far above the planned grasp.
+            plan["liftMax"] = float(grasp_z) + 0.05
+            plan["topGraspProbes"] = True
         if grasp_z > tp[2]:
             plan["graspDz"] = grasp_z - tp[2]  # an edge grasp closes on the rim, above the centre
         if grasp_offset is not None and any(grasp_offset):
@@ -1478,6 +1543,11 @@ class Esim:
             return self._predict_floor_place(es, held, params)
         if support is None:
             raise PredictionError(f"unknown support {params.get('on')!r}")
+        if support.existence < self.config.min_target_existence:
+            # Releasing onto a phantom support drops the load somewhere unplanned; re-observe first.
+            raise PredictionError(f"{support.existence:.2f} existence probability is too low to place on {support.id} "
+                                  f"(under {self.config.min_target_existence:.2f}); observe it again first, "
+                                  "then predict the place anew")
         support_orientation = getattr(support, "state_vars", {}).get("orientation")
         support_posture = ((support_orientation.value or {}).get("posture", {})
                            if support_orientation is not None else {})
@@ -1490,8 +1560,12 @@ class Esim:
                 held_h, held_half = 2.0 * held_half, held_h / 2.0
         mate, aligned_offset, aligned_yaw, align_issues = self._place_hole_align(es, held, support, params)
         place_params = dict(params)
+        # Transport yaw keeps interface parts oriented for later mating on a surface. A receptacle
+        # (open drawer, bowl) only needs the object inside; restoring graspWorldYawRad there often
+        # demands a near-π wrist turn at the single mouth dock and fails past wrist_yaw_max.
         if (aligned_offset is None and params.get("yaw") is None and self._screw_holes(held)
-                and not params.get("flip") and place_roll is None):
+                and not params.get("flip") and place_roll is None
+                and not self._affords(support, "receptacle")):
             orientation = getattr(held, "state_vars", {}).get("orientation")
             before = (orientation.value or {}).get("graspWorldYawRad") if orientation is not None else None
             if before is not None:
@@ -1633,9 +1707,15 @@ class Esim:
         tool_roll = (flip_roll if flip and not self.config.flip_in_air else place_roll)
         # Tip-down screw: tool_roll ±π/2 collapses lateral hold into height (tip under the body
         # centre); keep the reach-axis hold so the tip, not the empty pinch, lands on the hole.
-        approach, grip = self._grip_approach(es, self._anchor(es, support), held, spot, height, wrist_turn, flip, turn,
-                                             lifts=[over, height] if over is not None else None, tool_roll=tool_roll,
-                                             exact_rotation=assembly_placement is not None)
+        # An open drawer is the working edge: dock only at its room-facing mouth, and ignore the
+        # host furniture footprint there (it often still covers the mouth in the estimate).
+        drawer_mouth = self._affords(support, "pullable")
+        approach, grip = self._grip_approach(
+            es, self._anchor(es, support), held, spot, height, wrist_turn, flip, turn,
+            lifts=[over, height] if over is not None else None, tool_roll=tool_roll,
+            exact_rotation=assembly_placement is not None,
+            dock_clear=self._drawer_mouth_clear(es, support) if drawer_mouth else None,
+            mouth_only=drawer_mouth)
         assembly_turn = None
         if assembly_placement is not None and flip and not self.config.flip_in_air:
             low, high = assembly_placement
@@ -2226,16 +2306,21 @@ class Esim:
                        lifts: Sequence[float] | None = None,
                        tool_roll: float | None = None, exact_rotation: bool = False,
                        tool_over_spot: bool = False, endpoint_offset: np.ndarray | None = None,
-                       fixed_pitch: float | None = None, record_path: bool = False) -> tuple[dict, tuple[float, float]]:
+                       fixed_pitch: float | None = None, record_path: bool = False,
+                       dock_clear: set[str] | None = None,
+                       mouth_only: bool = False) -> tuple[dict, tuple[float, float]]:
         """The approach that brings the held object's centre over ``spot``, and the gripper's spot
         for it: on each side of the support, where the gripper goes for the heading docked there.
 
         ``tool_roll`` is the wrist roll held through the approach (``flip`` without ``flip_in_air``
         uses π; a place ``roll`` uses that angle); without it the current roll is kept.
+        ``tool_over_spot`` aims the gripper pinch at ``spot``; tip-down drive/insert should leave
+        it false and pass ``tool_roll`` so reach-axis hold still shifts the gripper.
         ``endpoint_offset`` is a tool endpoint in the current gripper frame; ``fixed_pitch``
         restricts the candidate tilt. ``record_path`` retains the checked approach waypoints
         and also checks the press heights and reverse withdrawal. Other placements use
         ``tool_roll`` to preserve the reach-axis grasp offset.
+        ``dock_clear`` / ``mouth_only`` are forwarded to :meth:`_approach` (open-drawer place).
         """
         def grip_at(heading: float) -> tuple[float, float]:
             try:
@@ -2313,7 +2398,8 @@ class Esim:
             hold_pitch = [0.0, None]
         approach = self._approach(es, anchor, grip_at, height, {held.id}, heading_issue=heading_issue,
                                   pitches=hold_pitch, lifts=lifts, wrist=wrist_at,
-                                  approach_path=None if flip and self.config.flip_in_air else path)
+                                  approach_path=None if flip and self.config.flip_in_air else path,
+                                  dock_clear=dock_clear, mouth_only=mouth_only)
         if record_path:
             approach['armApproach'] = checked_paths[(approach['yaw'], approach['reach'],
                                                      approach['retractReach'], approach.get('wristPitch', 0.))]
@@ -2749,6 +2835,65 @@ class Esim:
             out["blockers"] = receipt.get("blockers", [])
         return out
 
+    def _predict_tighten(self, es: SceneState, params: dict) -> dict:
+        """Stand the held screwdriver over a screw seated in a screw hole and turn it in.
+
+        The screw must already sit on a part's screw hole (place seats it there); the motion is
+        belief level — no thread is simulated, the estimator marks the screw fastened afterwards.
+
+        ``params``: ``target`` (the screw), optional ``turns``."""
+        held = self._held(es)
+        if held is None:
+            raise PredictionError("the gripper is not holding anything")
+        if not self._affords(held, "screwdriver"):
+            raise PredictionError(f"{held.id} ({held.category.value}) is not a screwdriver; pick the electric "
+                                  "screwdriver up first, standing it upright")
+        screw = es.find(params.get("target", ""))
+        if screw is None:
+            raise PredictionError(f"unknown target {params.get('target')!r}")
+        if screw.id == held.id:
+            raise PredictionError(f"{screw.id} is the held screwdriver, not a screw to tighten")
+        if screw.existence < self.config.min_target_existence:
+            raise PredictionError(f"{screw.existence:.2f} existence probability is too low to tighten {screw.id} "
+                                  f"(under {self.config.min_target_existence:.2f}); observe it again first, "
+                                  "then predict the tighten anew")
+        part, hole, gap = self._screw_seat(es, screw)
+        if part is None:
+            raise PredictionError(f"{screw.id} is not seated on any screw hole; place it onto the part's hole first")
+        issues = [f"{screw.id} sits {gap * 100:.1f} cm from {part.id}'s hole {hole['id']}"] \
+            if gap > self.config.tighten_seat_radius / 2 else []
+        _, _, head_top = entity_box(screw)
+        held_box, hb, ht = entity_box(held)
+        height = head_top + (ht - hb) / 2 + self.config.tighten_clearance + self._hold_dz(es, held)
+        spot = (float(screw.pose.value["p"][0]), float(screw.pose.value["p"][1]))
+        existence_risk = self.config.phantom_pick_cost * (1.0 - screw.existence)
+        risk = 1.0 - (1.0 - 0.05) * (1.0 - existence_risk)
+        approach, grip = self._grip_approach(es, self._anchor(es, part), held, spot, height, lambda _: 0.0, False)
+        plan = {**approach, "object": held.id, "support": part.id, "target": screw.id, "part": part.id,
+                "hole": hole["id"], "spot": list(spot), "gripSpot": list(grip), "lift": height,
+                "turns": max(1, int(params.get("turns", self.config.tighten_turns)))}
+        return self._receipt(es, "tighten", params, risk, issues, plan)
+
+    def _screw_seat(self, es: SceneState, screw: Entity) -> tuple[Entity | None, dict | None, float]:
+        """The screw hole ``screw`` sits at: the hole of some other part nearest it, within
+        ``tighten_seat_radius`` of its centre and 5 cm of its height, else ``(None, None, inf)``."""
+        px, py, pz = (float(v) for v in screw.pose.value["p"][:3])
+        best: tuple[Entity | None, dict | None, float] = (None, None, math.inf)
+        for ent in es.entities:
+            if ent.id in (screw.id, es.self_id) or not self._screw_holes(ent):
+                continue
+            p = ent.pose.value["p"]
+            yaw = yaw_from_quat(ent.pose.value["q"])
+            c, s = math.cos(yaw), math.sin(yaw)
+            for hole in self._screw_holes(ent):
+                hx = float(p[0]) + c * float(hole["p"][0]) - s * float(hole["p"][1])
+                hy = float(p[1]) + s * float(hole["p"][0]) + c * float(hole["p"][1])
+                if math.hypot(hx - px, hy - py) < best[2] and abs(float(p[2]) + float(hole["p"][2]) - pz) <= 0.05:
+                    best = (ent, hole, math.hypot(hx - px, hy - py))
+        if best[2] > self.config.tighten_seat_radius:
+            return None, None, math.inf
+        return best
+
     def _predict_floor_place(self, es: SceneState, held: Entity, params: dict) -> dict:
         """Put the held object down on the floor with its centre at ``at``: stand behind the spot
         facing it, drive straight in from a pre-pose, lower the object to just above the floor and
@@ -2927,21 +3072,23 @@ class Esim:
             handle = [float(v) for v in params["handle"]]
         else:
             handle = [box.cx + n[0] * (box.hx - 0.015), box.cy + n[1] * (box.hx - 0.015), (bottom + top) / 2]
-            # The drawer box wanders along the furniture. The handle is centred on the piece, and
-            # it is not proud of that piece's front: a swollen drawer puts the hand on empty air.
-            host = self._drawer_furniture(es, drawer)
-            if host is not None:
-                hbox = self._front(es, host)
-                hn = (math.cos(hbox.yaw), math.sin(hbox.yaw))
-                if n[0] * hn[0] + n[1] * hn[1] > 0.5:
-                    lateral = (-n[1], n[0])
-                    side = hbox.cx * lateral[0] + hbox.cy * lateral[1]
-                    along = handle[0] * n[0] + handle[1] * n[1]
-                    face = hbox.cx * hn[0] + hbox.cy * hn[1] + hbox.hx + 0.02
-                    if along > face + 0.03:
-                        along = face
-                    handle[0] = n[0] * along + lateral[0] * side
-                    handle[1] = n[1] * along + lateral[1] * side
+            # Open only: a swollen drawer box can put the planned handle past the real face on empty
+            # air. Close must push the handle that still sticks out — clamping it to the carcass
+            # face then driving ``distance ≈ opening`` parks the end pose inside the host.
+            if skill == "open":
+                host = self._drawer_furniture(es, drawer)
+                if host is not None:
+                    hbox = self._front(es, host)
+                    hn = (math.cos(hbox.yaw), math.sin(hbox.yaw))
+                    if n[0] * hn[0] + n[1] * hn[1] > 0.5:
+                        lateral = (-n[1], n[0])
+                        side = hbox.cx * lateral[0] + hbox.cy * lateral[1]
+                        along = handle[0] * n[0] + handle[1] * n[1]
+                        face = hbox.cx * hn[0] + hbox.cy * hn[1] + hbox.hx + 0.02
+                        if along > face + 0.03:
+                            along = face
+                        handle[0] = n[0] * along + lateral[0] * side
+                        handle[1] = n[1] * along + lateral[1] * side
         opening = self._opening(es, drawer)
         if skill == "open":
             if opening > 0.2:
@@ -2956,7 +3103,9 @@ class Esim:
             if opening < 0.05 and requested is None:
                 raise PredictionError(f"{drawer.id} is already closed")
             if requested is None:
-                distance = min(opening + 0.02, cfg.drawer_pull_max + 0.04)
+                # Overshoot the measured opening: ES protrusion often under-reads the joint, and
+                # a tight +2 cm stop leaves the world gate (2 cm) still open.
+                distance = min(opening + 0.05, cfg.drawer_pull_max + 0.04)
             else:
                 distance = min(max(float(requested), 0.05), cfg.drawer_pull_max + 0.04)
             sign = -1.0

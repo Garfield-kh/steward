@@ -103,6 +103,9 @@ class MotionConfig:
     # probe is at the estimate itself, then forward/back, then left/right, then other heights.
     grasp_probe_xy: tuple[float, ...] = (0.035, -0.035)
     grasp_probe_z: tuple[float, ...] = (-0.025, 0.025)
+    # Furniture-top / short pieces: wider XY and denser downward Z (flat toys on a sideboard).
+    grasp_probe_xy_top: tuple[float, ...] = (0.06, -0.06, 0.05, -0.05, 0.035, -0.035)
+    grasp_probe_z_top: tuple[float, ...] = (-0.015, -0.03, -0.045, -0.06, 0.02)
     settle_s: float = 0.4
     """Robot time after a joint command at which a joint still short of its target (sagging under
     a load) gets one corrected setpoint."""
@@ -166,12 +169,14 @@ class Job:
     started: float = 0.0
     finished: float | None = None
     log: list[str] = field(default_factory=TimedLog)
+    posterior: dict | None = None  # what a look after the skill found (observed z / settled state)
     postcondition: dict | None = None
 
     def to_dict(self) -> dict:
         return {"id": self.id, "skill": self.skill, "receipt": self.receipt, "state": self.state,
                 "message": self.message, "started": self.started, "finished": self.finished, "log": self.log[-20:],
                 "timing": getattr(self.log, "events", [])[-20:],
+                **({"posterior": self.posterior} if self.posterior else {}),
                 **({"postcondition": self.postcondition} if self.postcondition is not None else {})}
 
 
@@ -204,6 +209,8 @@ class SkillExecutor:
                  on_error: Callable[[str], None] | None = None, on_finish: Callable[[Job], None] | None = None,
                  on_begin: Callable[[str, dict], None] | None = None,
                  on_release: Callable[..., None] | None = None,
+                 posterior: Callable[[str, dict], dict] | None = None,
+                 fastened: Callable[[str, str, str | None], None] | None = None,
                  clock: RobotLink | None = None,
                  closed_drawers: Callable[[], list[str]] | None = None,
                  drawer_plan: Callable[..., tuple[dict | None, str]] | None = None,
@@ -238,6 +245,9 @@ class SkillExecutor:
         ``deploy_working``, when provided, joint-space unfolds a resting arm through HOME before the
         first planar dock (PARK/zero has no safe one-shot IK swing).
 
+        ``posterior`` re-perceives an object after a place or tighten and returns what is now
+        believed about it; ``fastened`` records a screw the tighten just drove into its part.
+
         ``verify_screw_seat`` / ``replan_pick`` / ``replan_insert_place`` back
         ``insert_screw_into_hole``: after each place, confirm the screw stands tip-down in a hole;
         on miss, re-pick and re-plan the place.
@@ -249,6 +259,8 @@ class SkillExecutor:
         self._on_finish = on_finish
         self._on_begin = on_begin
         self._on_release = on_release
+        self._posterior = posterior
+        self._fastened = fastened
         self._home_empty = home_empty
         self._placement_evidence = placement_evidence
         self._on_release_target = on_release_target
@@ -388,6 +400,8 @@ class SkillExecutor:
                 self._close(job, plan)
             elif skill == "pour":
                 self._pour(job, plan)
+            elif skill == "tighten":
+                self._tighten(job, plan)
             elif skill == "drive_screw":
                 # Kitchen tip-down plans carry pressLift/spot; assembly fastening uses body/screw.
                 if self._fasten is not None and "pressLift" not in plan and "spot" not in plan:
@@ -453,6 +467,20 @@ class SkillExecutor:
             job.log.append(f"[RSI_PLACE_YAW] {object_id} {angle['status']} "
                            f"axisDeltaDeg={angle.get('axisDeltaDeg')}; directed yaw unverified")
         job.message = f"release executed for {object_id}; placement unverified: {evidence['reason']}"
+
+    def _report_posterior(self, job: Job, object_id: str, plan: dict) -> None:
+        """Look at ``object_id`` once more after the skill moved it, and carry what is now believed
+        on the job record: the receipt succeeded kinematically, and its spot is the plan's until a
+        look says otherwise."""
+        if self._posterior is None:
+            return
+        try:
+            job.posterior = self._posterior(object_id, plan)
+        except Exception as exc:  # noqa: BLE001 - a failed posterior look must not fail a finished skill
+            job.log.append(f"posterior look failed: {type(exc).__name__}: {exc}")
+            return
+        post = job.posterior or {}
+        job.log.append("posterior: " + ", ".join(f"{k}={v}" for k, v in post.items() if k != "p"))
 
     def _release_clock(self, hold: str) -> None:
         try:
@@ -1294,6 +1322,9 @@ class SkillExecutor:
         # An elevated drawer grasp stores its working height in plan["lift"] (via graspDz); prefer it
         # so the live centre cannot pull the tilt back into the USD hole.
         pick_lift = plan["lift"] if plan.get("support") == "floor" else max(float(target["p"][2]), float(plan["lift"]))
+        # Furniture-top: do not let a high live centre pull the close well above the planned height.
+        if plan.get("liftMax") is not None:
+            pick_lift = min(pick_lift, float(plan["liftMax"]))
         # A tilted close at the dock reach may need a raised floor; tool-down closes (closePitch≈0)
         # keep the object's true height so the gripper does not close in air above a short bottle.
         close_pitch = abs(float(plan.get("closePitch") or 0.0))
@@ -1320,10 +1351,12 @@ class SkillExecutor:
         # is re-read before each probe -- it is best while the camera is right over the object.
         # Taken by its edge (docked facing that side), forward lies over what is inside it and back
         # over nothing: the probes keep along the edge.
+        top_probes = bool(plan.get("topGraspProbes"))
+        xy_probes = self.config.grasp_probe_xy_top if top_probes else self.config.grasp_probe_xy
         probes = [(0.0, 0.0, 0.0)]
         if not (ox or oy):
-            probes += [(dx, 0.0, 0.0) for dx in self.config.grasp_probe_xy]
-        probes += [(0.0, dy, 0.0) for dy in self.config.grasp_probe_xy]
+            probes += [(dx, 0.0, 0.0) for dx in xy_probes]
+        probes += [(0.0, dy, 0.0) for dy in xy_probes]
         # Drawer / over-rim grasps often sit a centimetre high after the approach; try down first —
         # but not while still tilted: a centimetre lower at long reach sits in the USD hole.
         # Use the live wrist (approach may have untilted for close) rather than the plan's pitch.
@@ -1331,9 +1364,12 @@ class SkillExecutor:
         # Mild close tilt (~0.35) still allows centimetre height probes; only skip when steep.
         # Drawer / rim closes: only probe upward. Negative dz untilts to tool-down at ~0.60 m, and
         # that height has no IK past ~0.35 m (grasp missed with pitch=0.00).
+        # Furniture-top short pieces: denser downward Z so a slightly high centre still finds contact.
         if live_pitch <= 0.5:
             if plan.get("approachLift") is not None:
                 z_probes = (0.02, 0.04)
+            elif top_probes:
+                z_probes = self.config.grasp_probe_z_top
             else:
                 z_probes = self.config.grasp_probe_z
             probes += [(0.0, 0.0, dz) for dz in z_probes]
@@ -1380,7 +1416,10 @@ class SkillExecutor:
                         floor = float(plan["lift"]) + dz
                         need = max(0.05, min(td_cap, self._reach_to(goal.tolist())))
                     self._set_joint("reach", need, ramp=False)
-                    self._set_joint("lift", max(float(latest["p"][2] + dz), floor))
+                    lift_goal = max(float(latest["p"][2] + dz), floor)
+                    if plan.get("liftMax") is not None:
+                        lift_goal = min(lift_goal, float(plan["liftMax"]) + dz)
+                    self._set_joint("lift", lift_goal)
                 except (OutOfReach, SkillFailed) as e:
                     job.log.append(f"skipped probe {n}: {e}")
                     continue
@@ -1696,6 +1735,7 @@ class SkillExecutor:
             except (SkillFailed, OutOfReach):
                 pass
         job.message = f"placed {plan['object']} on {plan['support']}"
+        self._report_posterior(job, plan["object"], plan)
         self._report_placement(job, plan["object"])
 
     def _insert_screw_into_hole(self, job: Job, plan: dict) -> None:
@@ -1798,6 +1838,32 @@ class SkillExecutor:
             self._ramp_joints(target, self.config.wrist_turn_s)
         self._backoff(plan)
         job.message = f"drove {plan['target']} with {plan['object']}"
+
+    def _tighten(self, job: Job, plan: dict) -> None:
+        """Stand the held screwdriver over the screw and turn it in: the wrist rolls a full turn at
+        a time (wrapping at its stop, where the two ends are the same heading), and the belief is
+        told the screw is fastened when the turns are done."""
+        self._dock(job, plan)
+        grip = plan.get("gripSpot", plan["spot"])
+        self._align_lateral(grip)
+        self._restore_planned_reach(plan, grip)
+        self._set_joint("lift", plan["lift"])
+        self._reach_out(grip, plan.get("wristPitch"))
+        roll0 = float(self._state()["joints"].get("wrist_roll", 0.0))
+        span = math.pi - abs(roll0)  # stay inside the wrist's +-pi stops (full turn at roll 0)
+        for _ in range(int(plan.get("turns", 2))):
+            self._ramp_joint("wrist_roll", roll0 + span, self.config.wrist_turn_s)
+            # +pi and -pi are the same heading: continue the turn from the other side of the wrap.
+            self._command({"wrist_roll": roll0 - span})
+        self._set_joint("wrist_roll", roll0)
+        if self._fastened is not None:
+            self._fastened(plan["target"], plan["part"], plan.get("hole"))
+        job.log.append(f"tightened {plan['target']} into {plan['part']}")
+        self._exit_long_reach(plan)
+        self._set_joint("lift", max(plan["lift"], self.config.stow_lift))
+        self._backoff(plan)
+        job.message = f"tightened {plan['target']} into {plan['part']}"
+        self._report_posterior(job, plan["part"], plan)
 
     def _pour(self, job: Job, plan: dict) -> None:
         """Hold the container low over the spot, tip it slowly about the arm, wait for the contents
@@ -2127,4 +2193,5 @@ class SkillExecutor:
         self._backoff(plan)
         self._set_joint("lift", self.config.stow_lift)
         job.message = f"placed {plan['object']} on the floor"
+        self._report_posterior(job, plan["object"], plan)
         self._report_placement(job, plan["object"])

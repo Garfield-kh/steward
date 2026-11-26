@@ -169,6 +169,63 @@ def _fresh_look_prompts(category: str, color: str | None) -> tuple[str, ...]:
     return tuple(dict.fromkeys(out))[:3]  # three prompts at most: each one is a segmenter round trip
 
 
+def _anonymous_reading(frame: dict, cam: dict, believed: np.ndarray, cfg) -> np.ndarray | None:
+    """The world-frame centre of the anonymous instance that stands where ``believed`` says, or None.
+
+    Without a robot-side segmenter the world's frames carry class-agnostic instance masks whose ids
+    are shuffled every frame and carry no identity, so the instance meant is chosen geometrically,
+    exactly like a segmented look: of the instances whose depth reads, the nearest to the belief
+    that also agrees in height (``relocate_max_dz_m``) and stays within ``relocate_max_jump_m``.
+    The reading is the depth's own median, not the plan's spot."""
+    mask, depth = frame.get("mask"), frame["depth"]
+    if mask is None:
+        return None
+    h, w = depth.shape
+    f = (h / 2.0) / math.tan(math.radians(frame["fovy"]) / 2.0)
+    cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
+    rot = matrix_from_quat(cam["q"])
+    origin = np.asarray(cam["p"], float)
+    ys, xs = np.nonzero(mask)
+    labels = mask[ys, xs]
+    best, best_d = None, cfg.relocate_max_jump_m
+    for label in np.unique(labels):
+        sel = labels == label
+        dd = depth[ys[sel], xs[sel]].astype(np.float32)
+        ok = (dd > 0.05) & (dd < 6.0)
+        if int(ok.sum()) < cfg.relocate_min_points:
+            continue
+        pts = np.stack([dd[ok], -(xs[sel][ok] - cx) * dd[ok] / f, -(ys[sel][ok] - cy) * dd[ok] / f], axis=1)
+        centre = np.median(pts @ rot.T + origin, axis=0)
+        if abs(float(centre[2]) - float(believed[2])) > cfg.relocate_max_dz_m:
+            continue  # an instance at another height is another thing (a table edge, the floor)
+        dist = float(np.linalg.norm(centre - believed[:3]))
+        if dist < best_d:
+            best, best_d = centre, dist
+    return best
+
+
+def _detection_reading(frame: dict, cams: dict, believed: np.ndarray, cfg) -> np.ndarray | None:
+    """The world-frame centre of the detection standing where ``believed`` says, or None.
+
+    Ideal-mode frames carry the detector's own noisy boxes instead of masks, so the fresh look
+    reads them too: of the detections, the nearest to the belief that agrees in height
+    (``relocate_max_dz_m``) and stays within ``relocate_max_jump_m`` — the same gates as a masked
+    look, applied to the same noisy sensor channel the fusion consumes, placed exactly as
+    :meth:`EgoEstimator.update` places them. ``cams`` maps the frame's camera ids to their poses."""
+    best, best_d = None, cfg.relocate_max_jump_m
+    for det in frame.get("detections", []):
+        cam = cams.get(det.get("camera", next(iter(cams), None)))
+        if cam is None:
+            continue
+        centre = np.asarray(pose_compose(cam, det["pose"])["p"], float)
+        if abs(float(centre[2]) - float(believed[2])) > cfg.relocate_max_dz_m:
+            continue  # a detection at another height is another thing (a table edge, the floor)
+        dist = float(np.linalg.norm(centre - believed[:3]))
+        if dist < best_d:
+            best, best_d = centre, dist
+    return best
+
+
 class RobotLink:
     """HTTP client of one robot port: the only path between the Ego System and the world."""
 
@@ -231,14 +288,17 @@ class RobotLink:
         this control loop or input run (:meth:`WorldSim.wait_until`); return the world time then."""
         body = {"hold": hold, "rank": rank, "pulls": pulls, **({} if t is None else {"until": t})}
         deadline = time.monotonic() + 60.0
+        last = ""
         while True:
             try:
                 return call("POST", f"{self.url}/clock/wait", body, timeout=6)["t"]
             except HttpError as exc:
                 if exc.status != 504 or self.closed:
                     raise
+                last = str(exc)
                 if time.monotonic() >= deadline:
-                    raise SkillFailed("robot clock wait timed out after 60 s") from exc
+                    raise SkillFailed("robot clock wait timed out after 60 s" +
+                                      (f" ({last})" if "paused" in last else "")) from exc
 
     def arm(self, hold: str, t: float | None = None, rank: int = 0, pulls: bool = True) -> None:
         """Register ``hold`` at world time ``t`` (``None``: now) without waiting, so the world stops for
@@ -352,6 +412,7 @@ class EgoRuntime:
         self._thread: threading.Thread | None = None
         self.receipts: dict[str, dict] = {}
         self.last_error: str | None = None
+        self._last_clock_alert: str | None = None
         self.control_owner: str | None = None
         self.perception_mode: str | None = None
         self.alerts: list[dict] = []
@@ -371,6 +432,7 @@ class EgoRuntime:
                                       self._mark_held, self.config.motion,
                                       shift=self._shift_track, on_error=lambda msg: self.alert(msg, "skill"),
                                       on_finish=self._skill_finished, on_release=self._released,
+                                      posterior=self._posterior_look, fastened=self._fastened,
                                       placement_evidence=self._placement_evidence,
                                       on_release_target=self._released,
                                       assemble_onto=self._assemble_onto,
@@ -392,6 +454,7 @@ class EgoRuntime:
         # The belief part of the motion state, recorded under ``_lock`` at each read and around each
         # perception update; :meth:`_motion_state` falls back on it while another thread holds the lock.
         self._motion_belief: dict | None = None
+        self._latest_frame: dict | None = None  # the perception loop's latest primary camera frame, for fresh looks
         self.face_error: str | None = None  # why the latest camera image for faces could not be fetched
         self._face_thread: threading.Thread | None = None
         from steward.ego.view import EgoViewRenderer
@@ -442,6 +505,12 @@ class EgoRuntime:
         if mode in ("rgbd", "rgbd-segmenter"):
             due = [c for c in cameras if mode == "rgbd" or self._keyframe_due(frame, c)]
             whole = [decode_rgbd(self.link.rgbd(camera)) for camera in due]
+            if mode == "rgbd" and whole:
+                # Keep the primary camera's frame for fresh looks: renders stay on this thread
+                # alone. One fetched from a skill thread starves against that skill's own clock
+                # hold (the world does not pump while pinned) and interleaves its mask-shuffle
+                # draws with perception's, so a recorded run would no longer replay exactly.
+                self._latest_frame = whole[0]
             if mode == "rgbd-segmenter":
                 whole = [rgbd for rgbd in whole if not self._idle_near_frame(rgbd)]
             pairs = [(decimated(rgbd, self._perception_rows(rgbd), self.config.depth_join), rgbd) for rgbd in whole]
@@ -463,6 +532,7 @@ class EgoRuntime:
             return
         frame = {**frame, "cameras": [c for c in frame.get("cameras", []) if c["id"] in cameras],
                  "detections": [d for d in frame.get("detections", []) if d.get("camera") in cameras]}
+        self._latest_frame = frame  # fresh looks read this frame; renders stay on this thread alone
         with self._lock:
             if self._new_episode(frame):
                 self._restart()
@@ -538,10 +608,16 @@ class EgoRuntime:
         return elapsed >= cfg.keyframe_min_s and (moved or turned or handled or settled)
 
     def _arm_moved(self, last: dict, frame: dict) -> bool:
-        """Whether the arm or gripper changed enough since ``last`` for a new near-camera keyframe."""
-        grip, was = frame["gripper"], last["gripper"]
-        if grip.get("state") != was.get("state") or bool(grip.get("holding")) != bool(was.get("holding")):
+        """Whether arm motion or any gripper's state changed enough for a near-camera keyframe."""
+        grips = frame.get("grippers") or {"gripper": frame["gripper"]}
+        previous = last.get("grippers") or {"gripper": last["gripper"]}
+        if grips.keys() != previous.keys():
             return True
+        for lid, grip in grips.items():
+            was = previous[lid]
+            if (grip.get("state") != was.get("state")
+                    or any(bool(grip.get(key)) != bool(was.get(key)) for key in ("holding", "holdingHandle"))):
+                return True
         for jid, kind in self._arm_joints.items():
             if jid not in frame["joints"] or jid not in last["joints"]:
                 continue
@@ -785,6 +861,7 @@ class EgoRuntime:
         self._pose_sample = None
         self._still_since = None
         self._motion_belief = None
+        self._latest_frame = None  # another episode's pixels say nothing about this one's objects
 
     def _loop(self) -> None:
         """Perceive every ``1 / perception_hz`` seconds of world time, from the time the runtime started;
@@ -800,6 +877,15 @@ class EgoRuntime:
                 self.last_error = f"robot port unavailable: {exc}"
                 time.sleep(period)
                 continue
+            except SkillFailed as exc:
+                # A paused world (a perception fault waiting for the operator) or a slow clock must not
+                # kill perception for the rest of the episode: log it once, keep waiting, resume on ack.
+                self.last_error = f"robot clock: {exc}"
+                if self.last_error != self._last_clock_alert:
+                    self._last_clock_alert = self.last_error
+                    self.alert(f"感知循环等待世界时钟失败：{exc}", "runtime")
+                time.sleep(period)
+                continue
             try:
                 # The whole update runs under the hold, not only the remote request: a fill, peel
                 # or fusion longer than the lease would let the world step mid-update, and the
@@ -810,6 +896,7 @@ class EgoRuntime:
                 if k % telemetry_every == 0:
                     self.link.telemetry(self._telemetry_scene())
                 self.last_error = None
+                self._last_clock_alert = None
             except (HttpError, OSError) as exc:
                 self.last_error = f"robot port unavailable: {exc}"
             except Exception as exc:  # noqa: BLE001 - perception must keep running; the operator is alerted
@@ -954,6 +1041,31 @@ class EgoRuntime:
             if not self._same_episode(generation, body):  # the skill or the body is another episode's
                 return
             self.estimator.release_at(track_id, spot, body=body, target=target, tip_roll=tip_roll)
+
+    def _posterior_look(self, object_id: str, _plan: dict) -> dict:
+        """After a place or tighten, take the look a pick gets and report what the belief now says
+        about the object: its observed height and settled state, and whether the position it stands
+        at is still the release plan's prediction rather than an observation."""
+        self._fresh_look(object_id)  # the raw look, not the pick's throttle: this one is the evidence
+        with self._lock:
+            track = self.estimator.tracks.get(object_id)
+            if track is None:
+                return {"observed": False, "note": f"{object_id} is no longer believed"}
+            return {"observed": track.predicted_spot is None, "settled": bool(track.settled),
+                    "existence": round(float(track.existence), 2),
+                    "z": round(float(track.pos[2]), 3),
+                    "p": [round(float(v), 3) for v in track.pos],
+                    "predictedSpot": None if track.predicted_spot is None
+                    else [round(float(v), 3) for v in track.predicted_spot]}
+
+    def _fastened(self, screw_id: str, part_id: str, hole_id: str | None) -> None:
+        """A tighten finished: the screw stops being a separate object and its hole is marked done."""
+        generation = self._skill_generation()
+        with self._lock:
+            if generation != self._generation:  # the skill belongs to another episode's belief
+                return
+            if self.estimator.mark_fastened(screw_id, part_id, hole_id):
+                self._publish_view_scene()
 
     def _skill_generation(self) -> int:
         """The generation the running skill was predicted in: a callback reached after a reset (the
@@ -1809,6 +1921,48 @@ class EgoRuntime:
             self._publish_view_scene()
         return next(o for o in self.summary()["objects"] if o["id"] == entity)
 
+    def stage_protect(self, request: dict) -> dict:
+        """Protect a mission-staged spot from furniture false-positive drops.
+
+        Chores parks drawer items on a sideboard top; without an anchor the pistol heuristic
+        drops anything there taller than the drawer band. The anchor is XY-based so a renumbered
+        track at the same spot stays protected without freezing fusion (unlike ``pinned``).
+        ``clear: true`` removes an anchor.
+
+        :param request: ``{xy, role?, radius?, clear?}``. ``xy`` is world XY; with ``clear`` it
+            selects which anchor to remove (omit ``xy`` to clear all). Optional ``pin``+``entity``
+            pins a live track for a short window (fusion freezes while pinned).
+        :returns: ``{anchors, cleared?, pinned?}``.
+        """
+        clear = bool(request.get("clear"))
+        xy = request.get("xy")
+        with self._lock:
+            if clear:
+                cleared = self.estimator.clear_stage_spot(xy if isinstance(xy, (list, tuple)) else None)
+                return {"anchors": list(self.estimator._stage_protect), "cleared": cleared}
+            if not isinstance(xy, (list, tuple)) or len(xy) < 2:
+                raise ValueError("stage-protect needs xy=[x, y]")
+            role = request.get("role")
+            if role is not None and (not isinstance(role, str) or not role.strip()):
+                raise ValueError("role must be a non-empty string")
+            radius = request.get("radius")
+            if radius is None:
+                anchor = self.estimator.protect_stage_spot(xy, role=role)
+            else:
+                anchor = self.estimator.protect_stage_spot(xy, role=role, radius=float(radius))
+            pinned = False
+            entity = request.get("entity")
+            if request.get("pin") and isinstance(entity, str):
+                track = self.estimator.tracks.get(entity)
+                if track is not None:
+                    if not track.pinned:
+                        track.pin_observed_age = max(0., self.estimator.stamp - track.last_seen)
+                    track.pinned = True
+                    if role:
+                        track.label = role
+                    pinned = True
+            return {"anchors": list(self.estimator._stage_protect), "anchor": anchor, "pinned": pinned}
+
     def forget(self, request: dict) -> dict:
         """Remove an Ego-State object the robot's agent judged a false perception: implausible where
         it is believed to be and not perceived again on a fresh look at its place.
@@ -2018,20 +2172,27 @@ class EgoRuntime:
         return self._fresh_look(target_id)
 
     def _fresh_look(self, target_id: str) -> bool:
-        """Re-place the pick's target from a class-prompted segmentation taken right now.
+        """Re-place the pick's target from a segmentation taken right now.
 
         An accumulated position can be biased by the partial views it was fused from — a rim arc
         read as confidently as the bowl itself. The action deserves the best single look there is,
-        and this is it: the robot stands beside the object and the camera points at it. The class
-        name is the robot's own prior (another name for the same thing is tried too, because a mug
-        is a cup to half the world); the believed position only decides which returned instance is
-        the one meant. The track keeps its identity; only where it stands is restated."""
+        and this is it: the robot stands beside the object and the camera points at it. With a
+        robot-side segmenter the class name is the robot's own prior (another name for the same
+        thing is tried too, because a mug is a cup to half the world); without one the frame's own
+        anonymous instance masks are the segmentation. The believed position only decides which
+        returned instance is the one meant. The track keeps its identity; only where it stands is
+        restated."""
         url = os.environ.get("STEWARD_SEGMENTER_URL")
         track = self.estimator.tracks.get(target_id)
-        if url is None or track is None or not body_ok(track.category):
-            print(f"ego: fresh look for {target_id} skipped (url={'set' if url else 'unset'}, "
-                  f"track={'known' if track else 'unknown'})", file=sys.stderr, flush=True)
+        if track is None or not body_ok(track.category):
+            print(f"ego: fresh look for {target_id} skipped (track={'known' if track else 'unknown'})",
+                  file=sys.stderr, flush=True)
             return False
+        if url is None:
+            # No robot-side segmenter: the world's own frame geometry (anonymous masks in phase1,
+            # the detector's noisy boxes in phase0) is the segmentation channel, read from the
+            # perception loop's latest frame.
+            return self._fresh_look_latest(target_id, track)
         try:
             frame = decode_rgbd(self.link.rgbd())
             cam = self.estimator.camera_pose()
@@ -2126,6 +2287,45 @@ class EgoRuntime:
                 moved = self.estimator.relocate(target_id, best)
             if moved:
                 print(f"ego: fresh look placed {target_id} at ({best[0]:.3f}, {best[1]:.3f}, {best[2]:.3f})",
+                      file=sys.stderr, flush=True)
+            return bool(moved)
+        except Exception as exc:
+            print(f"ego: fresh look for {target_id} failed: {exc}", file=sys.stderr, flush=True)
+            return False
+
+    def _fresh_look_latest(self, target_id: str, track) -> bool:
+        """Re-place the target from the perception loop's latest frame, read by itself.
+
+        Without a segmenter URL there is no service to ask: phase1 worlds send anonymous instance
+        masks with every frame and phase0 worlds the detector's own noisy boxes, so the latest
+        primary frame carries the geometry (never a render from this skill thread — see
+        :meth:`_poll_once`). The instance standing where the belief says is the fresh reading,
+        under the same gates as a segmented look."""
+        try:
+            frame = self._latest_frame
+            if frame is None:
+                print(f"ego: fresh look for {target_id} skipped (no perception frame to read)",
+                      file=sys.stderr, flush=True)
+                return False
+            believed = np.asarray(track.pos, float)
+            if frame.get("mask") is not None:
+                what = "the frame's own masks"
+                centre = _anonymous_reading(frame, self.estimator.camera_pose(), believed, self.config)
+            else:
+                what = "the frame's own detections"
+                cameras = [c["id"] for c in frame.get("cameras", []) if c["id"] in self.estimator.cameras] \
+                    or [self.estimator.primary_camera]
+                cams = {c: self.estimator.camera_pose(camera=c) for c in cameras}
+                centre = _detection_reading(frame, cams, believed, self.config)
+            if centre is None:
+                print(f"ego: fresh look for {target_id} ({track.category}): no instance in {what} "
+                      f"within {self.config.relocate_max_jump_m:.2f} m of the belief",
+                      file=sys.stderr, flush=True)
+                return False
+            with self._lock:
+                moved = self.estimator.relocate(target_id, centre)
+            if moved:
+                print(f"ego: fresh look placed {target_id} at ({centre[0]:.3f}, {centre[1]:.3f}, {centre[2]:.3f})",
                       file=sys.stderr, flush=True)
             return bool(moved)
         except Exception as exc:
